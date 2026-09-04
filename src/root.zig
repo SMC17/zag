@@ -76,6 +76,14 @@ pub const terminal = struct {
     pub const session = @import("terminal/session.zig");
 };
 
+pub const ai = struct {
+    pub const capability = @import("ai/capability.zig");
+    pub const policy = @import("ai/policy.zig");
+    pub const approval = @import("ai/approval.zig");
+    pub const tools = @import("ai/tools.zig");
+    pub const runtime = @import("ai/runtime.zig");
+};
+
 pub const version = "0.1.0";
 
 /// Reference every declaration in the tree so that `zig build test` compiles
