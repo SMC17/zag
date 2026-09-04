@@ -82,7 +82,15 @@ pub const Money = struct {
         } else {
             var scale: u64 = 1;
             for (0..digits) |_| scale *= 10;
-            try w.print("{d}.{d:0>[2]}", .{ magnitude / scale, magnitude % scale, @as(usize, digits) });
+            try w.print("{d}.", .{magnitude / scale});
+            // The fractional part is padded by hand so that 1.05 never prints
+            // as 1.5.
+            var remainder = magnitude % scale;
+            var divisor = scale / 10;
+            while (divisor > 0) : (divisor /= 10) {
+                try w.writeByte(@intCast('0' + (remainder / divisor)));
+                remainder %= divisor;
+            }
         }
         try w.print(" {s}", .{&self.currency.value});
     }
@@ -141,6 +149,20 @@ test "money formats and parses exactly" {
     const ntext = try std.fmt.allocPrint(gpa, "{f}", .{negative});
     defer gpa.free(ntext);
     try std.testing.expectEqualStrings("-0.50 USD", ntext);
+}
+
+test "money pads minor units" {
+    const gpa = std.testing.allocator;
+    const five_cents = try Money.init(105, "USD");
+    const text = try std.fmt.allocPrint(gpa, "{f}", .{five_cents});
+    defer gpa.free(text);
+    try std.testing.expectEqualStrings("1.05 USD", text);
+    try std.testing.expectEqual(@as(i64, 105), (try Money.parse(text)).minor);
+
+    const kwd = try Money.init(1004, "KWD");
+    const ktext = try std.fmt.allocPrint(gpa, "{f}", .{kwd});
+    defer gpa.free(ktext);
+    try std.testing.expectEqualStrings("1.004 KWD", ktext);
 }
 
 test "money refuses to mix currencies" {

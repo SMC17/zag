@@ -79,6 +79,20 @@ pub const Hash = struct {
         return buf[0..];
     }
 
+    pub fn jsonStringify(self: Hash, jw: *std.json.Stringify) !void {
+        var buf: [text_len]u8 = undefined;
+        try jw.write(self.toText(&buf));
+    }
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Hash {
+        const token = try source.nextAllocMax(allocator, .alloc_if_needed, options.max_value_len.?);
+        const slice = switch (token) {
+            inline .string, .allocated_string => |s| s,
+            else => return error.UnexpectedToken,
+        };
+        return parse(slice) catch error.InvalidCharacter;
+    }
+
     pub fn parse(text: []const u8) error{InvalidHash}!Hash {
         const body = if (std.mem.startsWith(u8, text, "b3:")) text[3..] else text;
         if (body.len != 64) return error.InvalidHash;

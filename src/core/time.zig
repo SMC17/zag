@@ -214,6 +214,22 @@ pub const Timestamp = struct {
         try self.writeIso(w, .millisecond);
     }
 
+    /// Instants cross interfaces as ISO 8601 strings, never as numbers, so
+    /// that a stored value is readable without knowing our epoch or unit.
+    pub fn jsonStringify(self: Timestamp, jw: *std.json.Stringify) !void {
+        var buf: [text_len_max]u8 = undefined;
+        try jw.write(self.toIso(&buf, .millisecond));
+    }
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Timestamp {
+        const token = try source.nextAllocMax(allocator, .alloc_if_needed, options.max_value_len.?);
+        const slice = switch (token) {
+            inline .string, .allocated_string => |s| s,
+            else => return error.UnexpectedToken,
+        };
+        return parseIso(slice) catch error.InvalidCharacter;
+    }
+
     /// Parse an ISO 8601-1 extended date-time. Accepts `Z`, `+hh:mm`, `+hhmm`
     /// and `+hh` offsets, `T` or a single space as the date/time separator, and
     /// `,` or `.` as the decimal sign. The result is normalised to UTC.
@@ -370,7 +386,9 @@ pub const Duration = struct {
                     var f = frac;
                     var digits: usize = 9;
                     while (digits > 1 and @mod(f, 10) == 0) : (digits -= 1) f = @divTrunc(f, 10);
-                    try w.print("{d}.{d:0>[2]}S", .{ secs, f, digits });
+                    try w.print("{d}.", .{secs});
+                    try writePadded(w, @intCast(f), digits);
+                    try w.writeAll("S");
                 }
             }
         }
@@ -378,6 +396,22 @@ pub const Duration = struct {
 
     pub fn format(self: Duration, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try self.writeIso(w);
+    }
+
+    pub fn jsonStringify(self: Duration, jw: *std.json.Stringify) !void {
+        var buf: [64]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        self.writeIso(&w) catch unreachable;
+        try jw.write(w.buffered());
+    }
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Duration {
+        const token = try source.nextAllocMax(allocator, .alloc_if_needed, options.max_value_len.?);
+        const slice = switch (token) {
+            inline .string, .allocated_string => |s| s,
+            else => return error.UnexpectedToken,
+        };
+        return parseIso(slice) catch error.InvalidCharacter;
     }
 
     /// Parse the subset of ISO 8601 durations that carries an exact length:
@@ -423,6 +457,29 @@ pub const Duration = struct {
         }
         if (!saw_field) return error.InvalidFormat;
         return .{ .ns = sign * total };
+    }
+
+    /// Write `value` with leading zeros to exactly `width` digits.
+    fn writePadded(w: *std.Io.Writer, value: u64, width: usize) std.Io.Writer.Error!void {
+        var digits_buf: [20]u8 = undefined;
+        var n: usize = 0;
+        var v = value;
+        if (v == 0) {
+            digits_buf[0] = '0';
+            n = 1;
+        } else {
+            while (v > 0) : (v /= 10) {
+                digits_buf[n] = @intCast('0' + (v % 10));
+                n += 1;
+            }
+        }
+        var pad = if (width > n) width - n else 0;
+        while (pad > 0) : (pad -= 1) try w.writeByte('0');
+        var i = n;
+        while (i > 0) {
+            i -= 1;
+            try w.writeByte(digits_buf[i]);
+        }
     }
 
     fn parseDecimal(text: []const u8) !f64 {
@@ -489,6 +546,23 @@ test "timestamp parses offsets and normalises to utc" {
     try std.testing.expectError(error.InvalidDate, Timestamp.parseIso("2026-02-30T00:00:00Z"));
 }
 
+test "fractional durations pad correctly" {
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try Duration.fromMillis(1250).writeIso(&w);
+    try std.testing.expectEqualStrings("PT1.25S", w.buffered());
+
+    var buf2: [64]u8 = undefined;
+    var w2 = std.Io.Writer.fixed(&buf2);
+    try Duration.fromMillis(1005).writeIso(&w2);
+    try std.testing.expectEqualStrings("PT1.005S", w2.buffered());
+
+    var buf3: [64]u8 = undefined;
+    var w3 = std.Io.Writer.fixed(&buf3);
+    try (Duration{ .ns = 3_600_000_000_123 }).writeIso(&w3);
+    try std.testing.expectEqualStrings("PT1H0.000000123S", w3.buffered());
+}
+
 test "duration writes and parses iso form" {
     var buf: [64]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
@@ -502,4 +576,22 @@ test "duration writes and parses iso form" {
     try std.testing.expectEqual(@as(i64, 250 * ns_per_ms), with_fraction.ns);
 
     try std.testing.expectError(error.UnsupportedPrecision, Duration.parseIso("P1M"));
+}
+
+test "instants and durations round trip through json" {
+    const gpa = std.testing.allocator;
+    const Holder = struct { at: Timestamp, took: Duration };
+    const original: Holder = .{
+        .at = try Timestamp.parseIso("2026-09-04T20:41:31.500Z"),
+        .took = Duration.fromMinutes(90),
+    };
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    try std.json.Stringify.value(original, .{}, &aw.writer);
+    try std.testing.expectEqualStrings("{\"at\":\"2026-09-04T20:41:31.500Z\",\"took\":\"PT1H30M\"}", aw.written());
+
+    const parsed = try std.json.parseFromSlice(Holder, gpa, aw.written(), .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(original.at.ns, parsed.value.at.ns);
+    try std.testing.expectEqual(original.took.ns, parsed.value.took.ns);
 }

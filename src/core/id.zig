@@ -142,6 +142,15 @@ pub fn TypedId(comptime prefix: []const u8) type {
             var buf: [text_len]u8 = undefined;
             try jw.write(self.toText(&buf));
         }
+
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Self {
+            const token = try source.nextAllocMax(allocator, .alloc_if_needed, options.max_value_len.?);
+            const slice = switch (token) {
+                inline .string, .allocated_string => |s| s,
+                else => return error.UnexpectedToken,
+            };
+            return parse(slice) catch error.InvalidCharacter;
+        }
     };
 }
 
@@ -204,4 +213,20 @@ test "identifier types do not mix" {
     const block = gen.next(BlockId);
     var buf: [BlockId.text_len]u8 = undefined;
     try std.testing.expectError(error.InvalidId, SessionId.parse(block.toText(&buf)));
+}
+
+test "identifiers round trip through json" {
+    const gpa = std.testing.allocator;
+    var gen: Generator = .init(21, 1_788_000_000_000);
+    const Holder = struct { block: BlockId, session: SessionId };
+    const original: Holder = .{ .block = gen.next(BlockId), .session = gen.next(SessionId) };
+
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    try std.json.Stringify.value(original, .{}, &aw.writer);
+
+    const parsed = try std.json.parseFromSlice(Holder, gpa, aw.written(), .{});
+    defer parsed.deinit();
+    try std.testing.expect(original.block.eql(parsed.value.block));
+    try std.testing.expect(original.session.eql(parsed.value.session));
 }
