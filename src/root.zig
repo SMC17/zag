@@ -57,6 +57,25 @@ pub const language = struct {
     pub const easy_read = @import("language/easy_read.zig");
 };
 
+pub const events = struct {
+    pub const event = @import("events/event.zig");
+    pub const log = @import("events/log.zig");
+    pub const graph = @import("events/graph.zig");
+};
+
+pub const workspace = struct {
+    pub const block = @import("workspace/block.zig");
+    pub const model = @import("workspace/model.zig");
+};
+
+pub const terminal = struct {
+    pub const vt = @import("terminal/vt.zig");
+    pub const grid = @import("terminal/grid.zig");
+    pub const shell_integration = @import("terminal/shell_integration.zig");
+    pub const pty = @import("terminal/pty.zig");
+    pub const session = @import("terminal/session.zig");
+};
+
 pub const version = "0.1.0";
 
 /// Reference every declaration in the tree so that `zig build test` compiles
