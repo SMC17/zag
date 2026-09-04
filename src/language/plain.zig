@@ -692,13 +692,20 @@ fn statesConsequence(source: []const u8) bool {
 }
 
 /// A permission prompt must name the operation and the thing it affects.
+/// A path, a quoted command, a command flag or a host name all count as
+/// naming it; an abstract phrase such as "the proposed operation" does not.
 fn namesSubject(source: []const u8) bool {
-    if (std.mem.indexOfScalar(u8, source, '/') != null) return true; // a path
-    if (std.mem.indexOfScalar(u8, source, '`') != null) return true; // a quoted command
-    // A command-looking token: lower-case word followed by a flag or an argument.
+    if (std.mem.indexOfScalar(u8, source, '`') != null) return true;
     var it = std.mem.tokenizeAny(u8, source, " \t\n");
-    while (it.next()) |w| {
-        if (std.mem.startsWith(u8, w, "-") and w.len > 1) return true;
+    while (it.next()) |raw| {
+        const token = std.mem.trim(u8, raw, "?.,;:()\"'");
+        if (token.len < 2) continue;
+        if (std.mem.indexOfScalar(u8, token, '/') != null) return true; // a path
+        if (std.mem.startsWith(u8, raw, "-") and raw.len > 1) return true; // a flag
+        // A host name or a file name: dotted, unbroken, with a real suffix.
+        if (std.mem.indexOfScalar(u8, token, '.')) |dot| {
+            if (dot > 0 and dot + 1 < token.len) return true;
+        }
     }
     return false;
 }
