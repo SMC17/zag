@@ -1,0 +1,249 @@
+# Requirements taken from the standards in force.
+#
+# Each entry is written by a person who has read the standard. The `check` field
+# names the automated check that covers part of it; `residual_judgement` says
+# what that check cannot settle. A requirement with a residual judgement stays
+# open until a person records one, however many checks pass.
+
+[[requirement]]
+id = "ISO-24495-1:R-RELEVANT"
+standard = "ISO 24495-1"
+clause = "6.2"
+statement = "The information is relevant to the reader who has to act on it."
+scopes = ["interface_text", "documentation"]
+verification = "usability_test"
+severity = "blocking"
+rationale = "A reader who does not need the information cannot use it, however clearly it is written."
+residual_judgement = "Whether the information is the information this reader needs is established by asking readers."
+
+[[requirement]]
+id = "ISO-24495-1:R-FINDABLE"
+standard = "ISO 24495-1"
+clause = "6.3"
+statement = "The reader can find what they need."
+scopes = ["interface_text", "documentation"]
+verification = "static_analysis"
+severity = "major"
+rationale = "Findability is one of the four governing principles."
+check = "PL003"
+residual_judgement = "A checker can find a wall of text with no headings. Whether a reader finds the right part is established by watching them look."
+
+[[requirement]]
+id = "ISO-24495-1:R-UNDERSTANDABLE"
+standard = "ISO 24495-1"
+clause = "6.4"
+statement = "The reader can understand what they find, the first time."
+scopes = ["interface_text", "documentation"]
+verification = "static_analysis"
+severity = "major"
+rationale = "Understanding is the second governing principle."
+check = "PL001"
+residual_judgement = "A checker finds undefined short forms and long sentences. Understanding is established by asking readers what the text means."
+
+[[requirement]]
+id = "ISO-24495-1:R-USABLE"
+standard = "ISO 24495-1"
+clause = "6.5"
+statement = "The reader can use the information to do what they came to do."
+scopes = ["interface_text", "documentation"]
+verification = "usability_test"
+severity = "blocking"
+rationale = "The standard asks for evaluation, not for shorter words."
+residual_judgement = "Only testing with readers settles this."
+
+[[requirement]]
+id = "ISO-24495-1:R-ERROR-NEXT-STEP"
+standard = "ISO 24495-1"
+statement = "An error message says what happened and what the reader can do next."
+scopes = ["interface_text"]
+verification = "static_analysis"
+severity = "blocking"
+rationale = "A message that names a failure without a next step leaves the reader stuck."
+check = "PL022"
+
+[[requirement]]
+id = "ISO-24495-1:R-LABEL-ACTION"
+standard = "ISO 24495-1"
+statement = "A control's label states the action it performs."
+scopes = ["interface_text"]
+verification = "static_analysis"
+severity = "major"
+rationale = "A reader decides what to press by reading the label."
+check = "PL018"
+
+[[requirement]]
+id = "ISO-704:R-DEFINITION"
+standard = "ISO 704"
+clause = "6.3"
+statement = "Each concept has one definition that states its superordinate concept and its delimiting characteristics, without repeating the term."
+scopes = ["terminology"]
+verification = "static_analysis"
+severity = "blocking"
+rationale = "A circular or missing definition makes the concept useless for search, for agents and for readers."
+check = "TERM002"
+
+[[requirement]]
+id = "ISO-704:R-ONE-TERM"
+standard = "ISO 704"
+statement = "One preferred term designates one concept, and no term designates two."
+scopes = ["terminology"]
+verification = "static_analysis"
+severity = "blocking"
+rationale = "A term that means two things cannot be resolved by a person or by a program."
+check = "TERM007"
+
+[[requirement]]
+id = "ISO-25964:R-RECIPROCAL"
+standard = "ISO 25964"
+statement = "Hierarchical and associative relations are reciprocal."
+scopes = ["terminology"]
+verification = "static_analysis"
+severity = "major"
+rationale = "A one-sided relation breaks query expansion in one direction and not the other."
+check = "TERM-RECIPROCITY"
+
+[[requirement]]
+id = "ISO-11179:R-ONE-NAME"
+standard = "ISO/IEC 11179"
+clause = "Part 5"
+statement = "Each data element has one canonical name, and no alias collides with another element's name."
+scopes = ["metadata", "interface_contract"]
+verification = "static_analysis"
+severity = "blocking"
+rationale = "Two names for one field is how a plugin, a daemon and an auditor come to disagree about the same fact."
+check = "META01"
+
+[[requirement]]
+id = "ISO-11179:R-VALUE-DOMAIN"
+standard = "ISO/IEC 11179"
+statement = "Each data element names a value domain, and a quantity domain names its unit."
+scopes = ["metadata"]
+verification = "static_analysis"
+severity = "major"
+rationale = "A number without a unit cannot be compared with anything."
+check = "META07"
+
+[[requirement]]
+id = "WCAG-2.2:R-CONTRAST"
+standard = "WCAG 2.2"
+clause = "1.4.3"
+statement = "Text has a contrast ratio of at least 4.5 to 1 against its background, or 3 to 1 when it is large."
+scopes = ["user_interface"]
+verification = "automated_test"
+severity = "blocking"
+rationale = "Text nobody can read is not text."
+check = "CONTRAST-TEXT"
+
+[[requirement]]
+id = "WCAG-2.2:R-TARGET-SIZE"
+standard = "WCAG 2.2"
+clause = "2.5.8"
+statement = "A target a person operates is at least 24 by 24 pixels."
+scopes = ["user_interface"]
+verification = "automated_test"
+severity = "major"
+rationale = "A target too small to hit is a control that does not exist for some people."
+check = "A11Y22"
+
+[[requirement]]
+id = "WCAG-2.2:R-NAME-ROLE-VALUE"
+standard = "WCAG 2.2"
+clause = "4.1.2"
+statement = "Every control publishes a name, a role and its state."
+scopes = ["user_interface"]
+verification = "automated_test"
+severity = "blocking"
+rationale = "A pixel rectangle tells assistive technology nothing on its own."
+check = "A11Y01"
+residual_judgement = "The tree can be checked. Whether the names make sense when spoken is established by testing with people who use a screen reader."
+
+[[requirement]]
+id = "ISO-23894:R-TREATED"
+standard = "ISO/IEC 23894"
+statement = "Each identified risk has an owner and a treatment, and a treatment that reduces a risk names the control that does it."
+scopes = ["ai_system"]
+verification = "static_analysis"
+severity = "blocking"
+rationale = "An untreated risk with no owner is a risk nobody is carrying."
+check = "RISK-TREATMENT"
+
+[[requirement]]
+id = "ISO-42005:R-AFFECTED"
+standard = "ISO/IEC 42005"
+statement = "The impact assessment names who is affected, what could happen to them, and how they raise a problem."
+scopes = ["ai_system"]
+verification = "static_analysis"
+severity = "blocking"
+rationale = "An assessment that considers only the buyer is not an impact assessment."
+check = "IMPACT-GROUPS"
+residual_judgement = "Whether the mitigations work is established by asking the people affected."
+
+[[requirement]]
+id = "ISO-25059:R-MEASURED"
+standard = "ISO/IEC 25059"
+statement = "A quality claim names a measure, a unit, a method and a sample, and an unmeasured characteristic is reported as unmeasured."
+scopes = ["ai_system", "reporting"]
+verification = "static_analysis"
+severity = "major"
+rationale = "A quality claim without a measurement is an opinion."
+check = "QUALITY-MEASURES"
+
+[[requirement]]
+id = "ISO-15489:R-DISPOSITION"
+standard = "ISO 15489"
+statement = "A record is retained under a stated rule, cannot be disposed of under a legal hold, and its disposal is itself recorded."
+scopes = ["records"]
+verification = "automated_test"
+severity = "blocking"
+rationale = "A record that can quietly disappear is not evidence of anything."
+check = "RECORDS-HOLD"
+
+[[requirement]]
+id = "ISO-8601:R-CANONICAL"
+standard = "ISO 8601"
+statement = "Every stored instant is written in the extended UTC form."
+scopes = ["interface_contract", "metadata"]
+verification = "automated_test"
+severity = "blocking"
+rationale = "A local time with no offset names no instant."
+check = "DATE-CANONICAL"
+
+[[requirement]]
+id = "ISO-24896:R-NOTATION"
+standard = "ISO 24896"
+statement = "A reported figure carries its unit, its period, its basis of comparison and how it was obtained."
+scopes = ["reporting"]
+verification = "automated_test"
+severity = "major"
+rationale = "A number on its own tells the reader nothing about whether it is good."
+check = "REPORT-NOTATION"
+
+[[requirement]]
+id = "AGENTS.md:R-NO-GRANT"
+standard = "AGENTS.md"
+statement = "A repository instruction file cannot grant a capability, and an attempt to do so is reported."
+scopes = ["ai_system", "process"]
+verification = "automated_test"
+severity = "blocking"
+rationale = "Anyone who can open a pull request can write that file."
+check = "CTX01"
+
+[[requirement]]
+id = "ISO-8183:R-STAGE"
+standard = "ISO/IEC 8183"
+statement = "A dataset states its lifecycle stage, and cannot move backwards into acquisition once it has been used."
+scopes = ["data"]
+verification = "automated_test"
+severity = "major"
+rationale = "Changing the data behind a finished evaluation silently changes what the evaluation meant."
+check = "DATA-STAGE"
+
+[[requirement]]
+id = "ISO-5259:R-DEFINED-FIRST"
+standard = "ISO/IEC 5259"
+statement = "A data quality measure is defined before it is measured, and fitness is not established while any measure is unmeasured."
+scopes = ["data"]
+verification = "automated_test"
+severity = "major"
+rationale = "A measure chosen after seeing the data is a measure chosen to pass."
+check = "DATA-QUALITY"

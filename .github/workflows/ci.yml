@@ -40,5 +40,11 @@ jobs:
           ./zig-out/bin/zag lint README.md AGENTS.md docs/architecture.md \
             docs/standards-conformance.md docs/plain-language.md
 
+      - name: Write the conformance statement
+        run: ./zig-out/bin/zag evidence
+
       - name: Show the accessibility statement
         run: ./zig-out/bin/zag accessibility
+
+      - name: Show the lifecycle record
+        run: ./zig-out/bin/zag lifecycle

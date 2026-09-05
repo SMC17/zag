@@ -91,6 +91,21 @@
           "@id": "https://zag.dev/vocab/workspace/impact-assessment"
         },
         {
+          "@id": "https://zag.dev/vocab/workspace/ai-system"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/machine-learning"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/inference"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/ai-lifecycle-process"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/human-oversight"
+        },
+        {
           "@id": "https://zag.dev/vocab/workspace/metric"
         }
       ]
@@ -364,9 +379,14 @@
         "@id": "https://zag.dev/vocab/workspace/actor"
       },
       "dcterms:subject": "software engineering",
-      "skos:related": {
-        "@id": "https://zag.dev/vocab/workspace/tool-call"
-      }
+      "skos:related": [
+        {
+          "@id": "https://zag.dev/vocab/workspace/tool-call"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/ai-system"
+        }
+      ]
     },
     {
       "@id": "https://zag.dev/vocab/workspace/tool-call",
@@ -549,9 +569,14 @@
         "@value": "decision by a person to allow one operation that policy would not allow on its own",
         "@language": "en"
       },
-      "skos:related": {
-        "@id": "https://zag.dev/vocab/workspace/authorization-decision"
-      },
+      "skos:related": [
+        {
+          "@id": "https://zag.dev/vocab/workspace/authorization-decision"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/human-oversight"
+        }
+      ],
       "skos:topConceptOf": {
         "@id": "https://zag.dev/vocab/workspace"
       },
@@ -590,6 +615,9 @@
         },
         {
           "@id": "https://zag.dev/vocab/workspace/dataset"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/documented-information"
         }
       ]
     },
@@ -861,7 +889,10 @@
       "skos:broader": {
         "@id": "https://zag.dev/vocab/workspace/artifact"
       },
-      "dcterms:subject": "software engineering"
+      "dcterms:subject": "software engineering",
+      "skos:narrower": {
+        "@id": "https://zag.dev/vocab/workspace/training-data"
+      }
     },
     {
       "@id": "https://zag.dev/vocab/workspace/pseudoterminal",
@@ -1062,6 +1093,222 @@
         "@id": "https://zag.dev/vocab/workspace"
       },
       "dcterms:source": "ISO/IEC 42005",
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/ai-system",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "AI system",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "engineered system that produces outputs such as predictions, recommendations or decisions from data, for objectives a person set",
+        "@language": "en"
+      },
+      "skos:related": [
+        {
+          "@id": "https://zag.dev/vocab/workspace/agent"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/machine-learning"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/ai-lifecycle-process"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/human-oversight"
+        }
+      ],
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:source": "ISO/IEC 22989",
+      "dcterms:subject": "software engineering",
+      "skos:narrower": {
+        "@id": "https://zag.dev/vocab/workspace/model"
+      }
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/machine-learning",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "machine learning",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "way of building a system in which behaviour is derived from data rather than written as rules",
+        "@language": "en"
+      },
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/ai-system"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:source": "ISO/IEC 22989",
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/model",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "model",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "part of an AI system that produces an output for a given input, using what was derived during training",
+        "@language": "en"
+      },
+      "skos:broader": {
+        "@id": "https://zag.dev/vocab/workspace/ai-system"
+      },
+      "zag:partOf": {
+        "@id": "https://zag.dev/vocab/workspace/ai-system"
+      },
+      "dcterms:source": "ISO/IEC 22989",
+      "dcterms:subject": "software engineering",
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/inference"
+      }
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/inference",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "inference",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "act of producing an output from a trained model for one input",
+        "@language": "en"
+      },
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/model"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:source": "ISO/IEC 22989",
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/training-data",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "training data",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "dataset used to derive a model's behaviour",
+        "@language": "en"
+      },
+      "skos:broader": {
+        "@id": "https://zag.dev/vocab/workspace/dataset"
+      },
+      "dcterms:source": "ISO/IEC 22989",
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/ai-lifecycle-process",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "AI lifecycle process",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "named process that an AI system passes through, from stating what it is for to withdrawing it from use",
+        "@language": "en"
+      },
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/ai-system"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:source": "ISO/IEC 5338",
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/human-oversight",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "human oversight",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "arrangement by which a person can understand, direct, override and stop what an AI system does",
+        "@language": "en"
+      },
+      "skos:related": [
+        {
+          "@id": "https://zag.dev/vocab/workspace/ai-system"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/approval"
+        }
+      ],
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:source": "ISO/IEC 42001",
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/documented-information",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "documented information",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "information a party must control, together with the medium it is held on and the rules for keeping it current",
+        "@language": "en"
+      },
+      "skos:broader": {
+        "@id": "https://zag.dev/vocab/workspace/artifact"
+      },
+      "dcterms:source": "ISO 10013",
       "dcterms:subject": "software engineering"
     },
     {
