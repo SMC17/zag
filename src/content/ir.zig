@@ -490,7 +490,7 @@ pub fn sampleDocument(gen: *idmod.Generator) !Document {
             .creator = "workbench maintainers",
             .lifecycle_state = .published,
             .standards = &.{ "ISO 24495-1", "Information Mapping" },
-            .license = "Apache-2.0",
+            .license = "MIT",
             .identifier_uri = "https://zag.dev/docs/agent-permissions",
         },
         .reader_outcome = "After reading this, you can give an agent permission to change files in one repository, and take that permission back.",

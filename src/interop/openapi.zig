@@ -44,7 +44,7 @@ pub const Info = struct {
     version: []const u8,
     summary: []const u8 = "",
     description: []const u8 = "",
-    license: []const u8 = "Apache-2.0",
+    license: []const u8 = "MIT",
     server_url: []const u8 = "http://127.0.0.1:7717",
     server_description: []const u8 = "Local workspace daemon",
 };
@@ -72,6 +72,7 @@ fn pathsOf(comptime ops: []const Operation) []const []const u8 {
 
 /// Write the complete OpenAPI document as compact JSON.
 pub fn write(comptime ops: []const Operation, w: *std.Io.Writer, info: Info) std.Io.Writer.Error!void {
+    @setEvalBranchQuota(400_000);
     try w.print("{{\"openapi\":\"{s}\",\"info\":{{\"title\":\"{s}\",\"version\":\"{s}\"", .{ openapi_version, info.title, info.version });
     if (info.summary.len > 0) try w.print(",\"summary\":\"{s}\"", .{info.summary});
     if (info.description.len > 0) try w.print(",\"description\":\"{s}\"", .{info.description});

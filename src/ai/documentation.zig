@@ -403,7 +403,7 @@ fn workbenchFacts(arena: std.mem.Allocator) !SystemFacts {
         .version = "0.1.0",
         .owner = "workbench maintainers",
         .contact = "the repository issue tracker",
-        .license = "Apache-2.0",
+        .license = "MIT",
         .purpose = "Help a developer run commands, read and change code, and direct agents, on a machine they control.",
         .intended_users = &.{"Software developers working on their own or their organisation's code."},
         .intended_uses = &.{

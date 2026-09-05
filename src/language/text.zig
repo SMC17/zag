@@ -130,6 +130,22 @@ pub const idioms = [_][]const u8{
     "moving parts",   "low hanging fruit", "on the fly", "at the end of the day",
 };
 
+/// Abbreviations that name standards bodies and published standards. A
+/// developer or an auditor reads these daily; a general reader does not, so
+/// they are accepted only for the audiences that know them.
+pub const standards_abbreviations = [_][]const u8{
+    "ISO",  "IEC",  "EN",   "NIST", "ANSI", "NISO", "W3C",  "OASIS",
+    "WCAG", "DITA", "RDF",  "SKOS", "OWL",  "DCAT", "UCUM", "SI",
+    "PROV", "ASD",  "STE",  "FAIR", "LMF",  "MAF",  "ISO/IEC", "ANSI/NISO",
+};
+
+pub fn isStandardsAbbreviation(word: []const u8) bool {
+    for (standards_abbreviations) |a| {
+        if (std.mem.eql(u8, a, word)) return true;
+    }
+    return false;
+}
+
 pub fn isCommonAbbreviation(word: []const u8) bool {
     for (common_abbreviations) |a| {
         if (std.mem.eql(u8, a, word)) return true;
@@ -183,7 +199,7 @@ pub fn looksLikePastParticiple(word: []const u8) bool {
 /// Words formed by turning a verb into a noun. They hide who does what.
 pub fn isNominalisation(word: []const u8) bool {
     if (word.len < 7) return false;
-    const endings = [_][]const u8{ "ation", "ition", "ment", "ance", "ence", "ility", "ancy" };
+    const endings = [_][]const u8{ "ation", "ition", "sion", "ment", "ance", "ence", "ility", "ancy" };
     for (endings) |e| {
         if (std.mem.endsWith(u8, word, e)) return true;
     }
@@ -291,6 +307,25 @@ pub fn analyse(arena: std.mem.Allocator, source: []const u8) !Analysis {
             word_start = null;
         }
 
+        // A list item is a sentence of its own, whatever punctuation ends it.
+        // A reader parses a bulleted list one item at a time, and measuring a
+        // whole list as one sentence reports a length nobody can act on.
+        const list_item_start = i < source.len and i > 0 and source[i - 1] == '\n' and startsListItem(source[i..]);
+        if (list_item_start and words_in_sentence > 0) {
+            const trimmed = std.mem.trim(u8, source[sentence_start..i], " \t\r\n");
+            if (trimmed.len > 0) {
+                try sentences.append(arena, .{
+                    .span = .{ .start = sentence_start, .end = i },
+                    .text = trimmed,
+                    .words = words_in_sentence,
+                    .first_word = first_word_index,
+                });
+                sentence_index += 1;
+                words_in_sentence = 0;
+            }
+            sentence_start = i;
+        }
+
         if (sentence_end) {
             const end = i + 1;
             const trimmed = std.mem.trim(u8, source[sentence_start..end], " \t\r\n");
@@ -331,6 +366,21 @@ pub fn analyse(arena: std.mem.Allocator, source: []const u8) !Analysis {
         .words = try words.toOwnedSlice(arena),
         .paragraphs = try paragraphs.toOwnedSlice(arena),
     };
+}
+
+/// Does this line start a list item? A bullet, a number or a table row.
+pub fn startsListItem(rest: []const u8) bool {
+    var index: usize = 0;
+    while (index < rest.len and (rest[index] == ' ' or rest[index] == '\t')) index += 1;
+    if (index + 1 >= rest.len) return false;
+    if ((rest[index] == '-' or rest[index] == '*' or rest[index] == '+') and rest[index + 1] == ' ') return true;
+    if (std.ascii.isDigit(rest[index])) {
+        var digits = index;
+        while (digits < rest.len and std.ascii.isDigit(rest[digits])) digits += 1;
+        if (digits + 1 < rest.len and (rest[digits] == '.' or rest[digits] == ')') and rest[digits + 1] == ' ') return true;
+    }
+    if (rest[index] == '|') return true; // a table row
+    return false;
 }
 
 fn containsLetterOrDigit(text: []const u8) bool {
@@ -386,6 +436,9 @@ pub fn looksLikeAbbreviation(word: []const u8) bool {
     var uppers: usize = 0;
     for (word) |c| {
         if (std.ascii.isLower(c)) return false;
+        // A token with a digit in it is an identifier — a rule code, a version,
+        // a part number — not a short form of some longer words.
+        if (std.ascii.isDigit(c)) return false;
         if (std.ascii.isUpper(c)) uppers += 1;
     }
     return uppers >= 2;
@@ -464,4 +517,28 @@ test "positions map back to line and column" {
     const p = positionOf(text, 8);
     try std.testing.expectEqual(@as(usize, 2), p.line);
     try std.testing.expectEqual(@as(usize, 5), p.column);
+}
+
+test "an identifier is not an abbreviation" {
+    try std.testing.expect(looksLikeAbbreviation("PTY"));
+    try std.testing.expect(!looksLikeAbbreviation("PL001"));
+    try std.testing.expect(!looksLikeAbbreviation("A11Y22"));
+    try std.testing.expect(!looksLikeAbbreviation("STE103"));
+}
+
+test "a list item is measured on its own" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const a = try analyse(arena,
+        \\A checker can find these things:
+        \\
+        \\- an undefined short form;
+        \\- a low contrast ratio;
+        \\- a circular definition.
+    );
+    // Four sentences: the lead-in and one for each item, whatever ends them.
+    try std.testing.expectEqual(@as(usize, 4), a.sentenceCount());
+    try std.testing.expectEqualStrings("- a low contrast ratio;", a.sentences[2].text);
 }

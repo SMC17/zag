@@ -198,5 +198,5 @@ test "docbook output carries the info block and the procedure" {
     try testing.expect(std.mem.indexOf(u8, text, "xmlns=\"http://docbook.org/ns/docbook\" version=\"5.1\"") != null);
     try testing.expect(std.mem.indexOf(u8, text, "<procedure>") != null);
     try testing.expect(std.mem.indexOf(u8, text, "<caution><para>") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "<legalnotice><para>Apache-2.0") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "<legalnotice><para>MIT") != null);
 }

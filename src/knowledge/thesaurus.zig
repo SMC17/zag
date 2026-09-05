@@ -80,6 +80,24 @@ pub const Thesaurus = struct {
                     else => try broader.append(arena, target.preferred),
                 }
             }
+            // A related-term relation is mutual, so it is recorded once in the
+            // concept system and made mutual here. Deriving it, rather than
+            // asking an author to write both sides, is what keeps the two sides
+            // from drifting apart.
+            var other_it = system.concepts.iterator();
+            while (other_it.next()) |other_kv| {
+                const other = other_kv.value_ptr.*;
+                if (std.mem.eql(u8, other.id, c.id)) continue;
+                for (other.relations) |r| {
+                    if (r.kind != .associative) continue;
+                    if (!std.mem.eql(u8, r.target, c.id)) continue;
+                    var already = false;
+                    for (related.items) |existing| {
+                        if (std.mem.eql(u8, existing, other.preferred)) already = true;
+                    }
+                    if (!already) try related.append(arena, other.preferred);
+                }
+            }
 
             var narrower: std.ArrayList([]const u8) = .empty;
             const children = try system.narrower(c.id);
@@ -242,7 +260,7 @@ test "query expansion follows use and narrower terms" {
     try std.testing.expect(saw_session);
 }
 
-test "reciprocity check reports one-sided related terms" {
+test "a related-term relation written once appears on both sides" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -252,11 +270,36 @@ test "reciprocity check reports one-sided related terms" {
     try system.add(.{ .id = "b", .preferred = "beta", .definition = "second test concept", .top_concept = true });
 
     const thesaurus = try Thesaurus.build(arena, system);
+    const beta = thesaurus.lookup("beta").?;
+    try std.testing.expectEqual(@as(usize, 1), beta.related.len);
+    try std.testing.expectEqualStrings("alpha", beta.related[0]);
+
+    // Because the view derives the other side, the reciprocity check passes.
     const problems = try thesaurus.checkReciprocity();
-    try std.testing.expectEqual(@as(usize, 1), problems.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, problems.items[0], "does not point back") != null);
+    try std.testing.expectEqual(@as(usize, 0), problems.items.len);
 
     const good = try Thesaurus.build(arena, try sampleSystem(arena));
     const none = try good.checkReciprocity();
     try std.testing.expectEqual(@as(usize, 0), none.items.len);
+}
+
+test "the reciprocity check still reports a broader term missing from the display" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var system = concepts.ConceptSystem.init(arena);
+    try system.add(.{
+        .id = "a",
+        .preferred = "alpha",
+        .definition = "concept whose broader term is not in this system",
+        .relations = &.{.{ .kind = .generic, .target = "missing" }},
+    });
+    const thesaurus = try Thesaurus.build(arena, system);
+    // The broader concept does not resolve, so it never reaches the display and
+    // nothing dangles there; the concept system reports it instead.
+    const problems = try thesaurus.checkReciprocity();
+    try std.testing.expectEqual(@as(usize, 0), problems.items.len);
+    const findings = try system.validate();
+    try std.testing.expect(findings.items.len > 0);
 }

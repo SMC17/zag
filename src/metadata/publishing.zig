@@ -287,7 +287,7 @@ test "a dataset publishes as dcat with a distribution" {
         .description = "One record for each command a person or an agent ran.",
         .publisher = "the person using the workbench",
         .keywords = &.{ "terminal", "history", "provenance" },
-        .license = "Apache-2.0",
+        .license = "MIT",
         .issued = try timeutil.Timestamp.parseIso("2026-09-04T00:00:00Z"),
         .modified = try timeutil.Timestamp.parseIso("2026-09-04T00:00:00Z"),
         .access_url = "https://zag.dev/api/history",

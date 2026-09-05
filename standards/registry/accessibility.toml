@@ -1,0 +1,51 @@
+# Accessibility standards.
+#
+# ISO/IEC 40500:2012 adopted WCAG 2.0 and is withdrawn; the 2025 edition adopts
+# WCAG 2.2. Both are recorded so that the withdrawn one cannot be cited by
+# mistake, and so the registry check can prove it is not enforced.
+
+[[standard]]
+namespace = "w3c"
+identifier = "WCAG 2.2"
+edition = "2023"
+title = "Web Content Accessibility Guidelines 2.2"
+status = "published"
+enforcement = "mandatory"
+purpose = "Interface and documentation accessibility, at level AA."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO/IEC 40500:2012"
+edition = "2012"
+title = "Information technology - W3C Web Content Accessibility Guidelines (WCAG) 2.0"
+status = "withdrawn"
+enforcement = "informational"
+replaced_by = "ISO/IEC 40500:2025"
+purpose = "Recorded so that a citation of the old edition is visibly out of date."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO/IEC 40500:2025"
+edition = "2025"
+title = "Information technology - W3C Web Content Accessibility Guidelines (WCAG) 2.2"
+status = "published"
+enforcement = "mandatory"
+supersedes = "ISO/IEC 40500:2012"
+purpose = "The ISO adoption of WCAG 2.2, cited where an ISO reference is required."
+
+[[standard]]
+namespace = "en"
+identifier = "EN 301 549"
+title = "Accessibility requirements for ICT products and services"
+status = "published"
+enforcement = "mandatory"
+purpose = "Procurement clauses, including clause 11 for non-web software, which is what this product is."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 9241-210"
+edition = "2019"
+title = "Ergonomics of human-system interaction - Human-centred design for interactive systems"
+status = "published"
+enforcement = "recommended"
+purpose = "Design proceeds from research to requirements to evaluation, and evaluation is with people."
