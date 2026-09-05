@@ -107,6 +107,7 @@ pub const defs_prefix = "#/$defs/";
 /// `ref_prefix` selects where those references point, so the same generator
 /// serves standalone schema files (`#/$defs/`) and OpenAPI components.
 pub fn writeType(comptime T: type, w: *std.Io.Writer, comptime ref_prefix: []const u8) std.Io.Writer.Error!void {
+    @setEvalBranchQuota(200_000);
     switch (@typeInfo(T)) {
         .optional => |o| {
             try w.writeAll("{\"anyOf\":[");
@@ -253,6 +254,9 @@ fn writeRef(comptime T: type, w: *std.Io.Writer, comptime ref_prefix: []const u8
 /// Write a complete schema document for `T`, with every reachable composite
 /// type placed in `$defs`.
 pub fn writeDocument(comptime T: type, w: *std.Io.Writer, options: Options) std.Io.Writer.Error!void {
+    // Walking a large type graph at compile time is exactly what the branch
+    // quota is there to bound; a workspace event tree legitimately exceeds it.
+    @setEvalBranchQuota(200_000);
     const types = comptime collect(T, &.{});
     try w.print("{{\"$schema\":\"{s}\"", .{dialect});
     if (options.id) |id| try w.print(",\"$id\":\"{s}\"", .{id});

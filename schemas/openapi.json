@@ -1,0 +1,1971 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "zag workspace daemon",
+    "version": "0.1.0",
+    "summary": "Read and drive a workspace over HTTP.",
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:7717",
+      "description": "Local workspace daemon"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Report whether the daemon is running",
+        "tags": [
+          "system"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "pseudoterminalSupported": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "version",
+                    "pseudoterminalSupported"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller does not hold the required capability"
+          }
+        }
+      }
+    },
+    "/sessions": {
+      "get": {
+        "operationId": "listSessions",
+        "summary": "List the sessions in this workspace",
+        "tags": [
+          "sessions"
+        ],
+        "x-zag-capability": "fs.read",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sessions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Session"
+                      }
+                    }
+                  },
+                  "required": [
+                    "sessions"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller does not hold the required capability"
+          }
+        }
+      }
+    },
+    "/sessions/{sessionId}/blocks": {
+      "get": {
+        "operationId": "listBlocks",
+        "summary": "List the blocks in one session",
+        "tags": [
+          "sessions"
+        ],
+        "x-zag-capability": "fs.read",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "blocks": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Block"
+                      }
+                    }
+                  },
+                  "required": [
+                    "blocks"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller does not hold the required capability"
+          }
+        }
+      }
+    },
+    "/sessions/{sessionId}/commands": {
+      "post": {
+        "operationId": "submitCommand",
+        "summary": "Run a command in one session",
+        "tags": [
+          "sessions"
+        ],
+        "x-zag-capability": "process.execute",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "commandText": {
+                    "type": "string"
+                  },
+                  "workingDirectory": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "commandText",
+                  "workingDirectory"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "$ref": "#/components/schemas/Kind"
+                    },
+                    "status": {
+                      "$ref": "#/components/schemas/Status"
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "startedAt": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "finishedAt": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "workingDirectory": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "commandText": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "exitStatus": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 255
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "actor": {
+                      "$ref": "#/components/schemas/Actor"
+                    },
+                    "content": {
+                      "$ref": "#/components/schemas/ContentRef"
+                    },
+                    "git": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/components/schemas/GitContext"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "environment": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/components/schemas/EnvironmentFingerprint"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "parent": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "children": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "boundaryFromShell": {
+                      "type": "boolean"
+                    },
+                    "outputBytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "session",
+                    "kind",
+                    "createdAt",
+                    "actor"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller does not hold the required capability"
+          }
+        }
+      }
+    },
+    "/events": {
+      "get": {
+        "operationId": "listEvents",
+        "summary": "Read the workspace event log from a sequence number",
+        "tags": [
+          "events"
+        ],
+        "x-zag-capability": "fs.read",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Envelope"
+                      }
+                    },
+                    "nextSequence": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "events",
+                    "nextSequence"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller does not hold the required capability"
+          }
+        }
+      }
+    },
+    "/approvals/{approvalId}": {
+      "post": {
+        "operationId": "answerApproval",
+        "summary": "Answer a request that is waiting for a person",
+        "tags": [
+          "approvals"
+        ],
+        "x-zag-capability": "process.execute",
+        "parameters": [
+          {
+            "name": "approvalId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "outcome": {
+                    "type": "string"
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "outcome",
+                  "note"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "accepted": {
+                      "type": "boolean"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "accepted",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller does not hold the required capability"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Health": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "pseudoterminalSupported": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "status",
+          "version",
+          "pseudoterminalSupported"
+        ],
+        "additionalProperties": false
+      },
+      "SessionList": {
+        "type": "object",
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Session"
+            }
+          }
+        },
+        "required": [
+          "sessions"
+        ],
+        "additionalProperties": false
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/SessionState"
+          },
+          "openedAt": {
+            "type": "string"
+          },
+          "closedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workingDirectory": {
+            "type": "string"
+          },
+          "shell": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "columns": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "rows": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "repository": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "worktree": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "dirtyFileCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "changedFiles": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "commandCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "failedCommandCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "pendingApprovals": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "diagnosticCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tests": {
+            "$ref": "#/components/schemas/TestState"
+          }
+        },
+        "required": [
+          "id",
+          "openedAt"
+        ],
+        "additionalProperties": false
+      },
+      "SessionState": {
+        "type": "string",
+        "enum": [
+          "open",
+          "closed"
+        ]
+      },
+      "TestState": {
+        "type": "string",
+        "enum": [
+          "unknown",
+          "passing",
+          "failing"
+        ]
+      },
+      "BlockList": {
+        "type": "object",
+        "properties": {
+          "blocks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Block"
+            }
+          }
+        },
+        "required": [
+          "blocks"
+        ],
+        "additionalProperties": false
+      },
+      "Block": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "session": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/Kind"
+          },
+          "status": {
+            "$ref": "#/components/schemas/Status"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "startedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "finishedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workingDirectory": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "commandText": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "exitStatus": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "actor": {
+            "$ref": "#/components/schemas/Actor"
+          },
+          "content": {
+            "$ref": "#/components/schemas/ContentRef"
+          },
+          "git": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GitContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "environment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EnvironmentFingerprint"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "children": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "boundaryFromShell": {
+            "type": "boolean"
+          },
+          "outputBytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "id",
+          "session",
+          "kind",
+          "createdAt",
+          "actor"
+        ],
+        "additionalProperties": false
+      },
+      "Kind": {
+        "type": "string",
+        "enum": [
+          "command",
+          "agent_run",
+          "tool_call",
+          "file_change",
+          "approval",
+          "message"
+        ]
+      },
+      "Status": {
+        "type": "string",
+        "enum": [
+          "running",
+          "succeeded",
+          "failed",
+          "denied",
+          "cancelled",
+          "unknown"
+        ]
+      },
+      "Actor": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ProducerKind"
+          },
+          "label": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind"
+        ],
+        "additionalProperties": false
+      },
+      "ProducerKind": {
+        "type": "string",
+        "enum": [
+          "person",
+          "shell",
+          "agent",
+          "background_agent",
+          "remote_person",
+          "system",
+          "integration"
+        ]
+      },
+      "ContentRef": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "none": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "none"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "inline_text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "inline_text"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "hashed": {
+                "$ref": "#/components/schemas/ContentRef__struct_44046"
+              }
+            },
+            "required": [
+              "hashed"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "ContentRef__struct_44046": {
+        "type": "object",
+        "properties": {
+          "hash": {
+            "type": "string"
+          },
+          "byteCount": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "hash",
+          "byteCount"
+        ],
+        "additionalProperties": false
+      },
+      "GitContext": {
+        "type": "object",
+        "properties": {
+          "repository": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "dirtyFileCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        },
+        "additionalProperties": false
+      },
+      "EnvironmentFingerprint": {
+        "type": "object",
+        "properties": {
+          "operating_system": {
+            "type": "string"
+          },
+          "architecture": {
+            "type": "string"
+          },
+          "shell": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "environment_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "container_image": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "host_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "operating_system",
+          "architecture"
+        ],
+        "additionalProperties": false
+      },
+      "SubmitCommand": {
+        "type": "object",
+        "properties": {
+          "commandText": {
+            "type": "string"
+          },
+          "workingDirectory": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "commandText",
+          "workingDirectory"
+        ],
+        "additionalProperties": false
+      },
+      "EventPage": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Envelope"
+            }
+          },
+          "nextSequence": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "events",
+          "nextSequence"
+        ],
+        "additionalProperties": false
+      },
+      "Envelope": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "at": {
+            "type": "string"
+          },
+          "actor": {
+            "$ref": "#/components/schemas/Actor"
+          },
+          "causedBy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "correlation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkspaceEvent"
+          },
+          "contentHash": {
+            "type": "string"
+          },
+          "chainHash": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "sequence",
+          "at",
+          "actor",
+          "payload",
+          "contentHash",
+          "chainHash"
+        ],
+        "additionalProperties": false
+      },
+      "WorkspaceEvent": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "session_opened": {
+                "$ref": "#/components/schemas/SessionOpened"
+              }
+            },
+            "required": [
+              "session_opened"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "session_closed": {
+                "$ref": "#/components/schemas/SessionClosed"
+              }
+            },
+            "required": [
+              "session_closed"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "command_submitted": {
+                "$ref": "#/components/schemas/CommandSubmitted"
+              }
+            },
+            "required": [
+              "command_submitted"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "process_output": {
+                "$ref": "#/components/schemas/ProcessOutput"
+              }
+            },
+            "required": [
+              "process_output"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "command_finished": {
+                "$ref": "#/components/schemas/CommandFinished"
+              }
+            },
+            "required": [
+              "command_finished"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "agent_started": {
+                "$ref": "#/components/schemas/AgentStarted"
+              }
+            },
+            "required": [
+              "agent_started"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "agent_message": {
+                "$ref": "#/components/schemas/AgentMessage"
+              }
+            },
+            "required": [
+              "agent_message"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "tool_requested": {
+                "$ref": "#/components/schemas/ToolRequested"
+              }
+            },
+            "required": [
+              "tool_requested"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "tool_finished": {
+                "$ref": "#/components/schemas/ToolFinished"
+              }
+            },
+            "required": [
+              "tool_finished"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "file_opened": {
+                "$ref": "#/components/schemas/FileOpened"
+              }
+            },
+            "required": [
+              "file_opened"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "file_changed": {
+                "$ref": "#/components/schemas/FileChanged"
+              }
+            },
+            "required": [
+              "file_changed"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "approval_requested": {
+                "$ref": "#/components/schemas/ApprovalRequested"
+              }
+            },
+            "required": [
+              "approval_requested"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "approval_resolved": {
+                "$ref": "#/components/schemas/ApprovalResolved"
+              }
+            },
+            "required": [
+              "approval_resolved"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "git_changed": {
+                "$ref": "#/components/schemas/GitChanged"
+              }
+            },
+            "required": [
+              "git_changed"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "diagnostic": {
+                "$ref": "#/components/schemas/Diagnostic"
+              }
+            },
+            "required": [
+              "diagnostic"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "evidence_recorded": {
+                "$ref": "#/components/schemas/EvidenceRecorded"
+              }
+            },
+            "required": [
+              "evidence_recorded"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "user_message": {
+                "$ref": "#/components/schemas/UserMessage"
+              }
+            },
+            "required": [
+              "user_message"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "SessionOpened": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "workingDirectory": {
+            "type": "string"
+          },
+          "shell": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "columns": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "rows": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "repository": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "worktree": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "session",
+          "workingDirectory"
+        ],
+        "additionalProperties": false
+      },
+      "SessionClosed": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "exitStatus": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "additionalProperties": false
+      },
+      "CommandSubmitted": {
+        "type": "object",
+        "properties": {
+          "block": {
+            "type": "string"
+          },
+          "session": {
+            "type": "string"
+          },
+          "commandText": {
+            "type": "string"
+          },
+          "workingDirectory": {
+            "type": "string"
+          },
+          "boundaryFromShell": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "block",
+          "session",
+          "commandText",
+          "workingDirectory"
+        ],
+        "additionalProperties": false
+      },
+      "ProcessOutput": {
+        "type": "object",
+        "properties": {
+          "block": {
+            "type": "string"
+          },
+          "session": {
+            "type": "string"
+          },
+          "stream": {
+            "$ref": "#/components/schemas/OutputStream"
+          },
+          "contentHash": {
+            "type": "string"
+          },
+          "byteCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "chunkIndex": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        },
+        "required": [
+          "block",
+          "session",
+          "contentHash",
+          "byteCount"
+        ],
+        "additionalProperties": false
+      },
+      "OutputStream": {
+        "type": "string",
+        "enum": [
+          "stdout",
+          "stderr",
+          "merged"
+        ]
+      },
+      "CommandFinished": {
+        "type": "object",
+        "properties": {
+          "block": {
+            "type": "string"
+          },
+          "session": {
+            "type": "string"
+          },
+          "exitStatus": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "duration": {
+            "type": "string"
+          },
+          "signal": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "block",
+          "session",
+          "exitStatus",
+          "duration"
+        ],
+        "additionalProperties": false
+      },
+      "AgentStarted": {
+        "type": "object",
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "session": {
+            "type": "string"
+          },
+          "request": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "policy": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent",
+          "session",
+          "request",
+          "provider",
+          "model",
+          "policy"
+        ],
+        "additionalProperties": false
+      },
+      "AgentMessage": {
+        "type": "object",
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "session": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/AgentMessage__enum_43063"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent",
+          "session",
+          "role",
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "AgentMessage__enum_43063": {
+        "type": "string",
+        "enum": [
+          "plan",
+          "progress",
+          "result",
+          "question",
+          "refusal"
+        ]
+      },
+      "ToolRequested": {
+        "type": "object",
+        "properties": {
+          "call": {
+            "type": "string"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "session": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string"
+          },
+          "capability": {
+            "type": "string"
+          },
+          "argumentsJson": {
+            "type": "string"
+          },
+          "resource": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "call",
+          "agent",
+          "session",
+          "tool",
+          "capability",
+          "argumentsJson"
+        ],
+        "additionalProperties": false
+      },
+      "ToolFinished": {
+        "type": "object",
+        "properties": {
+          "call": {
+            "type": "string"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "session": {
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ToolFinished__enum_43072"
+          },
+          "duration": {
+            "type": "string"
+          },
+          "resultHash": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "call",
+          "agent",
+          "session",
+          "outcome",
+          "duration",
+          "resultHash"
+        ],
+        "additionalProperties": false
+      },
+      "ToolFinished__enum_43072": {
+        "type": "string",
+        "enum": [
+          "completed",
+          "failed",
+          "denied",
+          "cancelled",
+          "timed_out"
+        ]
+      },
+      "FileOpened": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "contentHash": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session",
+          "path",
+          "contentHash"
+        ],
+        "additionalProperties": false
+      },
+      "FileChanged": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "changeKind": {
+            "$ref": "#/components/schemas/FileChanged__enum_43073"
+          },
+          "beforeHash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "afterHash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "session",
+          "path",
+          "changeKind"
+        ],
+        "additionalProperties": false
+      },
+      "FileChanged__enum_43073": {
+        "type": "string",
+        "enum": [
+          "created",
+          "modified",
+          "deleted",
+          "renamed"
+        ]
+      },
+      "ApprovalRequested": {
+        "type": "object",
+        "properties": {
+          "approval": {
+            "type": "string"
+          },
+          "session": {
+            "type": "string"
+          },
+          "agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "capability": {
+            "type": "string"
+          },
+          "resource": {
+            "type": "string"
+          },
+          "promptText": {
+            "type": "string"
+          },
+          "policy": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval",
+          "session",
+          "capability",
+          "resource",
+          "promptText",
+          "policy"
+        ],
+        "additionalProperties": false
+      },
+      "ApprovalResolved": {
+        "type": "object",
+        "properties": {
+          "approval": {
+            "type": "string"
+          },
+          "session": {
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ApprovalResolved__enum_43083"
+          },
+          "decidedBy": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval",
+          "session",
+          "outcome",
+          "decidedBy"
+        ],
+        "additionalProperties": false
+      },
+      "ApprovalResolved__enum_43083": {
+        "type": "string",
+        "enum": [
+          "allow_once",
+          "allow_always_here",
+          "deny",
+          "expired"
+        ]
+      },
+      "GitChanged": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "repository": {
+            "type": "string"
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "dirtyFileCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "aheadCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "behindCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        },
+        "required": [
+          "session",
+          "repository"
+        ],
+        "additionalProperties": false
+      },
+      "Diagnostic": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "column": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "severity": {
+            "$ref": "#/components/schemas/Diagnostic__enum_43084"
+          },
+          "source": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "session",
+          "path",
+          "line",
+          "column",
+          "severity",
+          "source",
+          "message"
+        ],
+        "additionalProperties": false
+      },
+      "Diagnostic__enum_43084": {
+        "type": "string",
+        "enum": [
+          "hint",
+          "information",
+          "warning",
+          "error"
+        ]
+      },
+      "EvidenceRecorded": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requirement": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "result": {
+            "type": "string"
+          },
+          "contentHash": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "requirement",
+          "subject",
+          "method",
+          "result",
+          "contentHash"
+        ],
+        "additionalProperties": false
+      },
+      "UserMessage": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session",
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "ApprovalAnswer": {
+        "type": "object",
+        "properties": {
+          "outcome": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "note"
+        ],
+        "additionalProperties": false
+      },
+      "ApprovalResult": {
+        "type": "object",
+        "properties": {
+          "accepted": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accepted",
+          "message"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}

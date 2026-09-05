@@ -50,6 +50,8 @@ pub const standards = struct {
     pub const requirement = @import("standards/requirement.zig");
     pub const registry = @import("standards/registry.zig");
     pub const evidence = @import("standards/evidence.zig");
+    pub const profile = @import("standards/profile.zig");
+    pub const crosswalk = @import("standards/crosswalk.zig");
 };
 
 pub const language = struct {
@@ -108,6 +110,19 @@ pub const content = struct {
 
 pub const accessibility = struct {
     pub const contrast = @import("accessibility/contrast.zig");
+    pub const semantic_tree = @import("accessibility/semantic_tree.zig");
+    pub const wcag = @import("accessibility/wcag.zig");
+};
+
+pub const reports = struct {
+    pub const metrics = @import("reports/metrics.zig");
+    pub const notation = @import("reports/notation.zig");
+};
+
+pub const agent_context = struct {
+    pub const agents_md = @import("agent_context/agents_md.zig");
+    pub const llms_txt = @import("agent_context/llms_txt.zig");
+    pub const resolver = @import("agent_context/resolver.zig");
 };
 
 pub const version = "0.1.0";

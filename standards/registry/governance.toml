@@ -1,0 +1,192 @@
+# Data, records and AI governance standards.
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO/IEC 42001"
+edition = "2023"
+title = "Information technology - Artificial intelligence - Management system"
+status = "published"
+enforcement = "required_profile"
+purpose = "The organisation can show how it governs its use of AI."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO/IEC 23894"
+edition = "2023"
+title = "Information technology - Artificial intelligence - Guidance on risk management"
+status = "published"
+enforcement = "mandatory"
+purpose = "Risks are recorded with owners, treatments and residual levels."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO/IEC 42005"
+edition = "2025"
+title = "Information technology - Artificial intelligence - AI system impact assessment"
+status = "published"
+enforcement = "required_profile"
+purpose = "Effects on people are assessed and reviewed on a schedule."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO/IEC 12792"
+title = "Information technology - Artificial intelligence - Transparency taxonomy of AI systems"
+status = "published"
+enforcement = "mandatory"
+purpose = "Each transparency obligation names its audience, its timing and where it is answered."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO/IEC 25059"
+edition = "2023"
+title = "Software engineering - Systems and software Quality Requirements and Evaluation - Quality model for AI systems"
+status = "published"
+enforcement = "mandatory"
+purpose = "Quality claims name a measure, a unit, a method and a sample."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO/IEC 23053"
+edition = "2022"
+title = "Framework for Artificial Intelligence systems using Machine Learning"
+status = "published"
+enforcement = "informational"
+purpose = "Shared vocabulary for describing the parts of a machine-learning system."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO/IEC 22989"
+edition = "2022"
+title = "Information technology - Artificial intelligence - Concepts and terminology"
+status = "published"
+enforcement = "mandatory"
+purpose = "AI terms in the product's vocabulary follow the published definitions."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO/IEC 5338"
+edition = "2023"
+title = "Information technology - Artificial intelligence - AI system life cycle processes"
+status = "published"
+enforcement = "required_profile"
+purpose = "Lifecycle processes are named, so a stage cannot be skipped silently."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO/IEC 38507"
+edition = "2022"
+title = "Information technology - Governance of IT - Governance implications of the use of artificial intelligence by organizations"
+status = "published"
+enforcement = "required_profile"
+purpose = "Decisions that belong to a governing body are named as such."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO/IEC 8183"
+edition = "2023"
+title = "Information technology - Artificial intelligence - Data life cycle framework"
+status = "published"
+enforcement = "mandatory"
+purpose = "A dataset states its stage, and cannot move backwards into acquisition once it has been used."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO/IEC 5259"
+title = "Artificial intelligence - Data quality for analytics and machine learning"
+status = "published"
+enforcement = "mandatory"
+purpose = "Quality measures are defined before the data is used, and travel with it."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO/IEC 25012"
+edition = "2008"
+title = "Software engineering - Software product Quality Requirements and Evaluation - Data quality model"
+status = "published"
+enforcement = "mandatory"
+purpose = "Quality is reported by characteristic, never as one score."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO/IEC 25024"
+edition = "2015"
+title = "Systems and software engineering - Measurement of data quality"
+status = "published"
+enforcement = "mandatory"
+purpose = "Each characteristic has a measure with a stated computation."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 8000"
+title = "Data quality"
+status = "published"
+enforcement = "recommended"
+purpose = "Data carries its own meaning: values reference registered concepts, not private codes."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 15489"
+edition = "2016"
+title = "Information and documentation - Records management"
+status = "published"
+enforcement = "mandatory"
+purpose = "Records are identified, retained, held and disposed of with evidence."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 10013"
+edition = "2021"
+title = "Quality management systems - Guidance for documented information"
+status = "published"
+enforcement = "required_profile"
+purpose = "Controlled documents carry their state, their owner and their review date."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 9001"
+edition = "2015"
+title = "Quality management systems - Requirements"
+status = "published"
+enforcement = "required_profile"
+purpose = "The organisational frame the documented information sits in."
+
+[[standard]]
+namespace = "nist"
+identifier = "NIST AI RMF"
+edition = "1.0"
+title = "Artificial Intelligence Risk Management Framework"
+status = "guidance"
+enforcement = "recommended"
+purpose = "A voluntary framework used as a map over the same risk register, not as a second one."
+
+[[standard]]
+namespace = "industry"
+identifier = "CLeAR"
+title = "CLeAR Documentation Framework"
+status = "guidance"
+enforcement = "recommended"
+purpose = "Generated documentation is comparable, legible, actionable and robust."
+
+[[standard]]
+namespace = "industry"
+identifier = "Model Cards"
+title = "Model Cards for Model Reporting"
+status = "guidance"
+enforcement = "recommended"
+purpose = "The published shape for describing a model and its use here."
+
+[[standard]]
+namespace = "industry"
+identifier = "Datasheets for Datasets"
+title = "Datasheets for Datasets"
+status = "guidance"
+enforcement = "recommended"
+purpose = "The published shape for describing a dataset."
+
+[[standard]]
+namespace = "industry"
+identifier = "FactSheets"
+title = "AI FactSheets"
+status = "guidance"
+enforcement = "recommended"
+purpose = "The flat question-and-answer form an auditor works through."

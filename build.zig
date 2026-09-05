@@ -19,15 +19,21 @@ pub fn build(b: *std.Build) void {
     });
 
     // ---- Command-line surface -------------------------------------------
-    const cli = b.addExecutable(.{
-        .name = "zag",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/cli/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "zag", .module = zag }},
-        }),
+    const cli_module = b.createModule(.{
+        .root_source_file = b.path("src/cli/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zag", .module = zag }},
     });
+    // The standards registry is data, and it ships inside the binary so that
+    // `zag standards` and `zag check` work from any directory.
+    cli_module.addAnonymousImport("registry_language", .{ .root_source_file = b.path("standards/registry/language.toml") });
+    cli_module.addAnonymousImport("registry_accessibility", .{ .root_source_file = b.path("standards/registry/accessibility.toml") });
+    cli_module.addAnonymousImport("registry_knowledge", .{ .root_source_file = b.path("standards/registry/knowledge.toml") });
+    cli_module.addAnonymousImport("registry_interoperability", .{ .root_source_file = b.path("standards/registry/interoperability.toml") });
+    cli_module.addAnonymousImport("registry_governance", .{ .root_source_file = b.path("standards/registry/governance.toml") });
+
+    const cli = b.addExecutable(.{ .name = "zag", .root_module = cli_module });
     b.installArtifact(cli);
 
     // ---- Workspace daemon ------------------------------------------------
