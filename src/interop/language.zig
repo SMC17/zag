@@ -69,6 +69,17 @@ pub const Tag = struct {
         return tag;
     }
 
+    /// The language subtag as a slice. Callers must not slice the array field
+    /// directly: slicing a by-value array yields a temporary.
+    pub fn languageCode(self: *const Tag) []const u8 {
+        return &self.language;
+    }
+
+    pub fn regionCode(self: *const Tag) ?[]const u8 {
+        if (self.region) |*region| return region[0..];
+        return null;
+    }
+
     pub fn format(self: Tag, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try w.writeAll(&self.language);
         if (self.script) |s| try w.print("-{s}", .{&s});
@@ -98,4 +109,12 @@ test "language tags validate every subtag" {
     try std.testing.expectError(error.UnknownRegion, Tag.parse("en-ZZ"));
     try std.testing.expectError(error.UnknownScript, Tag.parse("en-Qqqq"));
     try std.testing.expectError(error.MalformedTag, Tag.parse("english"));
+}
+
+test "subtag accessors return the real bytes" {
+    const tag = try Tag.parse("en-GB");
+    try std.testing.expectEqualStrings("en", tag.languageCode());
+    try std.testing.expectEqualStrings("GB", tag.regionCode().?);
+    const plain_tag = try Tag.parse("de");
+    try std.testing.expect(plain_tag.regionCode() == null);
 }
