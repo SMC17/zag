@@ -36,10 +36,14 @@ pub const knowledge = struct {
 pub const metadata = struct {
     pub const value_domain = @import("metadata/value_domain.zig");
     pub const registry = @import("metadata/registry.zig");
+    pub const publishing = @import("metadata/publishing.zig");
 };
 
 pub const data = struct {
     pub const provenance = @import("data/provenance.zig");
+    pub const lifecycle = @import("data/lifecycle.zig");
+    pub const quality = @import("data/quality.zig");
+    pub const fair = @import("data/fair.zig");
 };
 
 pub const standards = struct {
@@ -82,6 +86,28 @@ pub const ai = struct {
     pub const approval = @import("ai/approval.zig");
     pub const tools = @import("ai/tools.zig");
     pub const runtime = @import("ai/runtime.zig");
+    pub const risk = @import("ai/risk.zig");
+    pub const impact = @import("ai/impact.zig");
+    pub const evaluation = @import("ai/evaluation.zig");
+    pub const transparency = @import("ai/transparency.zig");
+    pub const documentation = @import("ai/documentation.zig");
+};
+
+pub const records = struct {
+    pub const ledger = @import("records/ledger.zig");
+};
+
+pub const content = struct {
+    pub const ir = @import("content/ir.zig");
+    pub const markdown = @import("content/markdown.zig");
+    pub const dita = @import("content/dita.zig");
+    pub const docbook = @import("content/docbook.zig");
+    pub const s1000d = @import("content/s1000d.zig");
+    pub const iirds = @import("content/iirds.zig");
+};
+
+pub const accessibility = struct {
+    pub const contrast = @import("accessibility/contrast.zig");
 };
 
 pub const version = "0.1.0";

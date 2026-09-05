@@ -193,21 +193,59 @@ pub const Session = struct {
 
     /// Run a program to completion, folding its output in as it arrives.
     /// This is the shape the command-line tool and the daemon both use.
-    pub fn run(self: *Session, path: []const u8, args: []const []const u8, env: []const []const u8, working_directory: ?[]const u8) !void {
+    ///
+    /// The loop waits on the pseudoterminal rather than spinning, and it stops
+    /// at the deadline whatever the child does, so a program that never exits
+    /// cannot hang the caller.
+    pub fn run(
+        self: *Session,
+        path: []const u8,
+        args: []const []const u8,
+        env: []const []const u8,
+        working_directory: ?[]const u8,
+        timeout: timeutil.Duration,
+    ) !void {
         try self.spawn(path, args, env, working_directory);
+        const pty = self.pty.?;
         var buffer: [8192]u8 = undefined;
-        var idle: usize = 0;
-        while (idle < 2000) {
-            const n = try self.pump(&buffer);
-            if (n == 0) {
-                if (self.child) |child| {
-                    if (child.poll() != null) break;
+
+        const deadline_ms = @max(timeout.millis(), 100);
+        var waited_ms: i64 = 0;
+        var child_finished = false;
+
+        while (waited_ms < deadline_ms) {
+            if (pty.waitReadable(50)) {
+                const n = try self.pump(&buffer);
+                if (n > 0) {
+                    self.tick(timeutil.Duration.fromMillis(1));
+                    continue;
                 }
-                idle += 1;
-                continue;
+                // Readable with nothing to read means the program's end of the
+                // pseudoterminal has closed. That is the reliable end signal;
+                // waiting on the process is not, because something else may
+                // have reaped it first.
+                child_finished = true;
+                break;
             }
-            idle = 0;
-            self.tick(timeutil.Duration.fromMillis(1));
+            waited_ms += 50;
+            if (self.child) |child| {
+                if (child.poll() != null) {
+                    child_finished = true;
+                    break;
+                }
+            }
+        }
+
+        if (child_finished) {
+            // Drain whatever the program wrote just before it ended.
+            while (pty.waitReadable(10)) {
+                const n = try self.pump(&buffer);
+                if (n == 0) break;
+            }
+        } else if (self.child) |child| {
+            // The deadline passed. Stop the program rather than leaving it.
+            child.signal(15);
+            _ = child.poll();
         }
     }
 };
@@ -294,6 +332,7 @@ test "a real shell session records a real command" {
         &.{ "/bin/sh", "-c", "printf '\\033]133;C;cmdline=echo hello\\007hello\\r\\n\\033]133;D;0\\007'" },
         &.{"PATH=/usr/bin:/bin"},
         null,
+        timeutil.Duration.fromSeconds(10),
     ) catch |err| switch (err) {
         error.OpenFailed, error.ConfigureFailed, error.UnsupportedPlatform => return error.SkipZigTest,
         else => return err,
