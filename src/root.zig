@@ -31,6 +31,7 @@ pub const knowledge = struct {
     pub const thesaurus = @import("knowledge/thesaurus.zig");
     pub const skos = @import("knowledge/skos.zig");
     pub const vocabulary = @import("knowledge/vocabulary.zig");
+    pub const base = @import("knowledge/base.zig");
 };
 
 pub const metadata = struct {
@@ -73,6 +74,12 @@ pub const workspace = struct {
     pub const block = @import("workspace/block.zig");
     pub const model = @import("workspace/model.zig");
     pub const workflow = @import("workspace/workflow.zig");
+    pub const history = @import("workspace/history.zig");
+    pub const service = @import("workspace/service.zig");
+};
+
+pub const editor = struct {
+    pub const document = @import("editor/document.zig");
 };
 
 pub const terminal = struct {

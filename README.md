@@ -33,11 +33,12 @@ graph, an audit trail and an agent's context are all views of the same events.
 | Part | What it does |
 | --- | --- |
 | `src/events` | The typed event union, and an append-only log whose entries are chained by hash |
-| `src/workspace` | Blocks and sessions, folded from the log |
+| `src/workspace` | Blocks, sessions, workflows, structured history, and the workspace service |
+| `src/editor` | The command line as an editing document, with undo that groups by intent |
 | `src/terminal` | Escape-sequence parser, screen with scrollback, shell integration, real pseudoterminal |
 | `src/ai` | Capabilities, the policy engine, approvals, typed tools, risk, impact, transparency, generated cards |
 | `src/language` | The plain-language pass, with controlled-English and easy-to-read profiles |
-| `src/knowledge` | The concept system, the thesaurus view and the published vocabulary |
+| `src/knowledge` | The concept system, the thesaurus view, the published vocabulary and the workspace knowledge base |
 | `src/metadata` | The registry that stops one field having four names |
 | `src/standards` | The standards registry, conformance profiles, crosswalks and the evidence ledger |
 | `src/content` | The typed content model and its publishers |
@@ -70,11 +71,22 @@ zag shell-hook bash            # the shell integration to add to your shell
 zag workflow                   # this repository's own workflow, as a task graph
 zag lifecycle                  # the lifecycle record, and what has not started
 zag evidence                   # the conformance statement, from recorded evidence
+zag history "status:failed zig" # search recorded work, not a text file
+zag knowledge                  # the knowledge under .workspace/, and what is overdue
+```
+
+`zagd` holds a workspace open for clients, remote people and background agents:
+
+```
+zagd status                    # what is in the workspace
+zagd verify                    # check the event log from end to end
+zagd plan                      # what each step of a workflow would need
+zagd history "branch:main"     # the same search, without the tool
 ```
 
 ## What "standards-native" means here
 
-Sixty-four standards, specifications and frameworks are recorded in
+Sixty-five standards, specifications and frameworks are recorded in
 `standards/registry`. Each carries its edition, its status and how the workbench
 enforces it. That record is not decoration: the build reads it, and refuses a
 registry that enforces a withdrawn or draft edition.
@@ -90,6 +102,8 @@ The rules that a program can check are checked by the build:
   tree the renderer must publish.
 - Risk rules: a risk that claims to be mitigated must name a control that is
   enforced by code. An instruction to a model is not a control.
+- Knowledge rules over `.workspace/`: an entry needs a named owner, a summary
+  and a review date, and it cannot claim to be about a concept nobody defined.
 
 The rules that a program cannot check are named as such, in every report:
 

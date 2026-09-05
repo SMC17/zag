@@ -71,6 +71,36 @@ That last field matters. A figure computed from an inferred boundary is less
 trustworthy than one computed from a shell mark. The model says which it is,
 rather than averaging the two together.
 
+### History
+
+`src/workspace/history.zig` searches what happened, rather than searching a text
+file. A shell history file cannot say which tests failed on this branch last
+week, because it never recorded the branch, the result or the time. The event
+log recorded all three, so history is a query over blocks:
+
+    zag history "status:failed branch:main since:2026-09-01 zig build"
+
+Bare words match the command text. A filter is written `field:value`. An unknown
+filter name is reported rather than ignored, because a query that silently
+matches everything is worse than one that fails.
+
+Results are ranked by recency and repetition, and a command whose newest run
+failed is pushed down. The weights are written in the code rather than tuned
+invisibly, so the order can be explained to anyone who asks.
+
+### The command editor
+
+`src/editor/document.zig` treats the command line as an editing document, not as
+a string. It is a piece table over two buffers: the original text, which never
+changes, and the added text, which only grows. A cursor moves when the text
+before it changes. A motion never splits a UTF-8 sequence. Undo groups by
+intent, so a burst of typing undoes as one action, and an edit that came from an
+agent never merges into a person's own typing.
+
+A second reading of the same text names the parts of a command line: the
+program, the options, the quoted arguments and the operators. An unclosed quote
+is reported, because pressing enter on one hangs the shell.
+
 ### The terminal
 
 `src/terminal` holds four things. There is the Digital Equipment Corporation
@@ -94,6 +124,33 @@ to them. Each step is recorded.
 
 There is no free-form shell tool. No prompt can widen a permission either,
 because permissions come from the policy alone.
+
+### The workspace service and the daemon
+
+`src/workspace/service.zig` is the workspace as a running service, with no user
+interface attached. It owns the log on disk, the blocks folded from that log,
+the knowledge base under `.workspace/`, and the policy engine that every
+automated action passes through. `zagd` is a thin binary over it.
+
+Two properties matter more than features. First, opening a workspace never
+repairs a damaged log. A broken chain is reported, and the service then refuses
+to append, because appending destroys the evidence of where the break is.
+Second, the daemon never runs a workflow step on its own. It reports which steps
+a person has to decide on, and stops there. A headless process that could act
+alone would defeat the capability model.
+
+### The knowledge base
+
+`src/knowledge/base.zig` indexes `.workspace/` as the local-first replacement for
+a hosted drive. It holds rules, prompts, workflows, notebooks, skills, server
+definitions and environments. Each one is a Markdown file with front matter.
+Every entry names an owner and a review date, which is what ISO 30401 asks for,
+and a state, which is what ISO 10013 asks for. An agent is offered only the
+knowledge that is approved and is not overdue.
+
+An entry links to concepts rather than to words, so a search finds the entries
+about a concept, not the ones that happen to use the term. This repository keeps
+its own rules there, and `zag check` audits them like anything else.
 
 ### The standards control plane
 
@@ -125,10 +182,13 @@ test suite checks the approval prompts against the language rules.
 
 - The graphical renderer. The accessibility tree it must publish is built, and
   is checked, so the renderer has a contract to meet.
-- The editor surfaces and the language-server client.
+- The graphical editor surface. The document model underneath it is built.
+- The language-server client.
 - The model providers. The runtime, the policy and the tool types are built.
-- The remote daemon. Its interface is described in `schemas/openapi.json`,
-  generated from the same types the runtime uses.
+- The network interface of the daemon. It is described in
+  `schemas/openapi.json`, which is generated from the types the runtime uses.
+  The daemon opens a workspace, verifies it, reports on it and plans a workflow.
+  It does not yet listen on a socket.
 - Windows and macOS pseudoterminals.
 
 `zag doctor` prints this list from the code, so it cannot drift.

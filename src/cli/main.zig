@@ -33,6 +33,8 @@ const Command = enum {
     workflow,
     lifecycle,
     evidence,
+    history,
+    knowledge,
 
     fn parse(text: []const u8) ?Command {
         const table = [_]struct { name: []const u8, command: Command }{
@@ -60,6 +62,8 @@ const Command = enum {
             .{ .name = "workflow", .command = .workflow },
             .{ .name = "lifecycle", .command = .lifecycle },
             .{ .name = "evidence", .command = .evidence },
+            .{ .name = "history", .command = .history },
+            .{ .name = "knowledge", .command = .knowledge },
         };
         for (table) |entry| {
             if (std.mem.eql(u8, entry.name, text)) return entry.command;
@@ -94,6 +98,8 @@ pub const help_text =
     \\  workflow            Show this repository's own workflow as a task graph.
     \\  lifecycle           Show the lifecycle record, and what has not started.
     \\  evidence            Write the conformance statement from recorded evidence.
+    \\  history <query>     Search recorded work. For example: status:failed zig
+    \\  knowledge           Show the knowledge under .workspace/, and what is overdue.
     \\
     \\Options
     \\  --profile <name>    Use this conformance profile. The default is "default".
@@ -102,6 +108,7 @@ pub const help_text =
     \\  --json              Write the result as JSON.
     \\  --out <directory>   Write generated files here.
     \\  --repo <directory>  Audit this directory.
+    \\  --root <directory>  Read the workspace in this directory.
     \\
     \\Read more in README.md, or run "zag doctor" to see this build.
     \\
@@ -114,6 +121,7 @@ const Options = struct {
     json: bool = false,
     out: []const u8 = ".",
     repo: []const u8 = ".",
+    root: []const u8 = ".",
     positional: []const []const u8 = &.{},
     /// Everything after `--`.
     passthrough: []const []const u8 = &.{},
@@ -146,6 +154,7 @@ fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
             .{ .flag = "--audience", .field = &options.audience },
             .{ .flag = "--out", .field = &options.out },
             .{ .flag = "--repo", .field = &options.repo },
+            .{ .flag = "--root", .field = &options.root },
         };
         var matched = false;
         for (named) |entry| {
@@ -243,11 +252,13 @@ fn run(
         .report => try exampleReport(arena, w),
         .events => try events(arena, io, w, options),
         .agents => try agentsFile(arena, io, w, options),
-        .run => try runCommand(arena, w, options),
+        .run => try runCommand(arena, io, w, options),
         .shell_hook => try shellHook(w, options),
         .workflow => try workflowReport(arena, w, options),
         .lifecycle => try lifecycleReport(arena, w),
         .evidence => try evidenceReport(arena, io, w, options),
+        .history => try historySearch(arena, io, w, options),
+        .knowledge => try knowledgeIndex(arena, io, w, options),
     };
 }
 
@@ -707,6 +718,85 @@ fn events(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Opti
     return 0;
 }
 
+/// Search recorded work, using the structured history query language. The
+/// answer says what was asked as well as what matched, because a search that
+/// silently drops a filter is worse than one that fails.
+fn historySearch(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
+    const query_text = try std.mem.join(arena, " ", options.positional);
+    const parsed = try zag.workspace.history.parse(arena, query_text);
+    if (!parsed.ok()) {
+        for (parsed.problems) |problem| {
+            try problem.writeSentence(w);
+            try w.writeAll("\n");
+        }
+        try w.writeAll("\nFilters: status, kind, actor, dir, branch, repo, exit, since, until, marked.\n");
+        return 2;
+    }
+    const opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.root,
+        .actor = workbenchActor(),
+        .now = wallClock(io),
+    }) catch {
+        try w.print("zag could not open the workspace in {s}.\n", .{options.root});
+        return 1;
+    };
+    if (opened.report.chainBreak) |broken| {
+        try w.print("The log is broken at event {d}, so the results below stop being trustworthy there.\n\n", .{broken.sequence});
+    }
+    const index = try opened.service.blocks();
+    const results = try zag.workspace.history.run(arena, index, parsed.query, .{
+        .now = wallClock(io),
+        .limit = 20,
+    });
+    try results.writeList(w);
+    return 0;
+}
+
+/// Show the workspace knowledge base: what is there, who owns it, and what is
+/// past its review date. ISO 30401 asks for named owners and current
+/// knowledge; this is where the product answers for itself.
+fn knowledgeIndex(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
+    const opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.root,
+        .actor = workbenchActor(),
+        .now = wallClock(io),
+    }) catch {
+        try w.print("zag could not open the workspace in {s}.\n", .{options.root});
+        return 1;
+    };
+    if (opened.report.knowledgeCount == 0) {
+        try w.print("There is no knowledge under {s}/{s}/ yet.\n\n", .{ options.root, zag.workspace.service.workspace_directory });
+        try w.writeAll(zag.knowledge.base.layout);
+        try w.writeAll("\n");
+        return 0;
+    }
+    try opened.service.knowledge.writeIndex(w);
+    if (opened.report.knowledgeFindings.len > 0) {
+        try w.writeAll("\nWhat needs attention\n");
+        for (opened.report.knowledgeFindings) |finding| {
+            try w.print("  {s}: {s}\n", .{ finding.path, finding.message });
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/// The actor the tool acts as when it opens a workspace of its own accord.
+fn workbenchActor() zag.events.event.Actor {
+    return .{
+        .id = zag.core.id.ActorId.fromRaw(.{ .bytes = [_]u8{0} ** 16 }),
+        .kind = .system,
+        .label = "zag",
+    };
+}
+
+/// The wall clock, read through the platform's input and output layer rather
+/// than from a global, so a test can drive the tool with a clock of its own.
+fn wallClock(io: std.Io) zag.core.time.Timestamp {
+    const raw = std.Io.Timestamp.now(io, .real);
+    return .{ .ns = @intCast(raw.nanoseconds) };
+}
+
 fn agentsFile(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
     const path = if (options.positional.len > 0) options.positional[0] else "AGENTS.md";
     const source = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(4 << 20)) catch {
@@ -731,7 +821,7 @@ fn agentsFile(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: 
     return 0;
 }
 
-fn runCommand(arena: std.mem.Allocator, w: *std.Io.Writer, options: Options) !u8 {
+fn runCommand(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
     if (options.passthrough.len == 0) {
         try w.writeAll("Put the command after two dashes. For example: zag run -- echo hello\n");
         return 2;
@@ -741,65 +831,43 @@ fn runCommand(arena: std.mem.Allocator, w: *std.Io.Writer, options: Options) !u8
         return 1;
     }
 
-    var log = zag.events.log.Log.init(arena, 1);
-    var generator: zag.core.id.Generator = .init(1, 0);
-    const actor: zag.events.event.Actor = .{ .id = generator.next(zag.core.id.ActorId), .kind = .person, .label = "you" };
-    const start = zag.core.time.Timestamp.epoch;
-
-    var session = try zag.terminal.session.Session.init(arena, &log, generator.next(zag.core.id.SessionId), .{
-        .actor = actor,
-        .working_directory = options.repo,
-    }, start);
-
-    // The command runs under a shell so that the shell integration marks the
-    // block boundary, which is what makes the run a record rather than a blob.
-    const hook = zag.terminal.shell_integration.hooks.bash;
-    _ = hook;
-    var command_text: std.ArrayList(u8) = .empty;
-    for (options.passthrough, 0..) |part, index| {
-        if (index > 0) try command_text.append(arena, ' ');
-        try command_text.appendSlice(arena, part);
+    const opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.root,
+        .actor = .{
+            .id = zag.core.id.ActorId.fromRaw(.{ .bytes = [_]u8{0} ** 16 }),
+            .kind = .person,
+            .label = "you",
+        },
+        .now = wallClock(io),
+    }) catch {
+        try w.print("zag could not open the workspace in {s}.\n", .{options.root});
+        return 1;
+    };
+    var service = opened.service;
+    if (opened.report.chainBreak) |broken| {
+        try w.print("The event log is broken at event {d}, so nothing new will be written to it.\n", .{broken.sequence});
+        try w.writeAll("Keep the file as it is. A broken log is evidence, not a fault to repair.\n");
+        return 1;
     }
 
-    const script = try std.fmt.allocPrint(arena,
-        \\printf '\033]133;C;cmdline=%s\007' "$ZAG_COMMAND"; {s}; status=$?; printf '\033]133;D;%s\007' "$status"; exit $status
-    , .{command_text.items});
+    const command_text = try std.mem.join(arena, " ", options.passthrough);
+    const result = try service.runCommand(command_text, zag.core.time.Duration.fromSeconds(120));
+    try service.flush(io);
 
-    try session.run(
-        "/bin/sh",
-        &.{ "/bin/sh", "-c", script },
-        &.{
-            try std.fmt.allocPrint(arena, "ZAG_COMMAND={s}", .{command_text.items}),
-            "TERM=xterm-256color",
-            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        },
-        options.repo,
-        zag.core.time.Duration.fromSeconds(120),
-    );
-    try session.close("the command finished");
-
-    const screen_text = try session.screen.text(arena);
-    try w.print("{s}\n", .{std.mem.trim(u8, screen_text, " \n")});
-
-    const index = try zag.workspace.block.Index.build(arena, log);
+    try w.print("{s}\n", .{std.mem.trim(u8, result.screen, " \n")});
     try w.writeAll("\nRecorded as:\n");
-    for (index.blocks.items) |block| {
+    for (result.blocks) |block| {
         try w.writeAll("  ");
         try block.writeSummary(w);
         try w.writeAll("\n");
     }
-    if (try log.verify()) |_| {
+    if (try service.log.verify()) |_| {
         try w.writeAll("\nThe log does not verify, which should never happen. Please report it.\n");
         return 1;
     }
-    try w.print("\n{d} events, and the log verifies.\n", .{log.count()});
+    try w.print("\n{d} events in the log, and it verifies. Search it with \"zag history\".\n", .{service.log.count()});
 
-    for (index.blocks.items) |block| {
-        if (block.exitStatus) |status| {
-            if (status != 0) return status;
-        }
-    }
-    return 0;
+    return result.exitStatus orelse 0;
 }
 
 fn shellHook(w: *std.Io.Writer, options: Options) !u8 {
@@ -980,8 +1048,62 @@ fn evidenceReport(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, optio
         });
     }
 
+    // The workspace knowledge base, against ISO 30401 and ISO 10013.
+    const workspace_opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.repo,
+        .actor = workbenchActor(),
+        .now = wallClock(io),
+    }) catch null;
+    if (workspace_opened) |workspace| {
+        var missing_owner: usize = 0;
+        var overdue: usize = 0;
+        var stateless: usize = 0;
+        for (workspace.report.knowledgeFindings) |finding| {
+            switch (finding.code) {
+                .missing_owner => missing_owner += 1,
+                .review_overdue => overdue += 1,
+                .approved_without_review_date => stateless += 1,
+                else => {},
+            }
+        }
+        const knowledge_checks = [_]struct {
+            requirement_id: []const u8,
+            failures: usize,
+            note: []const u8,
+        }{
+            .{
+                .requirement_id = "ISO-30401:R-OWNER",
+                .failures = missing_owner,
+                .note = "Every entry under .workspace/ names an owner. Whether that owner acts on the review is not established here.",
+            },
+            .{
+                .requirement_id = "ISO-30401:R-CURRENT",
+                .failures = overdue,
+                .note = "No approved entry is past its review date. Whether the content is still correct is established by review.",
+            },
+            .{
+                .requirement_id = "ISO-10013:R-STATE",
+                .failures = stateless,
+                .note = "Every entry carries a state, so a draft cannot be read as approved.",
+            },
+        };
+        for (knowledge_checks) |entry| {
+            try ledger.record(.{
+                .id = ids.next(zag.core.id.EvidenceId),
+                .requirement_id = entry.requirement_id,
+                .subject = "the knowledge base under .workspace/",
+                .method = .static_analysis,
+                .result = if (entry.failures == 0) .pass else .fail,
+                .tool = tool,
+                .created_at = now,
+                .content_hash = zag.core.hash.Hash.of("workspace-knowledge"),
+                .note = entry.note,
+            });
+        }
+    }
+
     // The statement, for each scope the profile covers.
-    const scopes = [_]zag.standards.registry.Scope{ .interface_text, .documentation, .terminology, .metadata, .user_interface, .ai_system, .records, .reporting, .data };
+    const scopes = [_]zag.standards.registry.Scope{ .interface_text, .documentation, .terminology, .metadata, .user_interface, .ai_system, .records, .reporting, .data, .process };
     var worst: u8 = 0;
     for (scopes) |scope| {
         const summary = try ledger.summarise(registry, scope, profile.id);
@@ -1444,6 +1566,43 @@ fn check(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Optio
         }
     } else |_| {
         try w.writeAll("Instruction file: none found.\n");
+    }
+
+    // 9. The workspace knowledge base. ISO 30401 asks for named owners and for
+    // knowledge that is kept current; this is where the product answers for
+    // its own knowledge rather than only for its code.
+    const opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.repo,
+        .actor = workbenchActor(),
+        .now = wallClock(io),
+    }) catch null;
+    if (opened) |workspace| {
+        try w.print("Workspace knowledge: {d} entries, {d} problem(s).\n", .{
+            workspace.report.knowledgeCount,
+            workspace.report.knowledgeFindings.len,
+        });
+        for (workspace.report.knowledgeFindings) |finding| {
+            try w.print("  {s} {s}: {s}\n", .{ finding.code.text(), finding.path, finding.message });
+            problems += 1;
+        }
+        if (workspace.report.chainBreak) |broken| {
+            try w.print("  LOG The event log is broken at event {d}.\n", .{broken.sequence});
+            problems += 1;
+        }
+        // Knowledge an agent reads is product text, so it is held to the same
+        // language rules as the documentation.
+        for (workspace.service.knowledge.entries.items) |entry| {
+            const entry_report = try zag.language.plain.check(arena, entry.body, .{
+                .kind = .body,
+                .audience = profile.audience,
+                .terminology = &system,
+            });
+            for (entry_report.findings) |finding| {
+                if (finding.severity != .blocking) continue;
+                try w.print("  {s} {s}:{d} {s}\n", .{ finding.rule.code(), entry.path, finding.line, finding.message });
+                problems += 1;
+            }
+        }
     }
 
     // The statement.

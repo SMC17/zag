@@ -263,13 +263,36 @@ pub fn check(arena: std.mem.Allocator, source: []const u8, options: Options) !Re
     };
 }
 
+/// Where the front matter ends, in bytes. Front matter is a block fenced by a
+/// line of `+++` or `---` at the very start of the file. Zero when there is
+/// none.
+fn frontMatterEnd(source: []const u8) usize {
+    const fences = [_][]const u8{ "+++", "---" };
+    for (fences) |fence| {
+        if (!std.mem.startsWith(u8, source, fence)) continue;
+        var at = std.mem.indexOfScalar(u8, source, '\n') orelse return 0;
+        at += 1;
+        while (at < source.len) {
+            const line_end = std.mem.indexOfScalarPos(u8, source, at, '\n') orelse source.len;
+            const line = std.mem.trim(u8, source[at..line_end], " \t\r");
+            at = @min(line_end + 1, source.len);
+            if (std.mem.eql(u8, line, fence)) return at;
+        }
+        return 0;
+    }
+    return 0;
+}
+
 /// A byte for each byte of the source: true where the byte is inside a code
 /// span or a fenced code block.
 fn codeMask(arena: std.mem.Allocator, source: []const u8) ![]bool {
     const mask = try arena.alloc(bool, source.len);
     @memset(mask, false);
 
-    var index: usize = 0;
+    var index: usize = frontMatterEnd(source);
+    // Front matter is metadata, not prose. Checking `owner = "..."` as English
+    // produces findings about a line the author cannot rewrite.
+    for (mask[0..index]) |*byte| byte.* = true;
     var in_fence = false;
     var at_line_start = true;
     while (index < source.len) : (index += 1) {
@@ -306,8 +329,12 @@ fn codeMask(arena: std.mem.Allocator, source: []const u8) ![]bool {
         if (at_line_start and index + 4 <= source.len and std.mem.eql(u8, source[index..][0..4], "    ")) {
             const line_end = std.mem.indexOfScalarPos(u8, source, index, '\n') orelse source.len;
             const line = source[index + 4 .. line_end];
-            // A list continuation is prose; a line that looks like a command is not.
-            if (line.len > 0 and !std.ascii.isAlphabetic(line[0])) {
+            // Two kinds of indented line are code: one that does not begin with
+            // a letter, and one that opens an indented block after a blank
+            // line. An indented line that continues a list item is prose, and a
+            // list continuation never follows a blank line.
+            const looks_like_code = line.len > 0 and !std.ascii.isAlphabetic(line[0]);
+            if (looks_like_code or previousLineIsBlank(source, index)) {
                 var mark = index;
                 while (mark < line_end) : (mark += 1) mask[mark] = true;
                 index = line_end;
@@ -318,6 +345,19 @@ fn codeMask(arena: std.mem.Allocator, source: []const u8) ![]bool {
         at_line_start = c == '\n';
     }
     return mask;
+}
+
+/// True when the line before `index` holds nothing but spaces. Used to tell an
+/// indented code block from a list item's continuation line.
+fn previousLineIsBlank(source: []const u8, index: usize) bool {
+    if (index == 0) return true;
+    if (source[index - 1] != '\n') return false;
+    var at = index - 1;
+    while (at > 0 and source[at - 1] != '\n') : (at -= 1) {
+        const c = source[at - 1];
+        if (c != ' ' and c != '\t' and c != '\r') return false;
+    }
+    return true;
 }
 
 fn byPosition(_: void, a: Finding, b: Finding) bool {
@@ -536,12 +576,28 @@ fn checkParagraphs(
     const list_item_limit: usize = 9;
     for (analysis.paragraphs) |paragraph| {
         var sentences: usize = 0;
-        var items: usize = 0;
         for (analysis.sentences) |s| {
             if (s.span.start < paragraph.start or s.span.start >= paragraph.end) continue;
             sentences += 1;
-            if (text.startsListItem(s.text)) items += 1;
         }
+        // List items are counted from the lines, not from the sentences. A
+        // marker like "1." ends a sentence on its own, so counting sentences
+        // that start with a marker misses every numbered item and then reports
+        // the whole list as one long paragraph.
+        var items: usize = 0;
+        var table_rows: usize = 0;
+        var lines = std.mem.splitScalar(u8, analysis.source[paragraph.start..paragraph.end], '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trimStart(u8, line, " \t");
+            if (std.mem.startsWith(u8, trimmed, "|")) {
+                table_rows += 1;
+                continue;
+            }
+            if (text.startsListItem(line)) items += 1;
+        }
+        // A table is neither a paragraph nor a list. A reader scans down one
+        // column, so the limits for prose say nothing useful about it.
+        if (table_rows > 0) continue;
         const position = text.positionOf(analysis.source, paragraph.start);
         if (items > 0) {
             if (items > list_item_limit) {

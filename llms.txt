@@ -20,6 +20,12 @@ Everything that happens becomes a typed event in a hash-chained log. Agents prop
 - [Daemon interface](/schemas/openapi.json): OpenAPI description of the workspace daemon
 - [Metadata registry](/schemas/metadata-registry.json): Registered field names and their value domains
 
+## In this repository
+
+- [Workspace rules](/.workspace/rules/): The rules that apply to work done here
+- [Workspace prompts](/.workspace/prompts/): Reusable instructions for agents
+- [Workspace workflows](/.workspace/workflows/): The task graphs this repository runs
+
 ## Optional
 
 - [Decision records](/docs/adr/): Why the architecture is the way it is

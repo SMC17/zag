@@ -61,9 +61,13 @@ pub fn build(b: *std.Build) void {
     const cli_tests = b.addTest(.{ .root_module = cli.root_module });
     const run_cli_tests = b.addRunArtifact(cli_tests);
 
-    const test_step = b.step("test", "Run the library and command-line tests");
+    const daemon_tests = b.addTest(.{ .root_module = daemon.root_module });
+    const run_daemon_tests = b.addRunArtifact(daemon_tests);
+
+    const test_step = b.step("test", "Run the library, command-line and daemon tests");
     test_step.dependOn(&run_lib_tests.step);
     test_step.dependOn(&run_cli_tests.step);
+    test_step.dependOn(&run_daemon_tests.step);
 
     // ---- Conformance gate ------------------------------------------------
     // `zig build check` is the release gate: it runs the tests and then makes
