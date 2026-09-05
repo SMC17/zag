@@ -72,6 +72,7 @@ pub const events = struct {
 pub const workspace = struct {
     pub const block = @import("workspace/block.zig");
     pub const model = @import("workspace/model.zig");
+    pub const workflow = @import("workspace/workflow.zig");
 };
 
 pub const terminal = struct {
@@ -93,6 +94,7 @@ pub const ai = struct {
     pub const evaluation = @import("ai/evaluation.zig");
     pub const transparency = @import("ai/transparency.zig");
     pub const documentation = @import("ai/documentation.zig");
+    pub const lifecycle = @import("ai/lifecycle.zig");
 };
 
 pub const records = struct {

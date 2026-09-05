@@ -542,7 +542,7 @@
           "type": "string"
         },
         "role": {
-          "$ref": "#/$defs/AgentMessage__enum_43063"
+          "$ref": "#/$defs/AgentMessage__enum_43207"
         },
         "text": {
           "type": "string"
@@ -556,7 +556,7 @@
       ],
       "additionalProperties": false
     },
-    "AgentMessage__enum_43063": {
+    "AgentMessage__enum_43207": {
       "type": "string",
       "enum": [
         "plan",
@@ -614,7 +614,7 @@
           "type": "string"
         },
         "outcome": {
-          "$ref": "#/$defs/ToolFinished__enum_43072"
+          "$ref": "#/$defs/ToolFinished__enum_43216"
         },
         "duration": {
           "type": "string"
@@ -636,7 +636,7 @@
       ],
       "additionalProperties": false
     },
-    "ToolFinished__enum_43072": {
+    "ToolFinished__enum_43216": {
       "type": "string",
       "enum": [
         "completed",
@@ -676,7 +676,7 @@
           "type": "string"
         },
         "changeKind": {
-          "$ref": "#/$defs/FileChanged__enum_43073"
+          "$ref": "#/$defs/FileChanged__enum_43217"
         },
         "beforeHash": {
           "anyOf": [
@@ -716,7 +716,7 @@
       ],
       "additionalProperties": false
     },
-    "FileChanged__enum_43073": {
+    "FileChanged__enum_43217": {
       "type": "string",
       "enum": [
         "created",
@@ -777,7 +777,7 @@
           "type": "string"
         },
         "outcome": {
-          "$ref": "#/$defs/ApprovalResolved__enum_43083"
+          "$ref": "#/$defs/ApprovalResolved__enum_43227"
         },
         "decidedBy": {
           "type": "string"
@@ -794,7 +794,7 @@
       ],
       "additionalProperties": false
     },
-    "ApprovalResolved__enum_43083": {
+    "ApprovalResolved__enum_43227": {
       "type": "string",
       "enum": [
         "allow_once",
@@ -874,7 +874,7 @@
           "maximum": 4294967295
         },
         "severity": {
-          "$ref": "#/$defs/Diagnostic__enum_43084"
+          "$ref": "#/$defs/Diagnostic__enum_43228"
         },
         "source": {
           "type": "string"
@@ -904,7 +904,7 @@
       ],
       "additionalProperties": false
     },
-    "Diagnostic__enum_43084": {
+    "Diagnostic__enum_43228": {
       "type": "string",
       "enum": [
         "hint",

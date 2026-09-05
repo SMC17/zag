@@ -172,6 +172,54 @@ record of how an AI system may affect people and organisations, and what the ope
 
 From: ISO/IEC 42005
 
+## AI system
+
+engineered system that produces outputs such as predictions, recommendations or decisions from data, for objectives a person set
+
+From: ISO/IEC 22989
+
+## machine learning
+
+way of building a system in which behaviour is derived from data rather than written as rules
+
+From: ISO/IEC 22989
+
+## model
+
+part of an AI system that produces an output for a given input, using what was derived during training
+
+From: ISO/IEC 22989
+
+## inference
+
+act of producing an output from a trained model for one input
+
+From: ISO/IEC 22989
+
+## training data
+
+dataset used to derive a model's behaviour
+
+From: ISO/IEC 22989
+
+## AI lifecycle process
+
+named process that an AI system passes through, from stating what it is for to withdrawing it from use
+
+From: ISO/IEC 5338
+
+## human oversight
+
+arrangement by which a person can understand, direct, override and stop what an AI system does
+
+From: ISO/IEC 42001
+
+## documented information
+
+information a party must control, together with the medium it is held on and the rules for keeping it current
+
+From: ISO 10013
+
 ## metric
 
 measure with a defined unit, period, source and comparison basis, reported the same way every time

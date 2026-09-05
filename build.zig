@@ -32,6 +32,7 @@ pub fn build(b: *std.Build) void {
     cli_module.addAnonymousImport("registry_knowledge", .{ .root_source_file = b.path("standards/registry/knowledge.toml") });
     cli_module.addAnonymousImport("registry_interoperability", .{ .root_source_file = b.path("standards/registry/interoperability.toml") });
     cli_module.addAnonymousImport("registry_governance", .{ .root_source_file = b.path("standards/registry/governance.toml") });
+    cli_module.addAnonymousImport("registry_requirements", .{ .root_source_file = b.path("standards/registry/requirements.toml") });
 
     const cli = b.addExecutable(.{ .name = "zag", .root_module = cli_module });
     b.installArtifact(cli);
