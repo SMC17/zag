@@ -1,0 +1,155 @@
+# Knowledge, metadata and interoperability standards.
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO/IEC 11179"
+edition = "2023"
+title = "Information technology - Metadata registries"
+status = "published"
+enforcement = "mandatory"
+purpose = "Every field that crosses an interface is registered once, with one name and one value domain."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 15836"
+title = "Information and documentation - The Dublin Core metadata element set"
+status = "published"
+enforcement = "export_only"
+purpose = "Artefact description on publication."
+
+[[standard]]
+namespace = "w3c"
+identifier = "DCAT"
+edition = "3"
+title = "Data Catalog Vocabulary"
+status = "published"
+enforcement = "export_only"
+purpose = "Dataset catalogues."
+
+[[standard]]
+namespace = "w3c"
+identifier = "SKOS"
+title = "Simple Knowledge Organization System"
+status = "published"
+enforcement = "export_only"
+purpose = "Publishing the workspace vocabulary."
+
+[[standard]]
+namespace = "w3c"
+identifier = "RDF"
+edition = "1.1"
+title = "Resource Description Framework"
+status = "published"
+enforcement = "export_only"
+purpose = "The exchange form of the workspace knowledge graph."
+
+[[standard]]
+namespace = "w3c"
+identifier = "OWL"
+edition = "2"
+title = "Web Ontology Language"
+status = "published"
+enforcement = "informational"
+purpose = "Used only where a relation needs semantics SKOS cannot carry."
+
+[[standard]]
+namespace = "w3c"
+identifier = "JSON-LD"
+edition = "1.1"
+title = "JSON for Linking Data"
+status = "published"
+enforcement = "export_only"
+purpose = "The JSON form of the knowledge graph and of artefact metadata."
+
+[[standard]]
+namespace = "industry"
+identifier = "Schema.org"
+title = "Schema.org vocabulary"
+status = "industry_spec"
+enforcement = "export_only"
+purpose = "Description that general-purpose search engines and agents already read."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 19115"
+title = "Geographic information - Metadata"
+status = "published"
+enforcement = "recommended"
+purpose = "Applied only to artefacts that actually have a geographic extent."
+
+[[standard]]
+namespace = "industry"
+identifier = "FAIR"
+title = "FAIR Guiding Principles for scientific data management and stewardship"
+status = "guidance"
+enforcement = "recommended"
+purpose = "Published vocabularies and datasets are findable, accessible, interoperable and reusable."
+
+[[standard]]
+namespace = "oasis"
+identifier = "DITA"
+edition = "1.3"
+title = "Darwin Information Typing Architecture"
+status = "published"
+enforcement = "export_only"
+purpose = "Export for teams that author in DITA."
+
+[[standard]]
+namespace = "oasis"
+identifier = "DocBook"
+edition = "5.1"
+title = "DocBook"
+status = "published"
+enforcement = "export_only"
+purpose = "Export for book-shaped deliverables."
+
+[[standard]]
+namespace = "industry"
+identifier = "S1000D"
+title = "International specification for technical publications"
+status = "industry_spec"
+enforcement = "export_only"
+purpose = "Export of procedures as data modules."
+
+[[standard]]
+namespace = "industry"
+identifier = "iiRDS"
+edition = "1.2"
+title = "Intelligent Information Request and Delivery Standard"
+status = "industry_spec"
+enforcement = "export_only"
+purpose = "Packaging documentation with delivery metadata."
+
+[[standard]]
+namespace = "industry"
+identifier = "llms.txt"
+edition = "2"
+title = "llms.txt proposal"
+status = "industry_spec"
+enforcement = "recommended"
+purpose = "Machine-readable documentation discovery, read and published."
+
+[[standard]]
+namespace = "industry"
+identifier = "AGENTS.md"
+title = "AGENTS.md convention"
+status = "industry_spec"
+enforcement = "mandatory"
+purpose = "Repository-local instructions, parsed as behaviour and never as permission."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 30401"
+edition = "2018"
+title = "Knowledge management systems - Requirements"
+status = "published"
+enforcement = "required_profile"
+purpose = "The knowledge layer is a managed asset, not an accident of a wiki."
+
+[[standard]]
+namespace = "industry"
+identifier = "DocLang"
+title = "DocLang documentation language"
+status = "industry_spec"
+enforcement = "informational"
+purpose = "Considered as an authoring surface. The canonical content model covers what the product needs, and DocLang would be an import format if a team asked for it."

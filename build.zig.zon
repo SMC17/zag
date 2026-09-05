@@ -1,0 +1,20 @@
+.{
+    .name = .zag,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x9179a895c6aa258,
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "standards",
+        "vocab",
+        "schemas",
+        "docs",
+        "AGENTS.md",
+        "llms.txt",
+        "README.md",
+        "LICENSE",
+    },
+}

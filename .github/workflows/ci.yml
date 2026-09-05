@@ -1,0 +1,55 @@
+name: build and audit
+
+# The gate is one command: `zig build check` runs every test, then audits the
+# repository against its own standards profile. A pull request that breaks a
+# standard the build can check does not go green.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.16.0
+        run: |
+          python3 -m pip install --quiet 'ziglang==0.16.0'
+          echo "$(python3 -c 'import ziglang, os; print(os.path.dirname(ziglang.__file__))')" >> "$GITHUB_PATH"
+
+      - name: Show the toolchain
+        run: zig version
+
+      - name: Run the tests and audit the repository
+        run: zig build check
+
+      - name: Check that the generated files are up to date
+        run: |
+          zig build emit
+          if ! git diff --quiet; then
+            echo "Generated files are out of date. Run 'zig build emit' and commit the result."
+            git --no-pager diff --stat
+            exit 1
+          fi
+
+      - name: Check the product's own text
+        run: |
+          ./zig-out/bin/zag lint README.md AGENTS.md docs/architecture.md \
+            docs/standards-conformance.md docs/plain-language.md
+
+      - name: Show the workspace knowledge and verify the log
+        run: |
+          ./zig-out/bin/zag knowledge
+          ./zig-out/bin/zagd verify
+
+      - name: Write the conformance statement
+        run: ./zig-out/bin/zag evidence
+
+      - name: Show the accessibility statement
+        run: ./zig-out/bin/zag accessibility
+
+      - name: Show the lifecycle record
+        run: ./zig-out/bin/zag lifecycle

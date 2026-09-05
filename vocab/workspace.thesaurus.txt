@@ -1,0 +1,199 @@
+actor
+    NT  agent
+
+agent
+    BT  actor
+    RT  tool call
+    RT  AI system
+
+AI lifecycle process
+    RT  AI system
+
+AI system
+    NT  model
+    RT  agent
+    RT  machine learning
+    RT  AI lifecycle process
+    RT  human oversight
+
+approval
+    RT  authorisation decision
+    RT  human oversight
+
+artefact
+    UF  artifact
+    NT  record
+    NT  dataset
+    NT  documented information
+    RT  provenance
+
+artifact
+    USE artefact
+    SN  US spelling; both forms resolve to this concept.
+
+audience
+    RT  plain language
+
+authorisation decision
+    BT  record
+    RT  policy
+    RT  approval
+
+bench
+    USE workspace
+
+block
+    UF  command block
+    BT  session
+    RT  session
+    RT  workspace event
+    RT  shell integration
+
+capability
+    RT  policy
+
+command block
+    USE block
+
+concept
+    RT  term
+
+conformance profile
+    RT  requirement
+
+data element
+
+dataset
+    BT  artefact
+    NT  training data
+
+development environment
+    NT  workspace
+
+documented information
+    BT  artefact
+
+environment group
+    USE workspace
+
+event
+    USE workspace event
+
+event log
+    BT  workspace
+
+evidence
+    BT  record
+    RT  requirement
+
+execution graph
+    NT  tool call
+    RT  workspace event
+
+human oversight
+    RT  AI system
+    RT  approval
+
+impact assessment
+    RT  risk
+
+inference
+    RT  model
+
+knowledge base
+    BT  workspace
+
+machine learning
+    RT  AI system
+
+metric
+
+model
+    BT  AI system
+    RT  inference
+
+plain language
+    RT  audience
+
+policy
+    RT  capability
+    RT  authorisation decision
+
+project shell
+    USE workspace
+    SN  Used in early drafts. Do not use in new text.
+
+provenance
+    RT  artefact
+
+pseudoterminal
+    UF  PTY
+    UF  pty
+    RT  terminal surface
+
+PTY
+    USE pseudoterminal
+    SN  Write the full term on first use, then the short form.
+
+pty
+    USE pseudoterminal
+
+record
+    BT  artefact
+    NT  authorisation decision
+    NT  evidence
+
+requirement
+    BT  standard
+    RT  evidence
+    RT  conformance profile
+
+risk
+    RT  impact assessment
+
+session
+    BT  workspace
+    NT  block
+    NT  terminal surface
+    RT  block
+
+shell integration
+    RT  block
+
+standard
+    NT  requirement
+
+term
+    RT  concept
+
+terminal surface
+    BT  session
+    RT  pseudoterminal
+
+tool call
+    BT  execution graph
+    RT  agent
+
+training data
+    BT  dataset
+
+workflow
+
+workspace
+    UF  bench
+    UF  project shell
+    UF  environment group
+    BT  development environment
+    NT  session
+    NT  workspace event
+    NT  event log
+    NT  knowledge base
+
+workspace event
+    UF  event
+    BT  workspace
+    RT  block
+    RT  execution graph
+
+worktree
+
