@@ -247,3 +247,38 @@ verification = "automated_test"
 severity = "major"
 rationale = "A measure chosen after seeing the data is a measure chosen to pass."
 check = "DATA-QUALITY"
+
+[[requirement]]
+id = "ISO-30401:R-OWNER"
+standard = "ISO 30401"
+clause = "8.1"
+statement = "Every piece of knowledge the workspace holds names the person or group that keeps it current."
+scopes = ["process", "documentation"]
+verification = "static_analysis"
+severity = "major"
+rationale = "Knowledge with no owner is not maintained, and nobody notices when it stops being true."
+check = "KB01"
+residual_judgement = "A checker sees that an owner is named. Whether that owner acts on the review is established by asking them."
+
+[[requirement]]
+id = "ISO-30401:R-CURRENT"
+standard = "ISO 30401"
+clause = "8.2"
+statement = "Knowledge offered to a person or an agent is current: it is approved, and it is not past its review date."
+scopes = ["process", "documentation"]
+verification = "static_analysis"
+severity = "major"
+rationale = "Out-of-date guidance is followed as confidently as current guidance, and does more damage."
+check = "KB03"
+residual_judgement = "A checker sees the date pass. Whether the content is still correct is established by review."
+
+[[requirement]]
+id = "ISO-10013:R-STATE"
+standard = "ISO 10013"
+clause = "5.4"
+statement = "Documented information carries its state, so a reader can tell a draft from an approved document."
+scopes = ["documentation"]
+verification = "static_analysis"
+severity = "major"
+rationale = "A draft read as approved is the most common way wrong guidance spreads."
+check = "KB04"

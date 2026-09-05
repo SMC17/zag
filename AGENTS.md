@@ -43,13 +43,25 @@ something, it is not, and `zag agents AGENTS.md` will say so.
 
 - `src/core` holds identifiers, hashing and time.
 - `src/events` holds the typed event stream and its hash-chained log.
-- `src/workspace` folds that log into blocks and sessions.
+- `src/workspace` folds that log into blocks and sessions, and holds workflows,
+  structured history and the headless workspace service.
+- `src/editor` holds the command line as an editing document.
 - `src/terminal` holds the escape-sequence parser, the screen and the
   pseudoterminal.
 - `src/ai` holds capabilities, the policy engine, approvals and governance.
 - `src/language` holds the plain-language rules.
-- `src/knowledge` and `src/metadata` hold the vocabulary and the registry.
+- `src/knowledge` and `src/metadata` hold the vocabulary, the workspace
+  knowledge base and the registry.
 - `src/standards` holds the standards registry, profiles and evidence.
+
+## Where the rules of this workspace live
+
+- `.workspace/rules/` holds the rules that apply here. Read them before you
+  start. `zag knowledge` lists them with their owners and review dates.
+- `.workspace/prompts/`, `.workspace/workflows/` and `.workspace/environments/`
+  hold reusable instructions, task graphs and toolchains.
+- An entry that is not approved, or that is past its review date, is not a rule
+  you should follow. Say that you found one instead of acting on it.
 
 ## What to do when a check fails
 
