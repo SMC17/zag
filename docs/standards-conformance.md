@@ -57,9 +57,9 @@ runs in that gate.
 | Impact | Excluded uses, affected groups, a route to challenge, and a mitigation for each harm | `src/ai/impact.zig` |
 | Content | Procedures have steps; warnings state a consequence; figures have text alternatives; tables have headers | `src/content/ir.zig` |
 | Instruction files | Any line that tries to grant a permission is reported | `src/agent_context/agents_md.zig` |
+| Workspace knowledge | Every entry under `.workspace/` names an owner, a summary, a state and a review date, and is about a concept that exists | `src/knowledge/base.zig` |
 
-The table above has eleven rows on purpose: each row is one subsystem, and each
-one fails the build on its own.
+Each row is one subsystem, and each one fails the build on its own.
 
 ## Requirements, and the evidence for them
 

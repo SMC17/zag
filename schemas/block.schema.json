@@ -217,7 +217,7 @@
           "type": "object",
           "properties": {
             "hashed": {
-              "$ref": "#/$defs/ContentRef__struct_44190"
+              "$ref": "#/$defs/ContentRef__struct_fae7a8e9"
             }
           },
           "required": [
@@ -227,7 +227,7 @@
         }
       ]
     },
-    "ContentRef__struct_44190": {
+    "ContentRef__struct_fae7a8e9": {
       "type": "object",
       "properties": {
         "hash": {

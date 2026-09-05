@@ -1,2 +1,6 @@
 zig-out/
 .zig-cache/
+
+# A person's own recorded work. The rules and prompts beside it are committed;
+# the event log is theirs.
+.workspace/events.jsonl

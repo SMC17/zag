@@ -244,6 +244,14 @@ pub fn workbenchDocument() Document {
                 },
             },
             .{
+                .title = "In this repository",
+                .links = &.{
+                    .{ .title = "Workspace rules", .url = "/.workspace/rules/", .note = "The rules that apply to work done here" },
+                    .{ .title = "Workspace prompts", .url = "/.workspace/prompts/", .note = "Reusable instructions for agents" },
+                    .{ .title = "Workspace workflows", .url = "/.workspace/workflows/", .note = "The task graphs this repository runs" },
+                },
+            },
+            .{
                 .title = "Optional",
                 .links = &.{
                     .{ .title = "Decision records", .url = "/docs/adr/", .note = "Why the architecture is the way it is" },
@@ -270,7 +278,7 @@ test "a document round trips" {
     try testing.expectEqualStrings("zag workbench", parsed.title);
     try testing.expect(std.mem.indexOf(u8, parsed.summary, "hash-chained") == null);
     try testing.expect(std.mem.indexOf(u8, parsed.summary, "standards-native") != null);
-    try testing.expectEqual(@as(usize, 3), parsed.sections.len);
+    try testing.expectEqual(workbenchDocument().sections.len, parsed.sections.len);
     try testing.expectEqual(workbenchDocument().linkCount(), parsed.linkCount());
 
     const docs = parsed.section("Docs").?;

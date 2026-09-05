@@ -18,6 +18,13 @@ pub const Options = struct {
 };
 
 /// Short, stable schema name for a composite type.
+///
+/// A type declared inside another one is named by the compiler with a serial
+/// number, such as `AgentMessage__enum_43207`. That number changes whenever
+/// unrelated code changes, which would make every generated schema differ from
+/// the one in the repository for no reason. The number is therefore replaced
+/// with a short hash of the type's own field or tag names, which changes only
+/// when the type does.
 pub fn typeName(comptime T: type) []const u8 {
     const full = @typeName(T);
     comptime var start: usize = 0;
@@ -37,7 +44,39 @@ pub fn typeName(comptime T: type) []const u8 {
             buf[i] = if (std.ascii.isAlphanumeric(c) or c == '_') c else '_';
         }
     }
-    const out = buf;
+    const cleaned = buf;
+    const trimmed = comptime trimSerial(&cleaned);
+    if (trimmed.len == cleaned.len) {
+        const out = cleaned;
+        return &out;
+    }
+    const out = comptime trimmed ++ shapeDigest(T);
+    return out;
+}
+
+/// Everything up to and including the last `_` of a trailing `_<digits>`, or
+/// the whole name when there is no such suffix.
+fn trimSerial(comptime name: []const u8) []const u8 {
+    comptime var end = name.len;
+    inline while (end > 0 and std.ascii.isDigit(name[end - 1])) end -= 1;
+    if (end == name.len or end == 0 or name[end - 1] != '_') return name;
+    return name[0..end];
+}
+
+/// Eight hexadecimal digits over the type's field or tag names. Two different
+/// anonymous types in the same parent therefore keep different names.
+fn shapeDigest(comptime T: type) *const [8]u8 {
+    comptime var hash = std.hash.Fnv1a_32.init();
+    comptime {
+        switch (@typeInfo(T)) {
+            .@"enum" => |e| for (e.fields) |field| hash.update(field.name),
+            .@"struct" => |st| for (st.fields) |field| hash.update(field.name),
+            .@"union" => |u| for (u.fields) |field| hash.update(field.name),
+            else => hash.update(@typeName(T)),
+        }
+    }
+    const digits = comptime std.fmt.hex(hash.final());
+    const out = digits;
     return &out;
 }
 
