@@ -1,1 +1,147 @@
 # zag
+
+A workbench where people and agents do engineering work in one recorded
+workspace.
+
+zag is a terminal, a block model, an agent runtime and a standards control plane
+in one Zig program. It fetches no package from the network: the whole thing
+builds from the Zig standard library.
+
+> Status: the substrate is built and tested. The graphical renderer, the editor
+> surfaces and the model providers are not written yet. `zag doctor` prints what
+> this build can and cannot do, so the claim never runs ahead of the code.
+
+## Why it is built this way
+
+The usual mistake is to make the terminal grid the application's data model.
+Then the interface owns the truth. Everything else — history, replay, audit,
+remote attachment, agent context — has to be added back later. Each arrives as
+its own feature, and each can disagree with the others.
+
+Here the workspace event stream owns the truth:
+
+- The interface does not own truth. It is a fold over the log.
+- Agents do not own truth. They propose typed requests; the log records what
+  happened.
+- The pseudoterminal does not own truth. It produces bytes, which become events.
+
+Everything else follows from that. A block list, a session tab, an execution
+graph, an audit trail and an agent's context are all views of the same events.
+
+## What is in it
+
+| Part | What it does |
+| --- | --- |
+| `src/events` | The typed event union, and an append-only log whose entries are chained by hash |
+| `src/workspace` | Blocks, sessions, workflows, structured history, and the workspace service |
+| `src/editor` | The command line as an editing document, with undo that groups by intent |
+| `src/terminal` | Escape-sequence parser, screen with scrollback, shell integration, real pseudoterminal |
+| `src/ai` | Capabilities, the policy engine, approvals, typed tools, risk, impact, transparency, generated cards |
+| `src/language` | The plain-language pass, with controlled-English and easy-to-read profiles |
+| `src/knowledge` | The concept system, the thesaurus view, the published vocabulary and the workspace knowledge base |
+| `src/metadata` | The registry that stops one field having four names |
+| `src/standards` | The standards registry, conformance profiles, crosswalks and the evidence ledger |
+| `src/content` | The typed content model and its publishers |
+| `src/accessibility` | The semantic tree, contrast checks and the accessibility statement |
+| `src/reports` | The metric registry and one report notation |
+
+## Build it
+
+```
+zig build test     # run every test
+zig build          # build the tools
+zig build check    # run the tests, then audit this repository
+zig build emit     # regenerate the schemas, the vocabulary and llms.txt
+```
+
+You need Zig 0.16.0.
+
+## Use it
+
+```
+zag doctor                     # what this build can and cannot do
+zag run -- zig build test      # run a command and record it as a block
+zag lint README.md             # check text against the plain-language rules
+zag terms workspace            # what a word means here
+zag standards                  # the standards in force, and their editions
+zag check                      # audit this repository
+zag card model                 # the model card, generated from the system
+zag accessibility              # the accessibility statement and the themes
+zag shell-hook bash            # the shell integration to add to your shell
+zag workflow                   # this repository's own workflow, as a task graph
+zag lifecycle                  # the lifecycle record, and what has not started
+zag evidence                   # the conformance statement, from recorded evidence
+zag history "status:failed zig" # search recorded work, not a text file
+zag knowledge                  # the knowledge under .workspace/, and what is overdue
+```
+
+`zagd` holds a workspace open for clients, remote people and background agents:
+
+```
+zagd status                    # what is in the workspace
+zagd verify                    # check the event log from end to end
+zagd plan                      # what each step of a workflow would need
+zagd history "branch:main"     # the same search, without the tool
+```
+
+## What "standards-native" means here
+
+Sixty-five standards, specifications and frameworks are recorded in
+`standards/registry`. Each carries its edition, its status and how the workbench
+enforces it. That record is not decoration: the build reads it, and refuses a
+registry that enforces a withdrawn or draft edition.
+
+The rules that a program can check are checked by the build:
+
+- Plain-language rules over the product's own text, including this file and the
+  tool's own help.
+- Terminology rules over the product's own vocabulary. A circular definition or
+  a term that means two things fails the build.
+- Metadata rules over every field that crosses an interface.
+- Contrast and target-size rules over the shipped themes and the accessibility
+  tree the renderer must publish.
+- Risk rules: a risk that claims to be mitigated must name a control that is
+  enforced by code. An instruction to a model is not a control.
+- Knowledge rules over `.workspace/`: an entry needs a named owner, a summary
+  and a review date, and it cannot claim to be about a concept nobody defined.
+
+The rules that a program cannot check are named as such, in every report:
+
+- Whether a reader can find, understand and use the information.
+- Whether a person using a screen reader can finish a task.
+- Whether a risk treatment works in practice.
+
+Those are settled by evaluating the product with people, and by audit. The
+workbench never reports a score that implies otherwise. There is no
+"ISO compliant: 93/100" anywhere in it, and there never will be.
+
+## The security boundary
+
+An agent asks; the local policy decides; the decision becomes a record.
+
+```
+request -> plan -> typed tool request -> policy decision
+        -> (a person, when the policy says so) -> execution -> events
+```
+
+- There is no free-form shell tool. Each request names one capability and one
+  resource.
+- A path is normalised before it is matched, so a path cannot climb out of the
+  workspace it was given.
+- An operation that cannot be undone stops and asks, in words that name the
+  operation and its consequence.
+- A repository instruction file shapes behaviour. It can never grant a
+  capability, and the checker reports any line that tries.
+
+## Reading further
+
+- `docs/architecture.md` — the event graph, the block model and the control plane
+- `docs/standards-conformance.md` — which standards apply and how each is checked
+- `docs/plain-language.md` — how ISO 24495 is applied, and what a checker cannot decide
+- `docs/adr/` — why the architecture is the way it is
+- `AGENTS.md` — how to work in this repository
+- `llms.txt` — the machine-readable index
+
+## Licence
+
+MIT. See `LICENSE`.

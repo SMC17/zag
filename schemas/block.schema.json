@@ -1,0 +1,345 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zag.dev/schemas/block.schema.json",
+  "title": "Block",
+  "description": "One unit of work, with what caused it and what it produced.",
+  "$ref": "#/$defs/Block",
+  "$defs": {
+    "Block": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/Kind"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "startedAt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "finishedAt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workingDirectory": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "commandText": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "exitStatus": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actor": {
+          "$ref": "#/$defs/Actor"
+        },
+        "content": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "git": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentFingerprint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "boundaryFromShell": {
+          "type": "boolean"
+        },
+        "outputBytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "session",
+        "kind",
+        "createdAt",
+        "actor"
+      ],
+      "additionalProperties": false
+    },
+    "Kind": {
+      "type": "string",
+      "enum": [
+        "command",
+        "agent_run",
+        "tool_call",
+        "file_change",
+        "approval",
+        "message"
+      ]
+    },
+    "Status": {
+      "type": "string",
+      "enum": [
+        "running",
+        "succeeded",
+        "failed",
+        "denied",
+        "cancelled",
+        "unknown"
+      ]
+    },
+    "Actor": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ProducerKind"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "ProducerKind": {
+      "type": "string",
+      "enum": [
+        "person",
+        "shell",
+        "agent",
+        "background_agent",
+        "remote_person",
+        "system",
+        "integration"
+      ]
+    },
+    "ContentRef": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "none": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "none"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "inline_text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "inline_text"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "hashed": {
+              "$ref": "#/$defs/ContentRef__struct_fae7a8e9"
+            }
+          },
+          "required": [
+            "hashed"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ContentRef__struct_fae7a8e9": {
+      "type": "object",
+      "properties": {
+        "hash": {
+          "type": "string"
+        },
+        "byteCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "hash",
+        "byteCount"
+      ],
+      "additionalProperties": false
+    },
+    "GitContext": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "branch": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "head": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dirtyFileCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      },
+      "additionalProperties": false
+    },
+    "EnvironmentFingerprint": {
+      "type": "object",
+      "properties": {
+        "operating_system": {
+          "type": "string"
+        },
+        "architecture": {
+          "type": "string"
+        },
+        "shell": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environment_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "container_image": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "host_label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operating_system",
+        "architecture"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

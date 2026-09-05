@@ -1,0 +1,107 @@
+# Standards for language and communication.
+#
+# Status and edition are recorded because they change, and because enforcing a
+# withdrawn edition is a defect the registry checks for.
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 24495-1"
+edition = "2023"
+title = "Plain language - Part 1: Governing principles and guidelines"
+status = "published"
+enforcement = "mandatory"
+valid_from = 2023-07-01T00:00:00Z
+purpose = "Product text must let the intended reader find, understand and use what they need."
+requirements_file = "standards/registry/requirements-language.toml"
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 24495-2"
+edition = "2025"
+title = "Plain language - Part 2: Legal communication"
+status = "published"
+enforcement = "required_profile"
+purpose = "Licences and terms state obligations in a form the reader can act on."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 24495-3"
+edition = "2026"
+title = "Plain language - Part 3: Science writing"
+status = "published"
+enforcement = "required_profile"
+purpose = "Benchmarks and evaluations report method, result and uncertainty so a reader can judge them."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 24495-4"
+title = "Plain language - Part 4: Organizational implementation"
+status = "draft"
+enforcement = "recommended"
+purpose = "How an organisation puts plain language into its own processes. Enforced as guidance while it is a draft."
+
+[[standard]]
+namespace = "industry"
+identifier = "ASD-STE100"
+title = "Simplified Technical English"
+status = "industry_spec"
+enforcement = "required_profile"
+purpose = "Procedures and diagnostics read the same way to every reader and translate cleanly."
+
+[[standard]]
+namespace = "industry"
+identifier = "Easy-to-Read"
+title = "Information for all: European standards for making information easy to read and understand"
+status = "guidance"
+enforcement = "required_profile"
+purpose = "Material for readers who need short sentences, common words and one idea at a time."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 704"
+edition = "2022"
+title = "Terminology work - Principles and methods"
+status = "published"
+enforcement = "mandatory"
+purpose = "The product's own words are defined once, as concepts, and checked."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 25964"
+title = "Information and documentation - Thesauri and interoperability with other vocabularies"
+status = "published"
+enforcement = "recommended"
+purpose = "Search and agent context expand a query through the same relations a person would follow."
+
+[[standard]]
+namespace = "niso"
+identifier = "ANSI/NISO Z39.19"
+edition = "2005 (R2010)"
+title = "Guidelines for the Construction, Format, and Management of Monolingual Controlled Vocabularies"
+status = "published"
+enforcement = "recommended"
+purpose = "The alphabetical display a person reads."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 24613"
+title = "Lexical markup framework"
+status = "published"
+enforcement = "informational"
+purpose = "Considered for lexical data exchange. Not used yet: the concept system covers what the product needs."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 24611"
+title = "Morpho-syntactic annotation framework"
+status = "published"
+enforcement = "informational"
+purpose = "Considered for annotated language data. Not used yet."
+
+[[standard]]
+namespace = "industry"
+identifier = "Information Mapping"
+title = "Information Mapping method"
+status = "industry_spec"
+enforcement = "recommended"
+purpose = "Content is typed by information type, and a block that mixes types is a defect."

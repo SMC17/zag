@@ -1,0 +1,265 @@
+//! zagd — the workspace daemon.
+//!
+//! The daemon holds a workspace open so that clients, remote people and
+//! background agents attach to the same recorded state rather than to a copy
+//! of it. It has no user interface: everything it knows is in the event log,
+//! and everything it does is written there.
+//!
+//! It is deliberately conservative. It verifies the log before it writes
+//! anything, it refuses to append to a broken log, and it never runs a
+//! workflow step that a person has not decided on. A headless process that
+//! could act on its own would defeat the capability model the rest of the
+//! product is built on.
+
+const std = @import("std");
+const zag = @import("zag");
+
+const Command = enum {
+    help,
+    status,
+    verify,
+    plan,
+    history,
+    serve,
+
+    fn parse(text: []const u8) ?Command {
+        const table = [_]struct { name: []const u8, command: Command }{
+            .{ .name = "help", .command = .help },
+            .{ .name = "--help", .command = .help },
+            .{ .name = "-h", .command = .help },
+            .{ .name = "status", .command = .status },
+            .{ .name = "verify", .command = .verify },
+            .{ .name = "plan", .command = .plan },
+            .{ .name = "history", .command = .history },
+            .{ .name = "serve", .command = .serve },
+        };
+        for (table) |entry| {
+            if (std.mem.eql(u8, entry.name, text)) return entry.command;
+        }
+        return null;
+    }
+};
+
+pub const help_text =
+    \\zagd - holds a workspace open so people, clients and agents share one record.
+    \\
+    \\Use it like this:
+    \\  zagd <command> [--root <directory>]
+    \\
+    \\Commands
+    \\  help                Show this text.
+    \\  status              Open the workspace and say what is in it.
+    \\  verify              Check the event log from end to end.
+    \\  plan <workflow>     Say what each step of a workflow would need.
+    \\  history <query>     Search what happened, using the history filters.
+    \\  serve               Hold the workspace open and report each check.
+    \\
+    \\Options
+    \\  --root <directory>  The workspace to open. The default is this directory.
+    \\  --checks <number>   How many checks `serve` runs before it stops.
+    \\
+    \\The daemon never runs a workflow step on its own. It reports which steps a
+    \\person still has to decide on, and stops there.
+    \\
+;
+
+const Options = struct {
+    root: []const u8 = ".",
+    checks: usize = 1,
+    rest: []const []const u8 = &.{},
+};
+
+fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
+    var options: Options = .{};
+    var rest: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--root") and i + 1 < args.len) {
+            i += 1;
+            options.root = args[i];
+        } else if (std.mem.eql(u8, arg, "--checks") and i + 1 < args.len) {
+            i += 1;
+            options.checks = std.fmt.parseInt(usize, args[i], 10) catch 1;
+        } else {
+            try rest.append(arena, arg);
+        }
+    }
+    options.rest = rest.items;
+    return options;
+}
+
+pub fn main(init: std.process.Init) !u8 {
+    const gpa = init.gpa;
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const io = init.io;
+    var out_buffer: [8192]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(io, &out_buffer);
+    const w = &stdout.interface;
+    defer w.flush() catch {};
+
+    const args = try init.minimal.args.toSlice(arena);
+    const argv = if (args.len > 1) args[1..] else args[0..0];
+    if (argv.len == 0) {
+        try w.writeAll(help_text);
+        return 0;
+    }
+    const command = Command.parse(argv[0]) orelse {
+        try w.print("There is no zagd command called \"{s}\". Run zagd help to see the commands.\n", .{argv[0]});
+        return 2;
+    };
+    const options = try parseOptions(arena, argv[1..]);
+
+    return switch (command) {
+        .help => blk: {
+            try w.writeAll(help_text);
+            break :blk 0;
+        },
+        .status => try status(arena, io, w, options),
+        .verify => try verify(arena, io, w, options),
+        .plan => try plan(arena, io, w, options),
+        .history => try history(arena, io, w, options),
+        .serve => try serve(arena, io, w, options),
+    };
+}
+
+fn openWorkspace(arena: std.mem.Allocator, io: std.Io, options: Options) !zag.workspace.service.Opened {
+    return zag.workspace.service.Service.open(arena, io, .{
+        .root = options.root,
+        .actor = .{
+            .id = zag.core.id.ActorId.fromRaw(.{ .bytes = [_]u8{0} ** 16 }),
+            .kind = .system,
+            .label = "zagd",
+        },
+        .now = wallClock(io),
+    });
+}
+
+/// The wall clock, read through the platform's input and output layer rather
+/// than from a global, so a test can drive the daemon with a clock of its own.
+fn wallClock(io: std.Io) zag.core.time.Timestamp {
+    const raw = std.Io.Timestamp.now(io, .real);
+    return .{ .ns = @intCast(raw.nanoseconds) };
+}
+
+fn status(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
+    const opened = try openWorkspace(arena, io, options);
+    try opened.report.writeSummary(w);
+    if (opened.report.eventCount > 0) {
+        const model = try opened.service.workspaceModel();
+        var it = model.sessions.iterator();
+        while (it.next()) |entry| {
+            try w.writeAll("  ");
+            try entry.value_ptr.writeLabel(w);
+            try w.writeAll("\n");
+        }
+    }
+    return if (opened.report.isHealthy()) 0 else 1;
+}
+
+fn verify(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
+    const opened = try openWorkspace(arena, io, options);
+    if (opened.report.chainBreak) |b| {
+        try w.print("The log is broken at event {d}.\n", .{b.sequence});
+        try w.writeAll("Keep the file as it is. A broken log is evidence, not a fault to repair.\n");
+        return 1;
+    }
+    try w.print("The log verified end to end: {d} events, each one hashed to the one before it.\n", .{
+        opened.report.eventCount,
+    });
+    return 0;
+}
+
+fn plan(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
+    const opened = try openWorkspace(arena, io, options);
+    var service = opened.service;
+    const flow = try zag.workspace.workflow.buildAndCheck(arena, options.root);
+    try flow.writeSummary(arena, w);
+    try w.writeAll("\n");
+    const run = try service.planWorkflow(flow);
+    try run.writeSummary(w);
+    return 0;
+}
+
+fn history(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
+    const opened = try openWorkspace(arena, io, options);
+    const query_text = try std.mem.join(arena, " ", options.rest);
+    const parsed = try zag.workspace.history.parse(arena, query_text);
+    for (parsed.problems) |problem| {
+        try problem.writeSentence(w);
+        try w.writeAll("\n");
+    }
+    if (!parsed.ok()) return 2;
+    const index = try opened.service.blocks();
+    const results = try zag.workspace.history.run(arena, index, parsed.query, .{ .now = wallClock(io), .limit = 20 });
+    try results.writeList(w);
+    return 0;
+}
+
+/// Hold the workspace open and re-check it. Each check re-reads the log from
+/// disk, so a change another process wrote is picked up, and a log that was
+/// damaged while the daemon was running is reported rather than extended.
+fn serve(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
+    var checks: usize = 0;
+    var worst: u8 = 0;
+    while (checks < options.checks) : (checks += 1) {
+        var check_arena = std.heap.ArenaAllocator.init(arena);
+        defer check_arena.deinit();
+        const opened = try openWorkspace(check_arena.allocator(), io, options);
+        try opened.report.writeSummary(w);
+        if (!opened.report.isHealthy()) worst = 1;
+        try w.flush();
+    }
+    return worst;
+}
+
+const testing = std.testing;
+
+test "the help text names every command" {
+    var missing: usize = 0;
+    inline for (comptime std.meta.fields(Command)) |field| {
+        const name = comptime blk: {
+            var buf: [field.name.len]u8 = undefined;
+            @memcpy(&buf, field.name);
+            break :blk buf;
+        };
+        if (std.mem.indexOf(u8, help_text, &name) == null) missing += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), missing);
+}
+
+test "the help text passes the product's plain-language rules" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const system = try zag.knowledge.vocabulary.build(arena);
+    const report = try zag.language.plain.check(arena, help_text, .{
+        .kind = .body,
+        .audience = zag.language.audience.new_user,
+        .terminology = &system,
+    });
+    for (report.findings) |finding| {
+        if (finding.severity == .blocking or finding.severity == .major) {
+            std.debug.print("{s} {d}:{d} {s}\n", .{ finding.rule.code(), finding.line, finding.column, finding.message });
+        }
+        try testing.expect(finding.severity != .blocking);
+        try testing.expect(finding.severity != .major);
+    }
+}
+
+test "options are read from the argument list" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const options = try parseOptions(arena, &.{ "--root", "/tmp/workspace", "status:failed", "--checks", "3" });
+    try testing.expectEqualStrings("/tmp/workspace", options.root);
+    try testing.expectEqual(@as(usize, 3), options.checks);
+    try testing.expectEqual(@as(usize, 1), options.rest.len);
+    try testing.expectEqualStrings("status:failed", options.rest[0]);
+}

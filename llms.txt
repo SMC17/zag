@@ -1,0 +1,33 @@
+# zag workbench
+
+> A standards-native, Zig-native workbench where people and agents do engineering work in one recorded workspace.
+
+Everything that happens becomes a typed event in a hash-chained log. Agents propose typed tool requests; a local policy engine decides them. Terminology, metadata, accessibility, data quality and AI governance are enforced by the build, not described in a document.
+
+## Docs
+
+- [README](/README.md): What the workbench is and how to build it
+- [Architecture](/docs/architecture.md): The event graph, the block model and the standards control plane
+- [Standards conformance](/docs/standards-conformance.md): Which standards apply, how each is checked, and what is not established
+- [Plain language](/docs/plain-language.md): How ISO 24495 is applied to product text, and what the checker cannot decide
+- [Glossary](/docs/glossary.md): The registered concepts and their definitions
+
+## Machine-readable
+
+- [Workspace vocabulary (SKOS)](/vocab/workspace.ttl): Concepts, definitions and relations
+- [Event schema](/schemas/workspace-event.schema.json): JSON Schema for the typed event stream
+- [Tool request schema](/schemas/tool-request.schema.json): What an agent may ask for
+- [Daemon interface](/schemas/openapi.json): OpenAPI description of the workspace daemon
+- [Metadata registry](/schemas/metadata-registry.json): Registered field names and their value domains
+
+## In this repository
+
+- [Workspace rules](/.workspace/rules/): The rules that apply to work done here
+- [Workspace prompts](/.workspace/prompts/): Reusable instructions for agents
+- [Workspace workflows](/.workspace/workflows/): The task graphs this repository runs
+
+## Optional
+
+- [Decision records](/docs/adr/): Why the architecture is the way it is
+- [Risk register](/docs/risk-register.md): What could go wrong and what is done about it
+

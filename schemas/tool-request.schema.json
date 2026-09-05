@@ -1,0 +1,356 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zag.dev/schemas/tool-request.schema.json",
+  "title": "Tool request",
+  "description": "Everything an agent can ask to do. Each request names one capability.",
+  "$ref": "#/$defs/ToolRequest",
+  "$defs": {
+    "ToolRequest": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "execute": {
+              "$ref": "#/$defs/ExecuteRequest"
+            }
+          },
+          "required": [
+            "execute"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "read_file": {
+              "$ref": "#/$defs/ReadFileRequest"
+            }
+          },
+          "required": [
+            "read_file"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "write_file": {
+              "$ref": "#/$defs/WriteFileRequest"
+            }
+          },
+          "required": [
+            "write_file"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "delete": {
+              "$ref": "#/$defs/DeleteRequest"
+            }
+          },
+          "required": [
+            "delete"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "search": {
+              "$ref": "#/$defs/SearchRequest"
+            }
+          },
+          "required": [
+            "search"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "git": {
+              "$ref": "#/$defs/GitRequest"
+            }
+          },
+          "required": [
+            "git"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mcp": {
+              "$ref": "#/$defs/McpRequest"
+            }
+          },
+          "required": [
+            "mcp"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "spawn_agent": {
+              "$ref": "#/$defs/SpawnAgentRequest"
+            }
+          },
+          "required": [
+            "spawn_agent"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "infer": {
+              "$ref": "#/$defs/InferRequest"
+            }
+          },
+          "required": [
+            "infer"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ExecuteRequest": {
+      "type": "object",
+      "properties": {
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "workingDirectory": {
+          "type": "string"
+        },
+        "environmentPolicy": {
+          "$ref": "#/$defs/EnvironmentPolicy"
+        },
+        "environment": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "network": {
+          "$ref": "#/$defs/NetworkPolicy"
+        },
+        "timeout": {
+          "type": "string"
+        },
+        "approval": {
+          "$ref": "#/$defs/ApprovalPolicy"
+        }
+      },
+      "required": [
+        "argv",
+        "workingDirectory"
+      ],
+      "additionalProperties": false
+    },
+    "EnvironmentPolicy": {
+      "type": "string",
+      "enum": [
+        "none",
+        "allowlist",
+        "inherit_all"
+      ]
+    },
+    "NetworkPolicy": {
+      "type": "string",
+      "enum": [
+        "none",
+        "allowlist",
+        "any"
+      ]
+    },
+    "ApprovalPolicy": {
+      "type": "string",
+      "enum": [
+        "policy_only",
+        "ask_once",
+        "ask_every_time"
+      ]
+    },
+    "ReadFileRequest": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "maxBytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "WriteFileRequest": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "contentHash": {
+          "type": "string"
+        },
+        "byteCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "createIfMissing": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "contentHash",
+        "byteCount"
+      ],
+      "additionalProperties": false
+    },
+    "DeleteRequest": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "recursive": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "SearchRequest": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string"
+        },
+        "maxResults": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "includeHistory": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "query",
+        "root"
+      ],
+      "additionalProperties": false
+    },
+    "GitRequest": {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "$ref": "#/$defs/GitOperation"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "argument": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "repository"
+      ],
+      "additionalProperties": false
+    },
+    "GitOperation": {
+      "type": "string",
+      "enum": [
+        "status",
+        "log",
+        "diff",
+        "commit",
+        "push",
+        "branch",
+        "worktree_add"
+      ]
+    },
+    "McpRequest": {
+      "type": "object",
+      "properties": {
+        "server": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "argumentsJson": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "server",
+        "tool",
+        "argumentsJson"
+      ],
+      "additionalProperties": false
+    },
+    "SpawnAgentRequest": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "request": {
+          "type": "string"
+        },
+        "policy": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "request",
+        "policy"
+      ],
+      "additionalProperties": false
+    },
+    "InferRequest": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "promptHash": {
+          "type": "string"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "promptHash"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
