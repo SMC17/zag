@@ -231,15 +231,26 @@ pub const limits_statement =
 
 pub fn check(arena: std.mem.Allocator, source: []const u8, options: Options) !Report {
     var findings: std.ArrayList(Finding) = .empty;
-    const analysis = try text.analyse(arena, source);
+
+    // Code is not prose. A command, a path or a field name inside backticks or
+    // a fenced block is quoted material, and checking it as English produces
+    // findings the author cannot act on. The code is blanked out before the
+    // text is analysed, keeping every byte offset, so line and column numbers
+    // still point at the real file.
+    const code_mask = try codeMask(arena, source);
+    const prose = try arena.dupe(u8, source);
+    for (code_mask, 0..) |masked, index| {
+        if (masked and prose[index] != '\n') prose[index] = ' ';
+    }
+    const analysis = try text.analyse(arena, prose);
 
     var seen_abbreviations: std.StringArrayHashMapUnmanaged(void) = .empty;
     for (options.known_abbreviations) |a| try seen_abbreviations.put(arena, a, {});
 
     try checkSentences(arena, &findings, analysis, options, &seen_abbreviations);
     try checkParagraphs(arena, &findings, analysis, options);
-    try checkPhrases(arena, &findings, source, options);
-    try checkKindDuties(arena, &findings, source, analysis, options);
+    try checkPhrases(arena, &findings, prose, options);
+    try checkKindDuties(arena, &findings, prose, analysis, options);
     try checkTerminology(arena, &findings, analysis, options);
     try checkMachineValues(arena, &findings, analysis, options);
 
@@ -250,6 +261,63 @@ pub fn check(arena: std.mem.Allocator, source: []const u8, options: Options) !Re
         .metrics = readability.measure(analysis),
         .options = options,
     };
+}
+
+/// A byte for each byte of the source: true where the byte is inside a code
+/// span or a fenced code block.
+fn codeMask(arena: std.mem.Allocator, source: []const u8) ![]bool {
+    const mask = try arena.alloc(bool, source.len);
+    @memset(mask, false);
+
+    var index: usize = 0;
+    var in_fence = false;
+    var at_line_start = true;
+    while (index < source.len) : (index += 1) {
+        const c = source[index];
+        if (at_line_start and index + 2 < source.len and std.mem.startsWith(u8, source[index..], "```")) {
+            in_fence = !in_fence;
+            // Mark the fence line itself as code either way.
+            while (index < source.len and source[index] != '\n') : (index += 1) mask[index] = true;
+            at_line_start = true;
+            continue;
+        }
+        if (in_fence) {
+            mask[index] = true;
+            at_line_start = c == '\n';
+            continue;
+        }
+        if (c == '`') {
+            const close = std.mem.indexOfScalarPos(u8, source, index + 1, '`') orelse {
+                at_line_start = false;
+                continue;
+            };
+            // An unclosed backtick on a line is not a span.
+            if (std.mem.indexOfScalarPos(u8, source[index..close], 0, '\n') != null) {
+                at_line_start = false;
+                continue;
+            }
+            var mark = index;
+            while (mark <= close) : (mark += 1) mask[mark] = true;
+            index = close;
+            at_line_start = false;
+            continue;
+        }
+        // An indented block is code too.
+        if (at_line_start and index + 4 <= source.len and std.mem.eql(u8, source[index..][0..4], "    ")) {
+            const line_end = std.mem.indexOfScalarPos(u8, source, index, '\n') orelse source.len;
+            const line = source[index + 4 .. line_end];
+            // A list continuation is prose; a line that looks like a command is not.
+            if (line.len > 0 and !std.ascii.isAlphabetic(line[0])) {
+                var mark = index;
+                while (mark < line_end) : (mark += 1) mask[mark] = true;
+                index = line_end;
+                at_line_start = true;
+                continue;
+            }
+        }
+        at_line_start = c == '\n';
+    }
+    return mask;
 }
 
 fn byPosition(_: void, a: Finding, b: Finding) bool {
@@ -291,7 +359,11 @@ fn checkSentences(
     for (analysis.sentences, 0..) |sentence, index| {
         const position = text.positionOf(analysis.source, sentence.span.start);
 
-        if (sentence.words > limit) {
+        // A table is not a sentence. Measuring one as prose reports a
+        // hundred-word "sentence" that no author can act on.
+        const is_table = std.mem.count(u8, sentence.text, "|") >= 2;
+
+        if (!is_table and sentence.words > limit) {
             try add(arena, findings, position, .sentence_too_long, .minor, sentence.text, try std.fmt.allocPrint(arena, "This sentence has {d} words. For this reader, keep sentences to {d} words or fewer. Split it at the first \"and\" or \"which\".", .{ sentence.words, limit }), null);
         }
 
@@ -364,30 +436,35 @@ fn checkSentences(
             try add(arena, findings, position, .double_negative, .minor, sentence.text, "This sentence uses two or more negatives. State what is true instead of what is not.", null);
         }
 
-        // Noun clusters.
-        var run: usize = 0;
-        var run_start: usize = 0;
-        for (words, 0..) |word, i| {
-            const t = text.trimWord(word.text);
-            if (t.len > 3 and std.ascii.isLower(t[0]) and !text.isBeVerb(t) and !text.isModal(t) and !isFunctionWord(t)) {
-                if (run == 0) run_start = i;
-                run += 1;
-                if (run == 4) {
-                    const at = text.positionOf(analysis.source, words[run_start].span.start);
-                    try add(arena, findings, at, .noun_cluster, .advisory, try std.fmt.allocPrint(arena, "{s} {s} {s} {s}", .{ words[run_start].text, words[run_start + 1].text, words[run_start + 2].text, words[run_start + 3].text }), "Four words in a row with no linking word are hard to parse. Add a preposition, or split the phrase.", null);
+        // Noun clusters. A table row is skipped: its cells are not a phrase.
+        if (!is_table) {
+            var run: usize = 0;
+            var run_start: usize = 0;
+            for (words, 0..) |word, i| {
+                const t = text.trimWord(word.text);
+                if (t.len > 3 and std.ascii.isLower(t[0]) and !text.isBeVerb(t) and !text.isModal(t) and !isFunctionWord(t)) {
+                    if (run == 0) run_start = i;
+                    run += 1;
+                    if (run == 4) {
+                        const at = text.positionOf(analysis.source, words[run_start].span.start);
+                        try add(arena, findings, at, .noun_cluster, .advisory, try std.fmt.allocPrint(arena, "{s} {s} {s} {s}", .{ words[run_start].text, words[run_start + 1].text, words[run_start + 2].text, words[run_start + 3].text }), "Four words in a row with no linking word are hard to parse. Add a preposition, or split the phrase.", null);
+                    }
+                } else {
+                    run = 0;
                 }
-            } else {
-                run = 0;
             }
         }
 
         // Word-level checks.
-        for (words) |word| {
+        for (words, 0..) |word, word_index| {
             const raw = text.trimWord(word.text);
             if (raw.len == 0) continue;
             const at = text.positionOf(analysis.source, word.span.start);
 
-            if (text.looksLikeAbbreviation(raw) and !text.isCommonAbbreviation(raw) and !options.audience.allows_unexplained_abbreviations) {
+            const known_here = text.isCommonAbbreviation(raw) or
+                isConventionalFileName(raw) or
+                (options.audience.expertise != .general and text.isStandardsAbbreviation(raw));
+            if (text.looksLikeAbbreviation(raw) and !known_here and !options.audience.allows_unexplained_abbreviations) {
                 if (!seen_abbreviations.contains(raw)) {
                     // An abbreviation written out first, as "pseudoterminal (PTY)",
                     // is fine; the expansion appears before the short form.
@@ -399,8 +476,14 @@ fn checkSentences(
                 }
             }
 
+            // A noun formed from a verb is only a problem when it is *used*
+            // as one: "make a decision" instead of "decide". Flagging every
+            // word that ends in "-tion" would flag "definition" and "edition",
+            // which are simply nouns.
             if (text.isNominalisation(raw) and options.kind != .legal_clause) {
-                try add(arena, findings, at, .nominalisation, .advisory, raw, try std.fmt.allocPrint(arena, "\"{s}\" turns an action into a thing. Use the verb.", .{raw}), null);
+                if (lightVerbBefore(words, word_index)) |verb| {
+                    try add(arena, findings, at, .nominalisation, .minor, raw, try std.fmt.allocPrint(arena, "\"{s} ... {s}\" hides the action in a noun. Use the verb.", .{ verb, raw }), suggestedVerb(raw));
+                }
             }
 
             for (text.substitutions) |s| {
@@ -447,14 +530,25 @@ fn checkParagraphs(
     options: Options,
 ) !void {
     if (options.kind.isInterfaceText()) return;
+    // A list and a paragraph are different shapes, and a reader handles them
+    // differently, so they get different limits: sentences for a paragraph,
+    // items for a list.
+    const list_item_limit: usize = 9;
     for (analysis.paragraphs) |paragraph| {
-        var count: usize = 0;
+        var sentences: usize = 0;
+        var items: usize = 0;
         for (analysis.sentences) |s| {
-            if (s.span.start >= paragraph.start and s.span.start < paragraph.end) count += 1;
+            if (s.span.start < paragraph.start or s.span.start >= paragraph.end) continue;
+            sentences += 1;
+            if (text.startsListItem(s.text)) items += 1;
         }
-        if (count > options.audience.max_paragraph_sentences) {
-            const position = text.positionOf(analysis.source, paragraph.start);
-            try add(arena, findings, position, .paragraph_too_long, .minor, "", try std.fmt.allocPrint(arena, "This paragraph has {d} sentences. Keep paragraphs to {d} or fewer so the reader can scan them.", .{ count, options.audience.max_paragraph_sentences }), null);
+        const position = text.positionOf(analysis.source, paragraph.start);
+        if (items > 0) {
+            if (items > list_item_limit) {
+                try add(arena, findings, position, .paragraph_too_long, .minor, "", try std.fmt.allocPrint(arena, "This list has {d} items. Keep a list to {d} or fewer, or group the items under headings.", .{ items, list_item_limit }), null);
+            }
+        } else if (sentences > options.audience.max_paragraph_sentences) {
+            try add(arena, findings, position, .paragraph_too_long, .minor, "", try std.fmt.allocPrint(arena, "This paragraph has {d} sentences. Keep paragraphs to {d} or fewer so the reader can scan them.", .{ sentences, options.audience.max_paragraph_sentences }), null);
         }
     }
 }
@@ -600,6 +694,57 @@ fn splitNumberUnit(word: []const u8) ?NumberUnit {
     return .{ .number = word[0..i], .unit = unit };
 }
 
+/// The light verbs that turn a verb into a noun: "make a decision", "perform
+/// an analysis". Returns the verb when one appears just before the noun.
+fn lightVerbBefore(words: []const text.Word, index: usize) ?[]const u8 {
+    const light = [_][]const u8{ "make", "makes", "made", "perform", "performs", "performed", "provide", "provides", "give", "gives", "carry", "carries", "conduct", "conducts", "undertake", "undertakes", "do", "does", "take", "takes" };
+    if (index == 0) return null;
+    // The pattern is "make a decision", not "carries its edition": the noun
+    // follows an article, and a light verb comes just before that.
+    const preceding = text.trimWord(words[index - 1].text);
+    const article = std.ascii.eqlIgnoreCase(preceding, "a") or
+        std.ascii.eqlIgnoreCase(preceding, "an") or
+        std.ascii.eqlIgnoreCase(preceding, "the") or
+        std.ascii.eqlIgnoreCase(preceding, "out");
+    if (!article) return null;
+
+    var back: usize = 2;
+    while (back <= 3 and back <= index) : (back += 1) {
+        const candidate = text.trimWord(words[index - back].text);
+        for (light) |verb| {
+            if (std.ascii.eqlIgnoreCase(candidate, verb)) return candidate;
+        }
+    }
+    return null;
+}
+
+/// The verb hiding inside a common nominalisation.
+fn suggestedVerb(word: []const u8) ?[]const u8 {
+    const pairs = [_]text.Substitution{
+        .{ .from = "decision", .to = "decide" },
+        .{ .from = "analysis", .to = "analyse" },
+        .{ .from = "evaluation", .to = "evaluate" },
+        .{ .from = "investigation", .to = "investigate" },
+        .{ .from = "consideration", .to = "consider" },
+        .{ .from = "description", .to = "describe" },
+        .{ .from = "installation", .to = "install" },
+        .{ .from = "configuration", .to = "configure" },
+        .{ .from = "initialisation", .to = "start" },
+        .{ .from = "initialization", .to = "start" },
+        .{ .from = "verification", .to = "verify" },
+        .{ .from = "modification", .to = "change" },
+        .{ .from = "assessment", .to = "assess" },
+        .{ .from = "measurement", .to = "measure" },
+        .{ .from = "improvement", .to = "improve" },
+        .{ .from = "utilisation", .to = "use" },
+        .{ .from = "utilization", .to = "use" },
+    };
+    for (pairs) |pair| {
+        if (std.ascii.eqlIgnoreCase(pair.from, word)) return pair.to;
+    }
+    return null;
+}
+
 fn isFunctionWord(word: []const u8) bool {
     const list = [_][]const u8{
         "the", "a", "an", "and", "or", "but", "if", "then", "than", "with", "without",
@@ -609,6 +754,16 @@ fn isFunctionWord(word: []const u8) bool {
     };
     for (list) |w| {
         if (std.ascii.eqlIgnoreCase(w, word)) return true;
+    }
+    return false;
+}
+
+/// File names that are written in capitals by convention. They are names, not
+/// abbreviations, and asking an author to expand them makes the text worse.
+fn isConventionalFileName(word: []const u8) bool {
+    const names = [_][]const u8{ "README", "LICENSE", "AGENTS", "NOTICE", "CHANGELOG", "CONTRIBUTING", "MIT", "TODO", "COPYING" };
+    for (names) |name| {
+        if (std.mem.eql(u8, name, word)) return true;
     }
     return false;
 }
@@ -837,6 +992,37 @@ test "reports passive voice and buried actions in instructions" {
     try std.testing.expect(buried.has(.action_at_end));
 }
 
+test "a noun is only a nominalisation when a light verb hides the action" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const hidden = try runCheck(arena, "The reviewer will make a decision about the patch.", .{});
+    try std.testing.expect(hidden.has(.nominalisation));
+    for (hidden.findings) |finding| {
+        if (finding.rule == .nominalisation) try std.testing.expectEqualStrings("decide", finding.suggestion.?);
+    }
+
+    // These are ordinary nouns, not hidden verbs.
+    const plain_nouns = try runCheck(arena, "The definition, the edition and the statement are in the documentation.", .{});
+    try std.testing.expect(!plain_nouns.has(.nominalisation));
+}
+
+test "a table row is not measured as a sentence" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const table =
+        \\| Part | What it does |
+        \\| --- | --- |
+        \\| events | The typed event union, and an append-only log whose entries are chained by hash so that any later change to an entry is detectable by anyone holding the log |
+    ;
+    const report = try runCheck(arena, table, .{});
+    try std.testing.expect(!report.has(.sentence_too_long));
+    try std.testing.expect(!report.has(.noun_cluster));
+}
+
 test "reports wordy phrases and long words with a replacement" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -940,4 +1126,52 @@ test "warnings must state the consequence" {
 
     const full = try runCheck(arena, "This deletes the folder. You cannot undo it.", .{ .kind = .warning, .purpose = .warn });
     try std.testing.expect(!full.has(.warning_without_consequence));
+}
+
+test "quoted code is not checked as prose" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // `PTY` inside a code span is quoted material, not an unexplained
+    // abbreviation the author should expand.
+    const with_span = try runCheck(arena, "Run `zag lint PTY` to see it.", .{});
+    try std.testing.expect(!with_span.has(.undefined_abbreviation));
+
+    const in_prose = try runCheck(arena, "Run zag lint PTY to see it.", .{});
+    try std.testing.expect(in_prose.has(.undefined_abbreviation));
+
+    const fenced = try runCheck(arena,
+        \\Here is the command.
+        \\
+        \\```
+        \\zag run -- rm -rf build/ 9/4/26
+        \\```
+        \\
+        \\That is all.
+    , .{});
+    try std.testing.expect(!fenced.has(.ambiguous_datetime));
+}
+
+test "conventional file names are names, not abbreviations" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const report = try runCheck(arena, "The terms are in LICENSE, and the guide is in README.", .{});
+    try std.testing.expect(!report.has(.undefined_abbreviation));
+}
+
+test "who the reader is decides which short forms need explaining" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const sentence = "The text follows ISO 24495-1 and WCAG 2.2.";
+
+    const for_developer = try runCheck(arena, sentence, .{ .audience = audience_mod.developer });
+    try std.testing.expect(!for_developer.has(.undefined_abbreviation));
+
+    const for_general = try runCheck(arena, sentence, .{ .audience = audience_mod.easy_read_reader });
+    try std.testing.expect(for_general.has(.undefined_abbreviation));
 }

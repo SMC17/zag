@@ -1,0 +1,123 @@
+{
+  "standard": "ISO/IEC 11179",
+  "dataElements": [
+    {
+      "id": "workingDirectory",
+      "canonicalKey": "workingDirectory",
+      "definition": "Directory the process resolves relative paths against.",
+      "obligation": "conditional",
+      "registrationStatus": "standardised",
+      "aliases": [
+        "cwd",
+        "working_directory",
+        "current_path",
+        "directory"
+      ],
+      "valueDomain": {
+        "id": "path",
+        "datatype": "path"
+      }
+    },
+    {
+      "id": "exitStatus",
+      "canonicalKey": "exitStatus",
+      "definition": "Status the process returned when it finished.",
+      "obligation": "conditional",
+      "registrationStatus": "standardised",
+      "aliases": [
+        "exit_code",
+        "exitCode",
+        "returncode",
+        "status_code"
+      ],
+      "valueDomain": {
+        "id": "exit-status",
+        "datatype": "integer"
+      }
+    },
+    {
+      "id": "at",
+      "canonicalKey": "at",
+      "definition": "The moment the event happened, in UTC.",
+      "obligation": "mandatory",
+      "registrationStatus": "standardised",
+      "aliases": [
+        "timestamp",
+        "time",
+        "ts",
+        "occurred_at"
+      ],
+      "valueDomain": {
+        "id": "instant",
+        "datatype": "timestamp"
+      }
+    },
+    {
+      "id": "contentHash",
+      "canonicalKey": "contentHash",
+      "definition": "Hash of the content this record refers to.",
+      "obligation": "mandatory",
+      "registrationStatus": "standardised",
+      "aliases": [
+        "content_hash",
+        "digest",
+        "sha",
+        "checksum"
+      ],
+      "valueDomain": {
+        "id": "content-hash",
+        "datatype": "content_hash"
+      }
+    },
+    {
+      "id": "capability",
+      "canonicalKey": "capability",
+      "definition": "The capability an operation needs.",
+      "obligation": "mandatory",
+      "registrationStatus": "standardised",
+      "aliases": [
+        "permission",
+        "scope",
+        "grant"
+      ],
+      "valueDomain": {
+        "id": "capability-name",
+        "datatype": "code",
+        "permittedValues": [
+          {
+            "value": "fs.read",
+            "meaning": "Read a file or list a directory"
+          },
+          {
+            "value": "fs.write",
+            "meaning": "Create or change a file"
+          },
+          {
+            "value": "fs.delete",
+            "meaning": "Delete a file or directory"
+          },
+          {
+            "value": "process.execute",
+            "meaning": "Start a process"
+          },
+          {
+            "value": "network.connect",
+            "meaning": "Open a network connection"
+          },
+          {
+            "value": "git.commit",
+            "meaning": "Record a commit"
+          },
+          {
+            "value": "git.push",
+            "meaning": "Send commits to a remote"
+          },
+          {
+            "value": "model.infer",
+            "meaning": "Send a request to a model provider"
+          }
+        ]
+      }
+    }
+  ]
+}

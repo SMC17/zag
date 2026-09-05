@@ -1,0 +1,1089 @@
+{
+  "@context": {
+    "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+    "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
+    "owl": "http://www.w3.org/2002/07/owl#",
+    "xsd": "http://www.w3.org/2001/XMLSchema#",
+    "skos": "http://www.w3.org/2004/02/skos/core#",
+    "dcterms": "http://purl.org/dc/terms/",
+    "dcat": "http://www.w3.org/ns/dcat#",
+    "prov": "http://www.w3.org/ns/prov#",
+    "schema": "https://schema.org/",
+    "zag": "https://zag.dev/ns/workspace#"
+  },
+  "@graph": [
+    {
+      "@id": "https://zag.dev/vocab/workspace",
+      "@type": {
+        "@id": "skos:ConceptScheme"
+      },
+      "dcterms:title": {
+        "@value": "zag workspace vocabulary",
+        "@language": "en"
+      },
+      "dcterms:description": {
+        "@value": "Concepts used by the zag workbench for workspaces, sessions, blocks, agents and evidence.",
+        "@language": "en"
+      },
+      "dcterms:publisher": "zag",
+      "skos:hasTopConcept": [
+        {
+          "@id": "https://zag.dev/vocab/workspace/development-environment"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/actor"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/capability"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/policy"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/approval"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/artifact"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/provenance"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/standard"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/conformance-profile"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/audience"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/plain-language"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/concept"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/term"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/data-element"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/pseudoterminal"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/shell-integration"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/worktree"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/execution-graph"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/workflow"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/risk"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/impact-assessment"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/metric"
+        }
+      ]
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/development-environment",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "development environment",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "collection of tools and resources that a person or program uses to build and change software",
+        "@language": "en"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:subject": "software engineering",
+      "skos:narrower": {
+        "@id": "https://zag.dev/vocab/workspace/workspace"
+      }
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/workspace",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "workspace",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "development environment that keeps its sessions, files, agents and history together and restores them after a restart",
+        "@language": "en"
+      },
+      "skos:altLabel": {
+        "@value": "bench",
+        "@language": "en"
+      },
+      "skos:hiddenLabel": [
+        {
+          "@value": "project shell",
+          "@language": "en"
+        },
+        {
+          "@value": "environment group",
+          "@language": "en"
+        }
+      ],
+      "skos:broader": {
+        "@id": "https://zag.dev/vocab/workspace/development-environment"
+      },
+      "skos:example": {
+        "@value": "the workspace that holds the parser branch, its three sessions and its review agent",
+        "@language": "en"
+      },
+      "dcterms:subject": "software engineering",
+      "skos:narrower": [
+        {
+          "@id": "https://zag.dev/vocab/workspace/session"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/workspace-event"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/event-log"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/knowledge-base"
+        }
+      ]
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/session",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "session",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "workspace part that runs one program under one working directory and records everything that program produces",
+        "@language": "en"
+      },
+      "skos:broader": {
+        "@id": "https://zag.dev/vocab/workspace/workspace"
+      },
+      "zag:partOf": {
+        "@id": "https://zag.dev/vocab/workspace/workspace"
+      },
+      "skos:related": [
+        {
+          "@id": "https://zag.dev/vocab/workspace/block"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/block"
+        }
+      ],
+      "dcterms:subject": "software engineering",
+      "skos:narrower": [
+        {
+          "@id": "https://zag.dev/vocab/workspace/block"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/terminal-surface"
+        }
+      ]
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/block",
+      "skos:related": [
+        {
+          "@id": "https://zag.dev/vocab/workspace/session"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/session"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/workspace-event"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/workspace-event"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/shell-integration"
+        }
+      ],
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "block",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "record of one unit of work that holds its request, its output, its result and the conditions it ran under",
+        "@language": "en"
+      },
+      "skos:altLabel": {
+        "@value": "command block",
+        "@language": "en"
+      },
+      "skos:broader": {
+        "@id": "https://zag.dev/vocab/workspace/session"
+      },
+      "zag:partOf": {
+        "@id": "https://zag.dev/vocab/workspace/session"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/workspace-event",
+      "skos:related": [
+        {
+          "@id": "https://zag.dev/vocab/workspace/block"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/block"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/execution-graph"
+        }
+      ],
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "workspace event",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "typed statement that something happened in a workspace, written once and never changed",
+        "@language": "en"
+      },
+      "skos:altLabel": {
+        "@value": "event",
+        "@language": "en"
+      },
+      "skos:broader": {
+        "@id": "https://zag.dev/vocab/workspace/workspace"
+      },
+      "zag:partOf": {
+        "@id": "https://zag.dev/vocab/workspace/workspace"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/event-log",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "event log",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "ordered store of workspace events in which each entry carries the hash of the entry before it",
+        "@language": "en"
+      },
+      "skos:broader": {
+        "@id": "https://zag.dev/vocab/workspace/workspace"
+      },
+      "zag:partOf": {
+        "@id": "https://zag.dev/vocab/workspace/workspace"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/actor",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "actor",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "party that can cause a workspace event, whether a person, a program or a service",
+        "@language": "en"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:subject": "software engineering",
+      "skos:narrower": {
+        "@id": "https://zag.dev/vocab/workspace/agent"
+      }
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/agent",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "agent",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "actor that plans and carries out work in a workspace on behalf of a person, using tools it is allowed to use",
+        "@language": "en"
+      },
+      "skos:broader": {
+        "@id": "https://zag.dev/vocab/workspace/actor"
+      },
+      "dcterms:subject": "software engineering",
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/tool-call"
+      }
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/tool-call",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "tool call",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "single typed request from an agent to do one thing, together with the result of that request",
+        "@language": "en"
+      },
+      "skos:broader": {
+        "@id": "https://zag.dev/vocab/workspace/execution-graph"
+      },
+      "zag:partOf": {
+        "@id": "https://zag.dev/vocab/workspace/execution-graph"
+      },
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/agent"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/execution-graph",
+      "skos:narrower": {
+        "@id": "https://zag.dev/vocab/workspace/tool-call"
+      },
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "execution graph",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "set of workspace events linked by cause, showing which action led to which result",
+        "@language": "en"
+      },
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/workspace-event"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/capability",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "capability",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "named permission to perform one class of operation, such as reading files or opening network connections",
+        "@language": "en"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:subject": "software engineering",
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/policy"
+      }
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/policy",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "policy",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "rule set that decides whether an actor may use a capability on a resource, and whether a person must approve first",
+        "@language": "en"
+      },
+      "skos:related": [
+        {
+          "@id": "https://zag.dev/vocab/workspace/capability"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/authorization-decision"
+        }
+      ],
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/authorization-decision",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "authorisation decision",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "record of one policy outcome, naming the actor, the capability, the resource, the result and the reason",
+        "@language": "en"
+      },
+      "skos:related": [
+        {
+          "@id": "https://zag.dev/vocab/workspace/policy"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/approval"
+        }
+      ],
+      "skos:broader": {
+        "@id": "https://zag.dev/vocab/workspace/record"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/record",
+      "skos:narrower": [
+        {
+          "@id": "https://zag.dev/vocab/workspace/authorization-decision"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/evidence"
+        }
+      ],
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "record",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "artefact kept as evidence of an activity, held unchanged for as long as its retention rule requires",
+        "@language": "en"
+      },
+      "skos:broader": {
+        "@id": "https://zag.dev/vocab/workspace/artifact"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/approval",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "approval",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "decision by a person to allow one operation that policy would not allow on its own",
+        "@language": "en"
+      },
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/authorization-decision"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/artifact",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "artefact",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "durable thing the workspace can name and describe, such as a document, a dataset, a patch or a report",
+        "@language": "en"
+      },
+      "skos:altLabel": {
+        "@value": "artifact",
+        "@language": "en"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:subject": "software engineering",
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/provenance"
+      },
+      "skos:narrower": [
+        {
+          "@id": "https://zag.dev/vocab/workspace/record"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/dataset"
+        }
+      ]
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/provenance",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "provenance",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "account of how an artefact came to exist, naming its producer, its sources, its tools and the time it was made",
+        "@language": "en"
+      },
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/artifact"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/evidence",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "evidence",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "record that shows whether one requirement was met, naming the method used to check it and the result",
+        "@language": "en"
+      },
+      "skos:broader": {
+        "@id": "https://zag.dev/vocab/workspace/record"
+      },
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/requirement"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/requirement",
+      "skos:related": [
+        {
+          "@id": "https://zag.dev/vocab/workspace/evidence"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/conformance-profile"
+        }
+      ],
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "requirement",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "single checkable rule taken from a standard, with a scope, a verification method and a severity",
+        "@language": "en"
+      },
+      "skos:broader": {
+        "@id": "https://zag.dev/vocab/workspace/standard"
+      },
+      "zag:partOf": {
+        "@id": "https://zag.dev/vocab/workspace/standard"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/standard",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "standard",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "published document that states rules the workbench applies to its own behaviour and output",
+        "@language": "en"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:subject": "software engineering",
+      "skos:narrower": {
+        "@id": "https://zag.dev/vocab/workspace/requirement"
+      }
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/conformance-profile",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "conformance profile",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "named selection of requirements that applies to one kind of work, such as scientific writing or legal communication",
+        "@language": "en"
+      },
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/requirement"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/audience",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "audience",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "group of readers whose purpose, prior knowledge and reading conditions decide how content must be written",
+        "@language": "en"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:subject": "software engineering",
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/plain-language"
+      }
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/plain-language",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "plain language",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "way of writing in which the intended reader can find what they need, understand it and use it the first time they read it",
+        "@language": "en"
+      },
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/audience"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:source": "ISO 24495-1",
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/concept",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "concept",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "unit of knowledge created by a unique combination of characteristics",
+        "@language": "en"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:source": "ISO 704",
+      "dcterms:subject": "software engineering",
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/term"
+      }
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/term",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "term",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "word or phrase that designates a concept in a subject field",
+        "@language": "en"
+      },
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/concept"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:source": "ISO 704",
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/data-element",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "data element",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "registered field with one meaning, one value domain and one canonical name across every interface",
+        "@language": "en"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:source": "ISO/IEC 11179",
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/dataset",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "dataset",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "collection of data prepared for one purpose, with a stated lifecycle stage, quality profile and retention rule",
+        "@language": "en"
+      },
+      "skos:broader": {
+        "@id": "https://zag.dev/vocab/workspace/artifact"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/pseudoterminal",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "pseudoterminal",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "pair of connected devices that lets a program behave as though it were attached to a terminal",
+        "@language": "en"
+      },
+      "skos:altLabel": [
+        {
+          "@value": "PTY",
+          "@language": "en"
+        },
+        {
+          "@value": "pty",
+          "@language": "en"
+        }
+      ],
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:subject": "software engineering",
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/terminal-surface"
+      }
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/terminal-surface",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "terminal surface",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "workspace area that draws terminal output and sends key presses straight to the running program",
+        "@language": "en"
+      },
+      "skos:broader": {
+        "@id": "https://zag.dev/vocab/workspace/session"
+      },
+      "zag:partOf": {
+        "@id": "https://zag.dev/vocab/workspace/session"
+      },
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/pseudoterminal"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/shell-integration",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "shell integration",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "set of markers a shell sends so the workbench can tell where a prompt, a command and its output begin and end",
+        "@language": "en"
+      },
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/block"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/worktree",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "worktree",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "checked-out copy of a repository at one branch, which a session can use without disturbing other sessions",
+        "@language": "en"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/workflow",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "workflow",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "task graph whose nodes declare their inputs, outputs, permissions, cache key and failure behaviour",
+        "@language": "en"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/knowledge-base",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "knowledge base",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "workspace store of rules, prompts, workflows, notebooks and vocabulary held as ordinary files under version control",
+        "@language": "en"
+      },
+      "skos:broader": {
+        "@id": "https://zag.dev/vocab/workspace/workspace"
+      },
+      "zag:partOf": {
+        "@id": "https://zag.dev/vocab/workspace/workspace"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/risk",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "risk",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "effect of uncertainty on an objective, recorded with its source, its likelihood, its impact and how it is treated",
+        "@language": "en"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:source": "ISO/IEC 23894",
+      "dcterms:subject": "software engineering",
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/impact-assessment"
+      }
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/impact-assessment",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "impact assessment",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "record of how an AI system may affect people and organisations, and what the operator does about it",
+        "@language": "en"
+      },
+      "skos:related": {
+        "@id": "https://zag.dev/vocab/workspace/risk"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:source": "ISO/IEC 42005",
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/metric",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "metric",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "measure with a defined unit, period, source and comparison basis, reported the same way every time",
+        "@language": "en"
+      },
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:subject": "software engineering"
+    }
+  ]
+}

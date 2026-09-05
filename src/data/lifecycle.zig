@@ -251,7 +251,7 @@ test "retention becomes due and decommissioning must be evidenced" {
         .stage = .operation,
         .provenance = sampleProvenance(&gen),
         .sensitivity = .open,
-        .license = "Apache-2.0",
+        .license = "MIT",
         .retention = .{
             .reason = "A cache is not a record.",
             .duration = timeutil.Duration.fromDays(7),

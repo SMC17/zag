@@ -1,0 +1,971 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zag.dev/schemas/workspace-event.schema.json",
+  "title": "Workspace event",
+  "description": "One entry in the workspace event log.",
+  "$ref": "#/$defs/Envelope",
+  "$defs": {
+    "Envelope": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "at": {
+          "type": "string"
+        },
+        "actor": {
+          "$ref": "#/$defs/Actor"
+        },
+        "causedBy": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "payload": {
+          "$ref": "#/$defs/WorkspaceEvent"
+        },
+        "contentHash": {
+          "type": "string"
+        },
+        "chainHash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "sequence",
+        "at",
+        "actor",
+        "payload",
+        "contentHash",
+        "chainHash"
+      ],
+      "additionalProperties": false
+    },
+    "Actor": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ProducerKind"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "ProducerKind": {
+      "type": "string",
+      "enum": [
+        "person",
+        "shell",
+        "agent",
+        "background_agent",
+        "remote_person",
+        "system",
+        "integration"
+      ]
+    },
+    "WorkspaceEvent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "session_opened": {
+              "$ref": "#/$defs/SessionOpened"
+            }
+          },
+          "required": [
+            "session_opened"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "session_closed": {
+              "$ref": "#/$defs/SessionClosed"
+            }
+          },
+          "required": [
+            "session_closed"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command_submitted": {
+              "$ref": "#/$defs/CommandSubmitted"
+            }
+          },
+          "required": [
+            "command_submitted"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "process_output": {
+              "$ref": "#/$defs/ProcessOutput"
+            }
+          },
+          "required": [
+            "process_output"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command_finished": {
+              "$ref": "#/$defs/CommandFinished"
+            }
+          },
+          "required": [
+            "command_finished"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "agent_started": {
+              "$ref": "#/$defs/AgentStarted"
+            }
+          },
+          "required": [
+            "agent_started"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "agent_message": {
+              "$ref": "#/$defs/AgentMessage"
+            }
+          },
+          "required": [
+            "agent_message"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "tool_requested": {
+              "$ref": "#/$defs/ToolRequested"
+            }
+          },
+          "required": [
+            "tool_requested"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "tool_finished": {
+              "$ref": "#/$defs/ToolFinished"
+            }
+          },
+          "required": [
+            "tool_finished"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "file_opened": {
+              "$ref": "#/$defs/FileOpened"
+            }
+          },
+          "required": [
+            "file_opened"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "file_changed": {
+              "$ref": "#/$defs/FileChanged"
+            }
+          },
+          "required": [
+            "file_changed"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "approval_requested": {
+              "$ref": "#/$defs/ApprovalRequested"
+            }
+          },
+          "required": [
+            "approval_requested"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "approval_resolved": {
+              "$ref": "#/$defs/ApprovalResolved"
+            }
+          },
+          "required": [
+            "approval_resolved"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "git_changed": {
+              "$ref": "#/$defs/GitChanged"
+            }
+          },
+          "required": [
+            "git_changed"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "diagnostic": {
+              "$ref": "#/$defs/Diagnostic"
+            }
+          },
+          "required": [
+            "diagnostic"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "evidence_recorded": {
+              "$ref": "#/$defs/EvidenceRecorded"
+            }
+          },
+          "required": [
+            "evidence_recorded"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "user_message": {
+              "$ref": "#/$defs/UserMessage"
+            }
+          },
+          "required": [
+            "user_message"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "SessionOpened": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "string"
+        },
+        "workingDirectory": {
+          "type": "string"
+        },
+        "shell": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "columns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "repository": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "branch": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "worktree": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "session",
+        "workingDirectory"
+      ],
+      "additionalProperties": false
+    },
+    "SessionClosed": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "string"
+        },
+        "exitStatus": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session"
+      ],
+      "additionalProperties": false
+    },
+    "CommandSubmitted": {
+      "type": "object",
+      "properties": {
+        "block": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "commandText": {
+          "type": "string"
+        },
+        "workingDirectory": {
+          "type": "string"
+        },
+        "boundaryFromShell": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "block",
+        "session",
+        "commandText",
+        "workingDirectory"
+      ],
+      "additionalProperties": false
+    },
+    "ProcessOutput": {
+      "type": "object",
+      "properties": {
+        "block": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "stream": {
+          "$ref": "#/$defs/OutputStream"
+        },
+        "contentHash": {
+          "type": "string"
+        },
+        "byteCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "chunkIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      },
+      "required": [
+        "block",
+        "session",
+        "contentHash",
+        "byteCount"
+      ],
+      "additionalProperties": false
+    },
+    "OutputStream": {
+      "type": "string",
+      "enum": [
+        "stdout",
+        "stderr",
+        "merged"
+      ]
+    },
+    "CommandFinished": {
+      "type": "object",
+      "properties": {
+        "block": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "exitStatus": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "duration": {
+          "type": "string"
+        },
+        "signal": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "block",
+        "session",
+        "exitStatus",
+        "duration"
+      ],
+      "additionalProperties": false
+    },
+    "AgentStarted": {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "request": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "policy": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent",
+        "session",
+        "request",
+        "provider",
+        "model",
+        "policy"
+      ],
+      "additionalProperties": false
+    },
+    "AgentMessage": {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/AgentMessage__enum_43063"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent",
+        "session",
+        "role",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "AgentMessage__enum_43063": {
+      "type": "string",
+      "enum": [
+        "plan",
+        "progress",
+        "result",
+        "question",
+        "refusal"
+      ]
+    },
+    "ToolRequested": {
+      "type": "object",
+      "properties": {
+        "call": {
+          "type": "string"
+        },
+        "agent": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "capability": {
+          "type": "string"
+        },
+        "argumentsJson": {
+          "type": "string"
+        },
+        "resource": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "call",
+        "agent",
+        "session",
+        "tool",
+        "capability",
+        "argumentsJson"
+      ],
+      "additionalProperties": false
+    },
+    "ToolFinished": {
+      "type": "object",
+      "properties": {
+        "call": {
+          "type": "string"
+        },
+        "agent": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ToolFinished__enum_43072"
+        },
+        "duration": {
+          "type": "string"
+        },
+        "resultHash": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "call",
+        "agent",
+        "session",
+        "outcome",
+        "duration",
+        "resultHash"
+      ],
+      "additionalProperties": false
+    },
+    "ToolFinished__enum_43072": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "failed",
+        "denied",
+        "cancelled",
+        "timed_out"
+      ]
+    },
+    "FileOpened": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "contentHash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session",
+        "path",
+        "contentHash"
+      ],
+      "additionalProperties": false
+    },
+    "FileChanged": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "changeKind": {
+          "$ref": "#/$defs/FileChanged__enum_43073"
+        },
+        "beforeHash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "afterHash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "agent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "session",
+        "path",
+        "changeKind"
+      ],
+      "additionalProperties": false
+    },
+    "FileChanged__enum_43073": {
+      "type": "string",
+      "enum": [
+        "created",
+        "modified",
+        "deleted",
+        "renamed"
+      ]
+    },
+    "ApprovalRequested": {
+      "type": "object",
+      "properties": {
+        "approval": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "agent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capability": {
+          "type": "string"
+        },
+        "resource": {
+          "type": "string"
+        },
+        "promptText": {
+          "type": "string"
+        },
+        "policy": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "approval",
+        "session",
+        "capability",
+        "resource",
+        "promptText",
+        "policy"
+      ],
+      "additionalProperties": false
+    },
+    "ApprovalResolved": {
+      "type": "object",
+      "properties": {
+        "approval": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ApprovalResolved__enum_43083"
+        },
+        "decidedBy": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "approval",
+        "session",
+        "outcome",
+        "decidedBy"
+      ],
+      "additionalProperties": false
+    },
+    "ApprovalResolved__enum_43083": {
+      "type": "string",
+      "enum": [
+        "allow_once",
+        "allow_always_here",
+        "deny",
+        "expired"
+      ]
+    },
+    "GitChanged": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "branch": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "head": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dirtyFileCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "aheadCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "behindCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      },
+      "required": [
+        "session",
+        "repository"
+      ],
+      "additionalProperties": false
+    },
+    "Diagnostic": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "severity": {
+          "$ref": "#/$defs/Diagnostic__enum_43084"
+        },
+        "source": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "session",
+        "path",
+        "line",
+        "column",
+        "severity",
+        "source",
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "Diagnostic__enum_43084": {
+      "type": "string",
+      "enum": [
+        "hint",
+        "information",
+        "warning",
+        "error"
+      ]
+    },
+    "EvidenceRecorded": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requirement": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "result": {
+          "type": "string"
+        },
+        "contentHash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "requirement",
+        "subject",
+        "method",
+        "result",
+        "contentHash"
+      ],
+      "additionalProperties": false
+    },
+    "UserMessage": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session",
+        "text"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
