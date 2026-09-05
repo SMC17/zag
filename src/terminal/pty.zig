@@ -56,11 +56,18 @@ pub const Pty = struct {
         return self.slave_path_buffer[0..self.slave_path_len];
     }
 
+    /// The same path as a C string, for `open` in the child.
+    pub fn slavePathZ(self: *const Pty) [*:0]const u8 {
+        return @ptrCast(&self.slave_path_buffer);
+    }
+
     /// Open a new pseudoterminal pair.
     pub fn open(size: Size) Error!Pty {
         if (comptime !supported) return error.UnsupportedPlatform;
 
-        const flags: linux.O = .{ .ACCMODE = .RDWR, .NOCTTY = true };
+        // The master is opened non-blocking: a read that waits forever is how a
+        // terminal user interface freezes, and how a test hangs.
+        const flags: linux.O = .{ .ACCMODE = .RDWR, .NOCTTY = true, .NONBLOCK = true };
         const rc = linux.open("/dev/ptmx", flags, 0);
         if (linux.errno(rc) != .SUCCESS) return error.OpenFailed;
         const master: std.posix.fd_t = @intCast(rc);
@@ -77,8 +84,11 @@ pub const Pty = struct {
         }
 
         var pty: Pty = .{ .master = master };
-        const path = std.fmt.bufPrint(&pty.slave_path_buffer, "/dev/pts/{d}", .{number}) catch return error.ConfigureFailed;
-        pty.slave_path_len = path.len;
+        // The path is written with an explicit terminator: it is handed to
+        // `open` in the child as a C string, and an un-terminated buffer means
+        // the child opens whatever follows it in memory, or nothing at all.
+        const path = std.fmt.bufPrint(&pty.slave_path_buffer, "/dev/pts/{d}\x00", .{number}) catch return error.ConfigureFailed;
+        pty.slave_path_len = path.len - 1;
 
         try pty.setSize(size);
         return pty;
@@ -109,6 +119,18 @@ pub const Pty = struct {
             .width_pixels = winsize.xpixel,
             .height_pixels = winsize.ypixel,
         };
+    }
+
+    /// Wait until there is something to read, or the timeout passes.
+    /// Returns true when the master is readable.
+    pub fn waitReadable(self: *const Pty, timeout_ms: i32) bool {
+        var fds = [_]std.posix.pollfd{.{
+            .fd = self.master,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        const ready = std.posix.poll(&fds, timeout_ms) catch return false;
+        return ready > 0;
     }
 
     pub fn read(self: *const Pty, buffer: []u8) Error!usize {
@@ -161,7 +183,7 @@ pub const Pty = struct {
             _ = linux.setsid();
 
             const slave_flags: linux.O = .{ .ACCMODE = .RDWR };
-            const slave_rc = linux.open(@ptrCast(self.slave_path_buffer[0..self.slave_path_len].ptr), slave_flags, 0);
+            const slave_rc = linux.open(@ptrCast(&self.slave_path_buffer), slave_flags, 0);
             if (linux.errno(slave_rc) != .SUCCESS) linux.exit(126);
             const slave: i32 = @intCast(slave_rc);
 
@@ -196,10 +218,15 @@ pub const Child = struct {
     }
 
     /// Check whether the child has finished, without blocking.
+    ///
+    /// Returns null when the answer is not known — the child is still running,
+    /// or something else already reaped it (a test runner, an init process).
+    /// "I cannot tell" must not be reported as "it finished", or a caller stops
+    /// reading output that has not arrived yet.
     pub fn poll(self: Child) ?Exit {
         var status: u32 = 0;
         const rc = linux.wait4(self.pid, &status, 1, null); // WNOHANG
-        if (linux.errno(rc) != .SUCCESS) return .unknown;
+        if (linux.errno(rc) != .SUCCESS) return null;
         if (rc == 0) return null;
         return decodeStatus(status);
     }
@@ -277,13 +304,15 @@ test "a real command runs on a real pseudoterminal" {
 
     var collected: std.ArrayList(u8) = .empty;
     var buffer: [1024]u8 = undefined;
-    var reads: usize = 0;
-    while (reads < 200) : (reads += 1) {
-        const n = pty.read(&buffer) catch break;
-        if (n == 0) {
+    var waited_ms: i32 = 0;
+    while (waited_ms < 5000) {
+        if (!pty.waitReadable(50)) {
+            waited_ms += 50;
             if (child.poll() != null) break;
             continue;
         }
+        const n = pty.read(&buffer) catch break;
+        if (n == 0) break;
         try collected.appendSlice(arena, buffer[0..n]);
         if (std.mem.indexOf(u8, collected.items, "hello from the pty") != null) break;
     }
@@ -314,17 +343,19 @@ test "a pseudoterminal reports its size back to the program" {
 
     var collected: std.ArrayList(u8) = .empty;
     var buffer: [512]u8 = undefined;
-    var reads: usize = 0;
-    while (reads < 200) : (reads += 1) {
-        const n = pty.read(&buffer) catch break;
-        if (n == 0) {
+    var waited_ms: i32 = 0;
+    while (waited_ms < 5000) {
+        if (!pty.waitReadable(50)) {
+            waited_ms += 50;
             if (child.poll() != null) break;
             continue;
         }
+        const n = pty.read(&buffer) catch break;
+        if (n == 0) break;
         try collected.appendSlice(arena, buffer[0..n]);
         if (std.mem.indexOf(u8, collected.items, "\n") != null) break;
     }
-    _ = child.wait();
+    _ = child.poll();
 
     const text = collected.items;
     if (std.mem.indexOf(u8, text, "unavailable") == null) {
