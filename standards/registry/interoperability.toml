@@ -1,0 +1,70 @@
+# Machine-readable value and interface standards.
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 8601"
+edition = "2019"
+title = "Date and time - Representations for information interchange"
+status = "published"
+enforcement = "mandatory"
+purpose = "Every stored instant is unambiguous."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 3166"
+title = "Codes for the representation of names of countries and their subdivisions"
+status = "published"
+enforcement = "mandatory"
+purpose = "Country is stored as a code, never as a name."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 4217"
+title = "Codes for the representation of currencies"
+status = "published"
+enforcement = "mandatory"
+purpose = "Money carries its currency and its minor units, and is never a float."
+
+[[standard]]
+namespace = "bipm"
+identifier = "SI"
+edition = "9"
+title = "The International System of Units"
+status = "published"
+enforcement = "mandatory"
+purpose = "Quantities are expressed in coherent units."
+
+[[standard]]
+namespace = "industry"
+identifier = "UCUM"
+title = "Unified Code for Units of Measure"
+status = "industry_spec"
+enforcement = "mandatory"
+purpose = "Units are machine-readable, so a number without a unit cannot be published."
+
+[[standard]]
+namespace = "industry"
+identifier = "JSON Schema"
+edition = "2020-12"
+title = "JSON Schema"
+status = "industry_spec"
+enforcement = "mandatory"
+purpose = "Interfaces are described from the same types the runtime uses."
+
+[[standard]]
+namespace = "industry"
+identifier = "OpenAPI"
+edition = "3.1.0"
+title = "OpenAPI Specification"
+status = "industry_spec"
+enforcement = "mandatory"
+purpose = "The daemon's interface is generated, so it cannot drift from the code."
+
+[[standard]]
+namespace = "iso"
+identifier = "ISO 24896"
+edition = "2026"
+title = "Notation for business reporting"
+status = "published"
+enforcement = "mandatory"
+purpose = "Every report uses one notation, so a figure means the same thing wherever it appears."
