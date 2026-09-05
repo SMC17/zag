@@ -61,6 +61,20 @@ runs in that gate.
 The table above has eleven rows on purpose: each row is one subsystem, and each
 one fails the build on its own.
 
+## Requirements, and the evidence for them
+
+`standards/registry/requirements.toml` holds the requirements taken from those
+standards. Each one names its clause, what must be true, how it is verified, and
+what the automated check cannot settle.
+
+`zag evidence` runs the checks, records what each one established, and writes
+the conformance statement that follows. A requirement whose verification method
+needs a person stays open until a person records a judgement, however many
+checks passed. That is why the statement usually reads:
+
+> Every automated check passed. Some rules can only be settled by people, and
+> that work is still open.
+
 ## What generated documents are checked against
 
 The model card, the system card, the datasheet and the fact sheet are generated

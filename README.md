@@ -67,6 +67,9 @@ zag check                      # audit this repository
 zag card model                 # the model card, generated from the system
 zag accessibility              # the accessibility statement and the themes
 zag shell-hook bash            # the shell integration to add to your shell
+zag workflow                   # this repository's own workflow, as a task graph
+zag lifecycle                  # the lifecycle record, and what has not started
+zag evidence                   # the conformance statement, from recorded evidence
 ```
 
 ## What "standards-native" means here

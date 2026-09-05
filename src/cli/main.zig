@@ -30,6 +30,9 @@ const Command = enum {
     agents,
     run,
     shell_hook,
+    workflow,
+    lifecycle,
+    evidence,
 
     fn parse(text: []const u8) ?Command {
         const table = [_]struct { name: []const u8, command: Command }{
@@ -54,6 +57,9 @@ const Command = enum {
             .{ .name = "agents", .command = .agents },
             .{ .name = "run", .command = .run },
             .{ .name = "shell-hook", .command = .shell_hook },
+            .{ .name = "workflow", .command = .workflow },
+            .{ .name = "lifecycle", .command = .lifecycle },
+            .{ .name = "evidence", .command = .evidence },
         };
         for (table) |entry| {
             if (std.mem.eql(u8, entry.name, text)) return entry.command;
@@ -85,6 +91,9 @@ pub const help_text =
     \\  agents <file>       Read an instruction file and show what it asks for.
     \\  run -- <command>    Run a command on a real terminal and record it as a block.
     \\  shell-hook <shell>  Print the shell integration for bash, zsh, fish or pwsh.
+    \\  workflow            Show this repository's own workflow as a task graph.
+    \\  lifecycle           Show the lifecycle record, and what has not started.
+    \\  evidence            Write the conformance statement from recorded evidence.
     \\
     \\Options
     \\  --profile <name>    Use this conformance profile. The default is "default".
@@ -236,6 +245,9 @@ fn run(
         .agents => try agentsFile(arena, io, w, options),
         .run => try runCommand(arena, w, options),
         .shell_hook => try shellHook(w, options),
+        .workflow => try workflowReport(arena, w, options),
+        .lifecycle => try lifecycleReport(arena, w),
+        .evidence => try evidenceReport(arena, io, w, options),
     };
 }
 
@@ -800,6 +812,198 @@ fn shellHook(w: *std.Io.Writer, options: Options) !u8 {
     return 0;
 }
 
+fn workflowReport(arena: std.mem.Allocator, w: *std.Io.Writer, options: Options) !u8 {
+    const workflow = try zag.workspace.workflow.buildAndCheck(arena, options.repo);
+    try workflow.writeSummary(arena, w);
+
+    const findings = try workflow.validate(arena);
+    if (findings.items.len > 0) {
+        try w.writeAll("\nProblems with the workflow:\n");
+        for (findings.items) |finding| try w.print("  {s}: {s}\n", .{ finding.node_id, finding.message });
+        return 1;
+    }
+    return 0;
+}
+
+fn lifecycleReport(arena: std.mem.Allocator, w: *std.Io.Writer) !u8 {
+    const record = zag.ai.lifecycle.workbenchRecord();
+    try record.writeReport(arena, w);
+    const findings = try record.review(arena);
+    return if (findings.items.len > 0) 1 else 0;
+}
+
+/// `zag evidence` — run the checks that can be run, record what each one
+/// established, and write the conformance statement that follows from it.
+fn evidenceReport(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
+    const profile = zag.standards.profile.byId(options.profile) orelse {
+        try w.print("\"{s}\" is not a profile zag knows. Run \"zag standards profiles\" to see them.\n", .{options.profile});
+        return 2;
+    };
+
+    var registry = try loadStandards(arena);
+    _ = try registry.loadRequirements(@embedFile("registry_requirements"));
+
+    var ledger = zag.standards.evidence.Ledger.init(arena);
+    var ids: zag.core.id.Generator = .init(0x2026_0904, 1_788_000_000_000);
+    const tool: zag.standards.evidence.ToolIdentity = .{ .name = "zag check", .version = zag.version };
+    const now = zag.core.time.Timestamp.epoch;
+
+    // Terminology.
+    const system = try zag.knowledge.vocabulary.build(arena);
+    const term_findings = try system.validate();
+    try ledger.record(.{
+        .id = ids.next(zag.core.id.EvidenceId),
+        .requirement_id = "ISO-704:R-DEFINITION",
+        .subject = "src/knowledge/vocabulary.zig",
+        .method = .static_analysis,
+        .result = if (term_findings.items.len == 0) .pass else .fail,
+        .tool = tool,
+        .created_at = now,
+        .content_hash = zag.core.hash.Hash.of("vocabulary"),
+        .note = "Every concept was checked for a definition that is present, not circular and not negative.",
+    });
+    try ledger.record(.{
+        .id = ids.next(zag.core.id.EvidenceId),
+        .requirement_id = "ISO-704:R-ONE-TERM",
+        .subject = "src/knowledge/vocabulary.zig",
+        .method = .static_analysis,
+        .result = if (term_findings.items.len == 0) .pass else .fail,
+        .tool = tool,
+        .created_at = now,
+        .content_hash = zag.core.hash.Hash.of("vocabulary"),
+        .note = "No preferred term designates two concepts.",
+    });
+
+    const thesaurus = try zag.knowledge.thesaurus.Thesaurus.build(arena, system);
+    const reciprocity = try thesaurus.checkReciprocity();
+    try ledger.record(.{
+        .id = ids.next(zag.core.id.EvidenceId),
+        .requirement_id = "ISO-25964:R-RECIPROCAL",
+        .subject = "the thesaurus view of the vocabulary",
+        .method = .static_analysis,
+        .result = if (reciprocity.items.len == 0) .pass else .fail,
+        .tool = tool,
+        .created_at = now,
+        .content_hash = zag.core.hash.Hash.of("thesaurus"),
+    });
+
+    // Metadata.
+    const metadata_registry = try workbenchMetadataRegistry(arena);
+    const metadata_findings = try metadata_registry.validate();
+    inline for (.{ "ISO-11179:R-ONE-NAME", "ISO-11179:R-VALUE-DOMAIN" }) |requirement_id| {
+        try ledger.record(.{
+            .id = ids.next(zag.core.id.EvidenceId),
+            .requirement_id = requirement_id,
+            .subject = "the metadata registry",
+            .method = .static_analysis,
+            .result = if (metadata_findings.items.len == 0) .pass else .fail,
+            .tool = tool,
+            .created_at = now,
+            .content_hash = zag.core.hash.Hash.of("metadata"),
+        });
+    }
+
+    // Accessibility.
+    var contrast_failures: usize = 0;
+    inline for ([_]zag.accessibility.contrast.Theme{
+        zag.accessibility.contrast.default_dark,
+        zag.accessibility.contrast.default_light,
+    }) |theme| {
+        contrast_failures += (try theme.check(arena, .aa)).items.len;
+    }
+    try ledger.record(.{
+        .id = ids.next(zag.core.id.EvidenceId),
+        .requirement_id = "WCAG-2.2:R-CONTRAST",
+        .subject = "the shipped themes",
+        .method = .automated_test,
+        .result = if (contrast_failures == 0) .pass else .fail,
+        .tool = tool,
+        .created_at = now,
+        .content_hash = zag.core.hash.Hash.of("themes"),
+    });
+
+    const tree_findings = try zag.accessibility.semantic_tree.check(arena, zag.accessibility.semantic_tree.exampleTree(), .{});
+    inline for (.{ "WCAG-2.2:R-TARGET-SIZE", "WCAG-2.2:R-NAME-ROLE-VALUE" }) |requirement_id| {
+        try ledger.record(.{
+            .id = ids.next(zag.core.id.EvidenceId),
+            .requirement_id = requirement_id,
+            .subject = "the published accessibility tree",
+            .method = .automated_test,
+            .result = if (tree_findings.items.len == 0) .pass else .fail,
+            .tool = tool,
+            .created_at = now,
+            .content_hash = zag.core.hash.Hash.of("tree"),
+        });
+    }
+
+    // Governance.
+    const risk_register = try zag.ai.risk.workbenchRegister(arena);
+    try ledger.record(.{
+        .id = ids.next(zag.core.id.EvidenceId),
+        .requirement_id = "ISO-23894:R-TREATED",
+        .subject = "the risk register",
+        .method = .static_analysis,
+        .result = if ((try risk_register.review()).items.len == 0) .pass else .fail,
+        .tool = tool,
+        .created_at = now,
+        .content_hash = zag.core.hash.Hash.of("risks"),
+    });
+    const assessment = try zag.ai.impact.workbenchAssessment(arena);
+    try ledger.record(.{
+        .id = ids.next(zag.core.id.EvidenceId),
+        .requirement_id = "ISO-42005:R-AFFECTED",
+        .subject = "the impact assessment",
+        .method = .static_analysis,
+        .result = if ((try assessment.review(arena)).items.len == 0) .pass else .fail,
+        .tool = tool,
+        .created_at = now,
+        .content_hash = zag.core.hash.Hash.of("impact"),
+    });
+
+    // Product text.
+    const help_report = try zag.language.plain.check(arena, help_text, .{ .kind = .body, .audience = profile.audience, .terminology = &system });
+    var blocking: usize = 0;
+    for (help_report.findings) |finding| {
+        if (finding.severity == .blocking) blocking += 1;
+    }
+    inline for (.{ "ISO-24495-1:R-ERROR-NEXT-STEP", "ISO-24495-1:R-LABEL-ACTION", "ISO-24495-1:R-UNDERSTANDABLE", "ISO-24495-1:R-FINDABLE" }) |requirement_id| {
+        try ledger.record(.{
+            .id = ids.next(zag.core.id.EvidenceId),
+            .requirement_id = requirement_id,
+            .subject = "the product's own text and the tool's help",
+            .method = .static_analysis,
+            .result = if (blocking == 0) .pass else .fail,
+            .tool = tool,
+            .created_at = now,
+            .content_hash = zag.core.hash.Hash.of(help_text),
+            .note = "The plain-language checker found no blocking problem. It cannot establish that a reader can act on the text.",
+        });
+    }
+
+    // The statement, for each scope the profile covers.
+    const scopes = [_]zag.standards.registry.Scope{ .interface_text, .documentation, .terminology, .metadata, .user_interface, .ai_system, .records, .reporting, .data };
+    var worst: u8 = 0;
+    for (scopes) |scope| {
+        const summary = try ledger.summarise(registry, scope, profile.id);
+        if (summary.total == 0) continue;
+        try ledger.writeStatement(w, registry, scope, profile.id);
+        try w.writeAll("\n");
+        if (summary.claim == .not_conformant) worst = 1;
+    }
+
+    // The evidence itself is a record, so it is written rather than printed and
+    // forgotten. It is deterministic: the same repository produces the same
+    // file, and a change in the file means a change in what was established.
+    var jsonl: std.Io.Writer.Allocating = .init(arena);
+    for (ledger.items.items) |item| {
+        try std.json.Stringify.value(item, .{}, &jsonl.writer);
+        try jsonl.writer.writeByte('\n');
+    }
+    try writeGenerated(io, std.Io.Dir.cwd(), arena, options.out, "evidence/conformance.jsonl", jsonl.written());
+    try w.print("Evidence written to {s}/evidence/conformance.jsonl\n", .{options.out});
+    return worst;
+}
+
 // ---------------------------------------------------------------------------
 // emit and check
 // ---------------------------------------------------------------------------
@@ -1220,7 +1424,16 @@ fn check(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Optio
     try w.print("Product text: {d} blocking problem(s).\n", .{text_findings});
     problems += text_findings;
 
-    // 7. Instruction files.
+    // 7. The repository's own workflow and lifecycle record.
+    const workflow = try zag.workspace.workflow.buildAndCheck(arena, options.repo);
+    const workflow_findings = try workflow.validate(arena);
+    const lifecycle_findings = try zag.ai.lifecycle.workbenchRecord().review(arena);
+    try w.print("Workflow and lifecycle: {d} workflow problem(s), {d} lifecycle problem(s).\n", .{ workflow_findings.items.len, lifecycle_findings.items.len });
+    for (workflow_findings.items) |finding| try w.print("  WORKFLOW {s}: {s}\n", .{ finding.node_id, finding.message });
+    for (lifecycle_findings.items) |finding| try w.print("  LIFECYCLE {s}\n", .{finding});
+    problems += workflow_findings.items.len + lifecycle_findings.items.len;
+
+    // 8. Instruction files.
     const agents_path = try std.fs.path.join(arena, &.{ options.repo, "AGENTS.md" });
     if (dir.readFileAlloc(io, agents_path, arena, .limited(4 << 20))) |source| {
         const document = try zag.agent_context.agents_md.parse(arena, options.repo, source);

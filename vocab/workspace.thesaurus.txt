@@ -4,14 +4,27 @@ actor
 agent
     BT  actor
     RT  tool call
+    RT  AI system
+
+AI lifecycle process
+    RT  AI system
+
+AI system
+    NT  model
+    RT  agent
+    RT  machine learning
+    RT  AI lifecycle process
+    RT  human oversight
 
 approval
     RT  authorisation decision
+    RT  human oversight
 
 artefact
     UF  artifact
     NT  record
     NT  dataset
+    NT  documented information
     RT  provenance
 
 artifact
@@ -52,9 +65,13 @@ data element
 
 dataset
     BT  artefact
+    NT  training data
 
 development environment
     NT  workspace
+
+documented information
+    BT  artefact
 
 environment group
     USE workspace
@@ -73,13 +90,27 @@ execution graph
     NT  tool call
     RT  workspace event
 
+human oversight
+    RT  AI system
+    RT  approval
+
 impact assessment
     RT  risk
+
+inference
+    RT  model
 
 knowledge base
     BT  workspace
 
+machine learning
+    RT  AI system
+
 metric
+
+model
+    BT  AI system
+    RT  inference
 
 plain language
     RT  audience
@@ -142,6 +173,9 @@ terminal surface
 tool call
     BT  execution graph
     RT  agent
+
+training data
+    BT  dataset
 
 workflow
 

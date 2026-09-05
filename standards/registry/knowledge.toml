@@ -145,3 +145,11 @@ title = "Knowledge management systems - Requirements"
 status = "published"
 enforcement = "required_profile"
 purpose = "The knowledge layer is a managed asset, not an accident of a wiki."
+
+[[standard]]
+namespace = "industry"
+identifier = "DocLang"
+title = "DocLang documentation language"
+status = "industry_spec"
+enforcement = "informational"
+purpose = "Considered as an authoring surface. The canonical content model covers what the product needs, and DocLang would be an import format if a team asked for it."

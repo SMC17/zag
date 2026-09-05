@@ -315,6 +315,83 @@
 <https://zag.dev/vocab/workspace> skos:hasTopConcept <https://zag.dev/vocab/workspace/impact-assessment> .
 <https://zag.dev/vocab/workspace/impact-assessment> dcterms:source "ISO/IEC 42005" .
 <https://zag.dev/vocab/workspace/impact-assessment> dcterms:subject "software engineering" .
+<https://zag.dev/vocab/workspace/ai-system> a skos:Concept .
+<https://zag.dev/vocab/workspace/ai-system> skos:inScheme <https://zag.dev/vocab/workspace> .
+<https://zag.dev/vocab/workspace/ai-system> skos:prefLabel "AI system"@en .
+<https://zag.dev/vocab/workspace/ai-system> skos:definition "engineered system that produces outputs such as predictions, recommendations or decisions from data, for objectives a person set"@en .
+<https://zag.dev/vocab/workspace/ai-system> skos:related <https://zag.dev/vocab/workspace/agent> .
+<https://zag.dev/vocab/workspace/agent> skos:related <https://zag.dev/vocab/workspace/ai-system> .
+<https://zag.dev/vocab/workspace/ai-system> skos:topConceptOf <https://zag.dev/vocab/workspace> .
+<https://zag.dev/vocab/workspace> skos:hasTopConcept <https://zag.dev/vocab/workspace/ai-system> .
+<https://zag.dev/vocab/workspace/ai-system> dcterms:source "ISO/IEC 22989" .
+<https://zag.dev/vocab/workspace/ai-system> dcterms:subject "software engineering" .
+<https://zag.dev/vocab/workspace/machine-learning> a skos:Concept .
+<https://zag.dev/vocab/workspace/machine-learning> skos:inScheme <https://zag.dev/vocab/workspace> .
+<https://zag.dev/vocab/workspace/machine-learning> skos:prefLabel "machine learning"@en .
+<https://zag.dev/vocab/workspace/machine-learning> skos:definition "way of building a system in which behaviour is derived from data rather than written as rules"@en .
+<https://zag.dev/vocab/workspace/machine-learning> skos:related <https://zag.dev/vocab/workspace/ai-system> .
+<https://zag.dev/vocab/workspace/ai-system> skos:related <https://zag.dev/vocab/workspace/machine-learning> .
+<https://zag.dev/vocab/workspace/machine-learning> skos:topConceptOf <https://zag.dev/vocab/workspace> .
+<https://zag.dev/vocab/workspace> skos:hasTopConcept <https://zag.dev/vocab/workspace/machine-learning> .
+<https://zag.dev/vocab/workspace/machine-learning> dcterms:source "ISO/IEC 22989" .
+<https://zag.dev/vocab/workspace/machine-learning> dcterms:subject "software engineering" .
+<https://zag.dev/vocab/workspace/model> a skos:Concept .
+<https://zag.dev/vocab/workspace/model> skos:inScheme <https://zag.dev/vocab/workspace> .
+<https://zag.dev/vocab/workspace/model> skos:prefLabel "model"@en .
+<https://zag.dev/vocab/workspace/model> skos:definition "part of an AI system that produces an output for a given input, using what was derived during training"@en .
+<https://zag.dev/vocab/workspace/model> skos:broader <https://zag.dev/vocab/workspace/ai-system> .
+<https://zag.dev/vocab/workspace/ai-system> skos:narrower <https://zag.dev/vocab/workspace/model> .
+<https://zag.dev/vocab/workspace/model> zag:partOf <https://zag.dev/vocab/workspace/ai-system> .
+<https://zag.dev/vocab/workspace/model> dcterms:source "ISO/IEC 22989" .
+<https://zag.dev/vocab/workspace/model> dcterms:subject "software engineering" .
+<https://zag.dev/vocab/workspace/inference> a skos:Concept .
+<https://zag.dev/vocab/workspace/inference> skos:inScheme <https://zag.dev/vocab/workspace> .
+<https://zag.dev/vocab/workspace/inference> skos:prefLabel "inference"@en .
+<https://zag.dev/vocab/workspace/inference> skos:definition "act of producing an output from a trained model for one input"@en .
+<https://zag.dev/vocab/workspace/inference> skos:related <https://zag.dev/vocab/workspace/model> .
+<https://zag.dev/vocab/workspace/model> skos:related <https://zag.dev/vocab/workspace/inference> .
+<https://zag.dev/vocab/workspace/inference> skos:topConceptOf <https://zag.dev/vocab/workspace> .
+<https://zag.dev/vocab/workspace> skos:hasTopConcept <https://zag.dev/vocab/workspace/inference> .
+<https://zag.dev/vocab/workspace/inference> dcterms:source "ISO/IEC 22989" .
+<https://zag.dev/vocab/workspace/inference> dcterms:subject "software engineering" .
+<https://zag.dev/vocab/workspace/training-data> a skos:Concept .
+<https://zag.dev/vocab/workspace/training-data> skos:inScheme <https://zag.dev/vocab/workspace> .
+<https://zag.dev/vocab/workspace/training-data> skos:prefLabel "training data"@en .
+<https://zag.dev/vocab/workspace/training-data> skos:definition "dataset used to derive a model's behaviour"@en .
+<https://zag.dev/vocab/workspace/training-data> skos:broader <https://zag.dev/vocab/workspace/dataset> .
+<https://zag.dev/vocab/workspace/dataset> skos:narrower <https://zag.dev/vocab/workspace/training-data> .
+<https://zag.dev/vocab/workspace/training-data> dcterms:source "ISO/IEC 22989" .
+<https://zag.dev/vocab/workspace/training-data> dcterms:subject "software engineering" .
+<https://zag.dev/vocab/workspace/ai-lifecycle-process> a skos:Concept .
+<https://zag.dev/vocab/workspace/ai-lifecycle-process> skos:inScheme <https://zag.dev/vocab/workspace> .
+<https://zag.dev/vocab/workspace/ai-lifecycle-process> skos:prefLabel "AI lifecycle process"@en .
+<https://zag.dev/vocab/workspace/ai-lifecycle-process> skos:definition "named process that an AI system passes through, from stating what it is for to withdrawing it from use"@en .
+<https://zag.dev/vocab/workspace/ai-lifecycle-process> skos:related <https://zag.dev/vocab/workspace/ai-system> .
+<https://zag.dev/vocab/workspace/ai-system> skos:related <https://zag.dev/vocab/workspace/ai-lifecycle-process> .
+<https://zag.dev/vocab/workspace/ai-lifecycle-process> skos:topConceptOf <https://zag.dev/vocab/workspace> .
+<https://zag.dev/vocab/workspace> skos:hasTopConcept <https://zag.dev/vocab/workspace/ai-lifecycle-process> .
+<https://zag.dev/vocab/workspace/ai-lifecycle-process> dcterms:source "ISO/IEC 5338" .
+<https://zag.dev/vocab/workspace/ai-lifecycle-process> dcterms:subject "software engineering" .
+<https://zag.dev/vocab/workspace/human-oversight> a skos:Concept .
+<https://zag.dev/vocab/workspace/human-oversight> skos:inScheme <https://zag.dev/vocab/workspace> .
+<https://zag.dev/vocab/workspace/human-oversight> skos:prefLabel "human oversight"@en .
+<https://zag.dev/vocab/workspace/human-oversight> skos:definition "arrangement by which a person can understand, direct, override and stop what an AI system does"@en .
+<https://zag.dev/vocab/workspace/human-oversight> skos:related <https://zag.dev/vocab/workspace/ai-system> .
+<https://zag.dev/vocab/workspace/ai-system> skos:related <https://zag.dev/vocab/workspace/human-oversight> .
+<https://zag.dev/vocab/workspace/human-oversight> skos:related <https://zag.dev/vocab/workspace/approval> .
+<https://zag.dev/vocab/workspace/approval> skos:related <https://zag.dev/vocab/workspace/human-oversight> .
+<https://zag.dev/vocab/workspace/human-oversight> skos:topConceptOf <https://zag.dev/vocab/workspace> .
+<https://zag.dev/vocab/workspace> skos:hasTopConcept <https://zag.dev/vocab/workspace/human-oversight> .
+<https://zag.dev/vocab/workspace/human-oversight> dcterms:source "ISO/IEC 42001" .
+<https://zag.dev/vocab/workspace/human-oversight> dcterms:subject "software engineering" .
+<https://zag.dev/vocab/workspace/documented-information> a skos:Concept .
+<https://zag.dev/vocab/workspace/documented-information> skos:inScheme <https://zag.dev/vocab/workspace> .
+<https://zag.dev/vocab/workspace/documented-information> skos:prefLabel "documented information"@en .
+<https://zag.dev/vocab/workspace/documented-information> skos:definition "information a party must control, together with the medium it is held on and the rules for keeping it current"@en .
+<https://zag.dev/vocab/workspace/documented-information> skos:broader <https://zag.dev/vocab/workspace/artifact> .
+<https://zag.dev/vocab/workspace/artifact> skos:narrower <https://zag.dev/vocab/workspace/documented-information> .
+<https://zag.dev/vocab/workspace/documented-information> dcterms:source "ISO 10013" .
+<https://zag.dev/vocab/workspace/documented-information> dcterms:subject "software engineering" .
 <https://zag.dev/vocab/workspace/metric> a skos:Concept .
 <https://zag.dev/vocab/workspace/metric> skos:inScheme <https://zag.dev/vocab/workspace> .
 <https://zag.dev/vocab/workspace/metric> skos:prefLabel "metric"@en .
