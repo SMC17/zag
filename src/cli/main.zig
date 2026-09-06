@@ -38,6 +38,9 @@ const Command = enum {
     history,
     knowledge,
     term,
+    providers,
+    policy,
+    ask,
 
     fn parse(text: []const u8) ?Command {
         const table = [_]struct { name: []const u8, command: Command }{
@@ -70,6 +73,9 @@ const Command = enum {
             .{ .name = "history", .command = .history },
             .{ .name = "knowledge", .command = .knowledge },
             .{ .name = "term", .command = .term },
+            .{ .name = "providers", .command = .providers },
+            .{ .name = "policy", .command = .policy },
+            .{ .name = "ask", .command = .ask },
         };
         for (table) |entry| {
             if (std.mem.eql(u8, entry.name, text)) return entry.command;
@@ -109,6 +115,9 @@ pub const help_text =
     \\  history <query>     Search recorded work. For example: status:failed zig
     \\  knowledge           Show the knowledge under .workspace/, and what is overdue.
     \\  term                Open a shell in a terminal that records what you do.
+    \\  providers           List the model connectors and say which credentials are set.
+    \\  policy              Show the policy in force, and where it was read from.
+    \\  ask <question>      Ask a model, through the policy. Use --provider to choose one.
     \\
     \\Options
     \\  --profile <name>    Use this conformance profile. The default is "default".
@@ -118,6 +127,8 @@ pub const help_text =
     \\  --out <directory>   Write generated files here.
     \\  --repo <directory>  Audit this directory.
     \\  --root <directory>  Read the workspace in this directory.
+    \\  --provider <name>   Which connector to use. Run "zag providers" to see them.
+    \\  --model <name>      Which model to ask for.
     \\  --raw               Start the shell with no added prompt marks.
     \\  --approve-truncate  Apply the recovery plan after preserving the original log.
     \\
@@ -136,6 +147,8 @@ const Options = struct {
     /// Run the shell exactly as it is, with no generated init file.
     raw: bool = false,
     approve_truncate: bool = false,
+    provider: []const u8 = "",
+    model: []const u8 = "",
     positional: []const []const u8 = &.{},
     /// Everything after `--`.
     passthrough: []const []const u8 = &.{},
@@ -181,6 +194,8 @@ fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
             .{ .flag = "--out", .field = &options.out },
             .{ .flag = "--repo", .field = &options.repo },
             .{ .flag = "--root", .field = &options.root },
+            .{ .flag = "--provider", .field = &options.provider },
+            .{ .flag = "--model", .field = &options.model },
         };
         var matched = false;
         for (named) |entry| {
@@ -280,7 +295,7 @@ fn run(
             try w.print("zag {s}\n", .{zag.version});
             break :blk 0;
         },
-        .doctor => try doctor(arena, w),
+        .doctor => try doctor(arena, io, w, options),
         .lint => try lint(arena, io, w, options),
         .terms => try terms(arena, w, options),
         .standards => try standards(arena, w, options),
@@ -304,6 +319,9 @@ fn run(
         .history => try historySearch(arena, io, w, options),
         .knowledge => try knowledgeIndex(arena, io, w, options),
         .term => try interactiveTerminal(arena, io, w, options, environment),
+        .providers => try listProviders(arena, io, w, options, environment),
+        .policy => try showPolicy(arena, io, w, options),
+        .ask => try askAModel(arena, io, w, options, environment),
     };
 }
 
@@ -311,8 +329,10 @@ fn run(
 // Commands
 // ---------------------------------------------------------------------------
 
-fn doctor(arena: std.mem.Allocator, w: *std.Io.Writer) !u8 {
+fn doctor(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
     const builtin = @import("builtin");
+    const loaded = try LoadedPolicy.fromWorkspace(arena, io, options.root);
+    const written_policy = loaded.path != null and loaded.problems.len == 0;
     try w.print("zag {s}\n\n", .{zag.version});
     try w.print("Built for {s} on {s}, with Zig {s}.\n\n", .{
         @tagName(builtin.os.tag),
@@ -328,6 +348,12 @@ fn doctor(arena: std.mem.Allocator, w: *std.Io.Writer) !u8 {
     try w.writeAll("  Read-only object audit:             yes\n");
     try w.writeAll("  Evidence-preserving log recovery:   yes\n");
     try w.writeAll("  Capability policy and approvals:    yes\n");
+    try w.print("  Policy written by you, in a file:   {s}\n", .{if (written_policy) "yes, and it is in force" else "yes, but none is written here"});
+    try w.print("  File access held inside the folder: {s}\n", .{if (zag.ai.sandbox.supported) "yes, enforced by the kernel" else "not on this platform"});
+    try w.print("  Ask a model, through the policy:    yes, {d} connectors, {d} on this computer\n", .{
+        zag.ai.catalog.count(),
+        zag.ai.catalog.localCount(),
+    });
     try w.writeAll("  Plain-language checks:              yes\n");
     try w.writeAll("  Terminology and metadata registry:  yes\n");
     try w.writeAll("  Standards registry and evidence:    yes\n");
@@ -336,12 +362,11 @@ fn doctor(arena: std.mem.Allocator, w: *std.Io.Writer) !u8 {
     try w.writeAll("What this build cannot do yet\n");
     try w.writeAll("  Draw its own window. The renderer is not written; the accessibility tree it must publish is.\n");
     try w.writeAll("  Talk to a language server. The editor surfaces are not written.\n");
-    try w.writeAll("  Reach a model provider. The runtime and its policy are written; no provider is wired in.\n");
+    try w.writeAll("  Read an answer as it arrives. A model request waits for the whole reply.\n");
+    try w.writeAll("  Run a model's tool calls on its own. The executors are written; nothing loops them yet.\n");
     try w.writeAll("  Run on Windows or macOS terminals. The pseudoterminal layer is Linux only so far.\n");
     try w.writeAll("  Split the screen. There are no tabs, panes or splits yet.\n");
-    try w.writeAll("  Be configured. There is no settings file and no key bindings yet.\n\n");
-    try w.writeAll("  Enforce file and network policy at the operating-system boundary. The concrete executors are not written.\n");
-    try w.writeAll("  Run on Windows or macOS terminals. The pseudoterminal layer is Linux only so far.\n\n");
+    try w.writeAll("  Be configured beyond the policy file. There are no key bindings and no theme file yet.\n\n");
 
     const system = try zag.knowledge.vocabulary.build(arena);
     try w.print("The vocabulary holds {d} concepts.\n", .{system.count()});
@@ -980,6 +1005,244 @@ fn workbenchActor() zag.events.event.Actor {
 
 /// The wall clock, read through the platform's input and output layer rather
 /// than from a global, so a test can drive the tool with a clock of its own.
+// ---------------------------------------------------------------------------
+// Model providers
+// ---------------------------------------------------------------------------
+
+/// Reads credentials from the environment the person started zag with.
+///
+/// The library never touches the environment itself. This is the one place
+/// that does, and it hands the value straight to the connector's encoder, so
+/// no key is ever held anywhere a log or an error message could reach it.
+const Environment = struct {
+    entries: []const []const u8,
+
+    fn credentials(self: *const Environment) zag.ai.transport.Credentials {
+        return .{ .context = @constCast(self), .lookupFn = lookup };
+    }
+
+    fn lookup(context: *anyopaque, variable: []const u8) ?[]const u8 {
+        const self: *const Environment = @ptrCast(@alignCast(context));
+        for (self.entries) |entry| {
+            const equals = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
+            if (std.mem.eql(u8, entry[0..equals], variable)) {
+                const value = entry[equals + 1 ..];
+                return if (value.len > 0) value else null;
+            }
+        }
+        return null;
+    }
+};
+
+threadlocal var credential_view: ?*const Environment = null;
+
+fn credentialIsSet(variable: []const u8) bool {
+    const view = credential_view orelse return false;
+    return Environment.lookup(@constCast(view), variable) != null;
+}
+
+fn listProviders(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+    environment: []const []const u8,
+) !u8 {
+    _ = arena;
+    _ = io;
+    _ = options;
+    const view: Environment = .{ .entries = environment };
+    credential_view = &view;
+    defer credential_view = null;
+    try zag.ai.catalog.writeList(w, credentialIsSet);
+    return 0;
+}
+
+/// Read the workspace's policy, or say plainly that the built-in one is in use.
+///
+/// A policy that was written by a person and a policy that was chosen for them
+/// are different things, and the difference is worth a line of output every
+/// time rather than being something they have to remember.
+const LoadedPolicy = struct {
+    policy: zag.ai.policy.Policy,
+    path: ?[]const u8,
+    problems: []const zag.ai.policy_file.Problem,
+
+    fn fromWorkspace(arena: std.mem.Allocator, io: std.Io, root: []const u8) !LoadedPolicy {
+        const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{
+            root,
+            zag.ai.policy_file.default_path,
+        });
+        const source = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20)) catch {
+            const built_in = try zag.ai.policy_file.parse(arena, zag.ai.policy_file.local_models_only);
+            return .{ .policy = built_in.policy.?, .path = null, .problems = &.{} };
+        };
+        const result = try zag.ai.policy_file.parse(arena, source);
+        if (result.policy) |written| {
+            return .{ .policy = written, .path = path, .problems = &.{} };
+        }
+        // A file that could not be read grants nothing. The built-in policy is
+        // not substituted for it, because that would turn a mistake in the
+        // file into permissions the person did not write.
+        return .{
+            .policy = .{
+                .id = "unusable",
+                .name = "This workspace's policy could not be read",
+                .description = "Nothing is allowed until the policy file is fixed.",
+                .rules = &.{},
+            },
+            .path = path,
+            .problems = result.problems,
+        };
+    }
+};
+
+fn showPolicy(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+) !u8 {
+    const loaded = try LoadedPolicy.fromWorkspace(arena, io, options.root);
+
+    if (loaded.path) |path| {
+        try w.print("Read from {s}.\n\n", .{path});
+    } else {
+        try w.print(
+            "No policy is written in this workspace, so the built-in one is in force.\nWrite {s}/{s} to change it.\n\n",
+            .{ options.root, zag.ai.policy_file.default_path },
+        );
+    }
+
+    if (loaded.problems.len > 0) {
+        try w.writeAll("This file could not be used. Nothing in it is in force.\n");
+        for (loaded.problems) |problem| {
+            if (problem.rule) |number| {
+                try w.print("  Rule {d}: {s}\n", .{ number, problem.message });
+            } else {
+                try w.print("  {s}\n", .{problem.message});
+            }
+        }
+        return 1;
+    }
+
+    try zag.ai.policy_file.describe(loaded.policy, w);
+    return 0;
+}
+
+/// Ask a model one question, through the policy.
+///
+/// Nothing here decides anything. The connector is chosen, the policy is read
+/// from the workspace, and the transport asks it three times before a byte
+/// leaves. When the answer is no, this prints what was refused and why, which
+/// is the more interesting outcome and the one worth reading carefully.
+fn askAModel(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+    environment: []const []const u8,
+) !u8 {
+    if (options.positional.len == 0) {
+        try w.writeAll("Write the question after the command. For example: zag ask \"what does this build do?\"\n");
+        return 2;
+    }
+
+    const chosen = if (options.provider.len > 0) options.provider else "ollama";
+    const connector = zag.ai.catalog.find(chosen) orelse {
+        try w.print("\"{s}\" is not a connector zag knows. Run \"zag providers\" to see them.\n", .{chosen});
+        return 2;
+    };
+
+    var question: std.ArrayList(u8) = .empty;
+    for (options.positional, 0..) |word, index| {
+        if (index > 0) try question.append(arena, ' ');
+        try question.appendSlice(arena, word);
+    }
+
+    const loaded = try LoadedPolicy.fromWorkspace(arena, io, options.root);
+    if (loaded.problems.len > 0) {
+        try w.writeAll("This workspace's policy could not be read, so nothing was sent.\n");
+        try w.writeAll("Run \"zag policy\" to see what is wrong with it.\n");
+        return 1;
+    }
+
+    var engine = zag.ai.policy.Engine.init(arena, loaded.policy, @bitCast(wallClock(io).ns));
+    var identifiers = zag.core.id.Generator.init(@bitCast(wallClock(io).ns), 0);
+    const context: zag.ai.policy.Context = .{
+        .actor = identifiers.next(zag.core.id.ActorId),
+        .now = wallClock(io),
+    };
+
+    const view: Environment = .{ .entries = environment };
+    var client: std.http.Client = .{ .allocator = arena, .io = io };
+    defer client.deinit();
+    var http: zag.ai.transport.Http = .{ .client = &client };
+
+    const transport: zag.ai.transport.Transport = .{
+        .arena = arena,
+        .engine = &engine,
+        .sender = http.sender(),
+        .credentials = view.credentials(),
+    };
+
+    var attempt: zag.ai.transport.Attempt = undefined;
+    const completion = transport.send(connector, .{
+        .model = if (options.model.len > 0) options.model else defaultModel(connector),
+        .messages = &.{.{ .role = .user, .blocks = &.{.{ .text = question.items }} }},
+    }, context, &attempt) catch |err| {
+        try w.print("{s}\n", .{zag.ai.transport.refusalText(err)});
+        if (attempt.sendProblem.len > 0) try w.print("{s}\n", .{attempt.sendProblem});
+        if (attempt.status) |status| {
+            try w.print("{s} answered {d}", .{ connector.name, status });
+            if (attempt.providerError.len > 0) {
+                try w.print(": {s}", .{attempt.providerError});
+            }
+            try w.writeAll("\n");
+        }
+        try w.writeAll("\n");
+        try writeDecisions(attempt, w);
+        return 1;
+    };
+
+    const answer = try completion.text(arena);
+    if (answer.len > 0) try w.print("{s}\n\n", .{answer});
+    try w.print("{s}\n\n", .{try attempt.summary(arena)});
+    try writeDecisions(attempt, w);
+    return 0;
+}
+
+/// The model a connector answers with when the person did not name one.
+///
+/// There is no right answer here, so the rule is to name something that
+/// provider actually serves rather than to guess a capable one.
+fn defaultModel(connector: zag.ai.catalog.Connector) []const u8 {
+    if (std.mem.eql(u8, connector.id, "anthropic")) return "claude-opus-5";
+    if (std.mem.eql(u8, connector.id, "openai")) return "gpt-5";
+    if (std.mem.eql(u8, connector.id, "gemini")) return "gemini-2.5-pro";
+    if (connector.locality == .local) return "llama3.2";
+    return "";
+}
+
+fn writeDecisions(attempt: zag.ai.transport.Attempt, w: *std.Io.Writer) !void {
+    if (attempt.decisions.len == 0) {
+        try w.writeAll("No decision was reached.\n");
+        return;
+    }
+    try w.writeAll("What the policy decided\n");
+    for (attempt.decisions) |decision| {
+        try w.print("  {s} to {s}: {s}\n", .{
+            switch (decision.effect) {
+                .allow => "Allowed",
+                .deny => "Refused",
+                .require_human => "Waiting for you",
+            },
+            decision.request.capability.explain(),
+            decision.reason,
+        });
+    }
+}
+
 fn wallClock(io: std.Io) zag.core.time.Timestamp {
     const raw = std.Io.Timestamp.now(io, .real);
     return .{ .ns = @intCast(raw.nanoseconds) };
@@ -1857,6 +2120,31 @@ fn check(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Optio
     for (lifecycle_findings.items) |finding| try w.print("  LIFECYCLE {s}\n", .{finding});
     problems += workflow_findings.items.len + lifecycle_findings.items.len;
 
+    // 7b. The workspace policy. A policy that does not parse allows nothing,
+    // which is safe but is never what the person who wrote it meant, so the
+    // build says so rather than letting it sit there doing nothing.
+    {
+        const policy_path = try std.fs.path.join(arena, &.{ options.repo, zag.ai.policy_file.default_path });
+        if (dir.readFileAlloc(io, policy_path, arena, .limited(1 << 20))) |source| {
+            const result = try zag.ai.policy_file.parse(arena, source);
+            if (result.policy) |written| {
+                try w.print("Workspace policy: {d} rule(s), no problems.\n", .{written.rules.len});
+            } else {
+                try w.print("Workspace policy: {d} problem(s). Nothing in the file is in force.\n", .{result.problems.len});
+                for (result.problems) |problem| {
+                    if (problem.rule) |number| {
+                        try w.print("  POLICY rule {d}: {s}\n", .{ number, problem.message });
+                    } else {
+                        try w.print("  POLICY {s}\n", .{problem.message});
+                    }
+                    problems += 1;
+                }
+            }
+        } else |_| {
+            try w.writeAll("Workspace policy: none written, so the built-in one is in force.\n");
+        }
+    }
+
     // 8. Instruction files.
     const agents_path = try std.fs.path.join(arena, &.{ options.repo, "AGENTS.md" });
     if (dir.readFileAlloc(io, agents_path, arena, .limited(4 << 20))) |source| {
@@ -2154,4 +2442,146 @@ test "the daemon interface describes every operation with its capability" {
     const submit = paths.get("/sessions/{sessionId}/commands").?.object.get("post").?.object;
     try testing.expectEqualStrings("process.execute", submit.get("x-zag-capability").?.string);
     try testing.expect(submit.get("requestBody") != null);
+}
+
+test "the connector list says which credentials are set, without printing one" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var buffer: [16384]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buffer);
+    const environment = [_][]const u8{
+        "PATH=/usr/bin",
+        "ANTHROPIC_API_KEY=sk-secret-value",
+        "OPENAI_API_KEY=",
+    };
+    try testing.expectEqual(@as(u8, 0), try listProviders(arena, io, &w, .{}, &environment));
+    const text = w.buffered();
+
+    try testing.expect(std.mem.indexOf(u8, text, "ANTHROPIC_API_KEY (set)") != null);
+    // An empty variable is not a credential, whatever the shell thinks.
+    try testing.expect(std.mem.indexOf(u8, text, "OPENAI_API_KEY (not set)") != null);
+    // The value never reaches the page.
+    try testing.expect(std.mem.indexOf(u8, text, "sk-secret-value") == null);
+}
+
+test "the policy shown is the one written in the workspace, and a broken one grants nothing" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const directory = try std.fmt.allocPrint(arena, "{s}/.workspace", .{root});
+    const policy_path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ root, zag.ai.policy_file.default_path });
+    try std.Io.Dir.cwd().createDirPath(io, directory);
+
+    // With no file, the built-in policy is in force and says so.
+    var absent_buffer: [4096]u8 = undefined;
+    var absent = std.Io.Writer.fixed(&absent_buffer);
+    try testing.expectEqual(@as(u8, 0), try showPolicy(arena, io, &absent, .{ .root = root }));
+    try testing.expect(std.mem.indexOf(u8, absent.buffered(), "No policy is written") != null);
+
+    // A written one replaces it.
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = policy_path,
+        .data =
+        \\name = "Read only"
+        \\
+        \\[[rule]]
+        \\allow = ["fs.read"]
+        \\because = "Looking is allowed."
+        \\
+        ,
+    });
+    var written_buffer: [4096]u8 = undefined;
+    var written = std.Io.Writer.fixed(&written_buffer);
+    try testing.expectEqual(@as(u8, 0), try showPolicy(arena, io, &written, .{ .root = root }));
+    try testing.expect(std.mem.indexOf(u8, written.buffered(), "Read only") != null);
+    try testing.expect(std.mem.indexOf(u8, written.buffered(), "Looking is allowed.") != null);
+
+    // A broken one is reported, and the built-in policy is not quietly put in
+    // its place. Substituting one would hand out permissions nobody wrote.
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = policy_path,
+        .data =
+        \\[[rule]]
+        \\allow = ["fs.read", "network.teleport"]
+        \\
+        ,
+    });
+    var broken_buffer: [4096]u8 = undefined;
+    var broken = std.Io.Writer.fixed(&broken_buffer);
+    try testing.expectEqual(@as(u8, 1), try showPolicy(arena, io, &broken, .{ .root = root }));
+    try testing.expect(std.mem.indexOf(u8, broken.buffered(), "network.teleport") != null);
+    try testing.expect(std.mem.indexOf(u8, broken.buffered(), "Nothing in it is in force") != null);
+}
+
+test "asking a model refuses before it sends, and says what the policy decided" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    // No policy is written, so the built-in local-only one applies. A hosted
+    // provider is refused, and nothing is sent: this runs with no network.
+    var buffer: [8192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buffer);
+    const status = try askAModel(arena, io, &w, .{
+        .root = root,
+        .provider = "anthropic",
+        .positional = &.{ "two", "plus", "two" },
+    }, &.{"ANTHROPIC_API_KEY=sk-secret-value"});
+    try testing.expectEqual(@as(u8, 1), status);
+
+    const text = w.buffered();
+    try testing.expect(std.mem.indexOf(u8, text, "policy does not allow") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "What the policy decided") != null);
+    // Using a model was allowed; reaching that host was not, and the two are
+    // shown separately because they are separate answers.
+    try testing.expect(std.mem.indexOf(u8, text, "Allowed to send this work to a model provider") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "Refused to connect to services over the network") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "sk-secret-value") == null);
+}
+
+test "a connector nobody has heard of is refused before any policy is read" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var buffer: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buffer);
+    try testing.expectEqual(@as(u8, 2), try askAModel(arena, io, &w, .{
+        .provider = "skynet",
+        .positional = &.{"hello"},
+    }, &.{}));
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "zag providers") != null);
+}
+
+test "every connector this build ships resolves and can be named on the command line" {
+    // The list the tool prints and the list the transport can reach are the
+    // same list. A connector that printed but could not be found would be a
+    // promise the tool could not keep.
+    for (zag.ai.catalog.connectors) |connector| {
+        const found = zag.ai.catalog.find(connector.id) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(connector.baseUrl, found.baseUrl);
+        try testing.expect(defaultModel(found).len > 0 or connector.locality == .hosted);
+    }
 }
