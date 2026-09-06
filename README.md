@@ -145,8 +145,8 @@ request -> plan -> typed tool request -> policy decision
 - `docs/architecture.md` — the event graph, the block model and the control plane
 - `docs/standards-conformance.md` — which standards apply and how each is checked
 - `docs/plain-language.md` — how ISO 24495 is applied, and what a checker cannot decide
-- `docs/competitive-position.md` — what zag beats, what beats zag, and the order that changes
-- `docs/roadmap.md` — what is complete, what comes next and the evidence each milestone needs
+- `docs/competitive-position.md` — how zag compares with other terminals, and what it cannot do yet
+- `docs/roadmap.md` — what is complete, what happens next, and the evidence each milestone needs
 - `docs/threat-model.md` — trust boundaries, implemented controls and residual security work
 - `docs/platform-support.md` — compile evidence, runtime evidence and explicit platform exclusions
 - `docs/adr/` — why the architecture is the way it is
