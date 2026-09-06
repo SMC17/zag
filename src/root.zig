@@ -97,6 +97,7 @@ pub const terminal = struct {
 pub const ai = struct {
     pub const capability = @import("ai/capability.zig");
     pub const policy = @import("ai/policy.zig");
+    pub const policy_file = @import("ai/policy_file.zig");
     pub const approval = @import("ai/approval.zig");
     pub const tools = @import("ai/tools.zig");
     pub const runtime = @import("ai/runtime.zig");
@@ -106,6 +107,18 @@ pub const ai = struct {
     pub const transparency = @import("ai/transparency.zig");
     pub const documentation = @import("ai/documentation.zig");
     pub const lifecycle = @import("ai/lifecycle.zig");
+    pub const sandbox = @import("ai/sandbox.zig");
+    pub const executor = @import("ai/executor.zig");
+    pub const provider = @import("ai/provider.zig");
+    pub const catalog = @import("ai/catalog.zig");
+    pub const transport = @import("ai/transport.zig");
+    pub const wire = struct {
+        pub const anthropic = @import("ai/wire/anthropic.zig");
+        pub const openai = @import("ai/wire/openai.zig");
+        pub const gemini = @import("ai/wire/gemini.zig");
+        pub const ollama = @import("ai/wire/ollama.zig");
+        pub const huggingface = @import("ai/wire/huggingface.zig");
+    };
 };
 
 pub const records = struct {

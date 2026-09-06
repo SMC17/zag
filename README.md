@@ -7,9 +7,10 @@ zag is a terminal, a block model, an agent runtime and a standards control plane
 in one Zig program. It fetches no package from the network: the whole thing
 builds from the Zig standard library.
 
-> Status: the substrate is built and tested. The graphical renderer, the editor
-> surfaces and the model providers are not written yet. `zag doctor` prints what
-> this build can and cannot do, so the claim never runs ahead of the code.
+> Status: the substrate is built and tested, and a model can be asked through
+> the policy. The graphical renderer, the editor surfaces and the agent loop are
+> not written yet. `zag doctor` prints what this build can and cannot do, so the
+> claim never runs ahead of the code.
 
 ## Why it is built this way
 
@@ -36,7 +37,7 @@ graph, an audit trail and an agent's context are all views of the same events.
 | `src/workspace` | Blocks, sessions, workflows, structured history, and the workspace service |
 | `src/editor` | The command line as an editing document, with undo that groups by intent |
 | `src/terminal` | Escape-sequence parser, screen with scrollback, shell integration, real pseudoterminal, and the recording terminal |
-| `src/ai` | Capabilities, the policy engine, approvals, typed tools, risk, impact, transparency, generated cards |
+| `src/ai` | Capabilities, the policy engine, the workspace policy file, approvals, typed tools and their executors, kernel-enforced path containment, the model connectors and the gate they pass through, risk, impact, transparency, generated cards |
 | `src/language` | The plain-language pass, with controlled-English and easy-to-read profiles |
 | `src/knowledge` | The concept system, the thesaurus view, the published vocabulary and the workspace knowledge base |
 | `src/metadata` | The registry that stops one field having four names |
@@ -62,6 +63,9 @@ You need Zig 0.16.0.
 ```
 zag term                       # a shell in a terminal that records what you do
 zag doctor                     # what this build can and cannot do
+zag policy                     # the policy in force, and where it was read from
+zag providers                  # the model connectors, and which credentials are set
+zag ask "why did that fail?"   # ask a model, through the policy
 zag run -- zig build test      # run a command and record it as a block
 zag lint README.md             # check text against the plain-language rules
 zag terms workspace            # what a word means here
@@ -131,10 +135,24 @@ request -> plan -> typed tool request -> policy decision
 - There is no free-form shell tool. Each request names one capability and one
   resource.
 - A path is normalised before policy matching, so textual `..` traversal is
-  rejected. Event logs, objects and recovery evidence also reject a symbolic
-  link in the final path component. This is not a filesystem sandbox:
-  beneath-only execution through a workspace directory handle is still on the
-  roadmap.
+  rejected. Beyond that, the executors open every file through a workspace
+  directory handle with `RESOLVE_BENEATH` and `RESOLVE_NO_MAGICLINKS`, so the
+  kernel refuses a symbolic link that leaves the workspace rather than the
+  program noticing afterwards. Event logs, objects and recovery evidence also
+  reject a symbolic link in the final path component.
+- A command runs from its argument vector. There is no shell between the two,
+  so there is nothing for a quotation mark to escape into.
+- An executor spends the decision it was handed. It re-derives the capability
+  and the resource from the request and refuses unless both match, so a decision
+  to read one file cannot be spent on another.
+- Asking a model is three permissions, not one: using a model, reaching that
+  host, and spending that credential. All three are decided before the request
+  is encoded, so a refused request is never built and a refused credential is
+  never read.
+- The policy is a file the person writes, in `.workspace/policy.toml`. It is
+  never shown to a model and never consulted by one. Run `zag policy` to read it
+  in words. A file that does not parse allows nothing; nothing more permissive
+  is substituted for it.
 - An operation that cannot be undone stops and asks, in words that name the
   operation and its consequence.
 - A repository instruction file shapes behaviour. It can never grant a

@@ -37,10 +37,30 @@ prefix. Normal workspace open never invokes that path. Final event-log, object
 and recovery-evidence entries reject symbolic links. A flush is rejected before
 it would make an active log exceed 64 MiB.
 
+The kernel holds file access inside the workspace. Paths are opened with
+`RESOLVE_BENEATH` and `RESOLVE_NO_MAGICLINKS`. A symbolic link that leaves the
+workspace is refused by the same component that would otherwise follow it. The
+typed executors consume the decision they were handed, deriving the resource
+from the request rather than from the caller. A command runs from its argument
+vector, with no shell in between.
+
+A model can be asked, through the policy. Five wire formats reach twenty-eight
+connectors, ten of which run on this computer: Anthropic, OpenAI, Gemini, Ollama
+and Hugging Face text generation. Every request passes the policy engine three
+times before it is encoded. It asks to use a model, to reach the host, and to
+spend the credential. A refused request stops there, before it is built. The
+credential stays out of every decision, log, error and summary.
+
+The policy is read from `.workspace/policy.toml`, written by the person whose
+computer it is. A file that does not parse allows nothing; nothing more
+permissive is put in its place.
+
 These statements are covered by automated tests. They do not establish
 power-loss survival on every filesystem, hostile tamper resistance, a safe
 garbage collector, a complete terminal, a graphical product or organisational
-certification.
+certification. The wire formats are tested against recorded answers and the
+Anthropic connector has been called; the other addresses are each provider's
+documented one and `zag providers` says which is which.
 
 ## Priority 0: protect the record
 
@@ -58,15 +78,21 @@ certification.
 
 ## Priority 1: enforce the security model where it executes
 
-- Open files relative to a workspace directory handle with symlink-safe,
-  beneath-only resolution. Rejecting a symbolic link in a record's final path
-  component and checking lexical policy are useful, but neither is a complete
-  filesystem sandbox.
-- Implement concrete typed tool executors. Each executor must consume the
-  policy decision it was given and must not reinterpret a command string.
-- Enforce network host allowlists at the connection boundary, including name
-  resolution, redirects and address changes. A request type alone is not an
-  enforcement control.
+Done. Files are opened relative to a workspace directory handle with
+`RESOLVE_BENEATH`, so the kernel refuses a path that leaves the workspace. The
+program no longer has to check afterwards. The typed executors are written, and
+each one consumes the decision it was given, re-deriving the resource from the
+request rather than trusting the caller. A command runs from its argument
+vector, with no shell between the two. A model request passes the policy engine
+three times before anything is encoded.
+
+Still open:
+
+- Enforce network host allowlists at the connection boundary rather than at the
+  request boundary. The host is decided before the request is built and a
+  redirect is refused outright, but name resolution and address changes are not
+  yet checked at the socket, so a host that resolves to an unexpected address is
+  not caught.
 - Review `docs/threat-model.md` with local users, malicious repositories,
   compromised child processes, model providers and remote clients in scope.
 - Add secret detection and redaction policy for terminal output, model context,
@@ -96,9 +122,11 @@ editing Zig.
   document and diagnostic models.
 - Implement the daemon interface described by the generated OpenAPI document,
   with authentication, authorisation, version negotiation and backpressure.
-- Add model-provider adapters behind the policy and transparency boundary. They
-  depend on the typed executors in Priority 1: a provider with nothing to
-  execute under a decision proves nothing about the boundary.
+- Loop a model's tool calls through the executors. The provider connectors and
+  the executors both exist; nothing yet runs the cycle of asking, executing
+  under a decision, and asking again.
+- Read a model's answer as it arrives. Every connector waits for the whole
+  reply, which is fine for a question and wrong for a long one.
 - Add macOS pseudoterminal and Windows ConPTY implementations, and the terminal
   settings each one needs, with the same behavioural test suite used on Linux.
 - Define remote replay, reconnect and conflict semantics before allowing more
