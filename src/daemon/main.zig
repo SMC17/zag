@@ -49,7 +49,7 @@ pub const help_text =
     \\Commands
     \\  help                Show this text.
     \\  status              Open the workspace and say what is in it.
-    \\  verify              Check the event log from end to end.
+    \\  verify              Check the event log and command-output objects.
     \\  plan <workflow>     Say what each step of a workflow would need.
     \\  history <query>     Search what happened, using the history filters.
     \\  serve               Hold the workspace open and report each check.
@@ -75,12 +75,17 @@ fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--root") and i + 1 < args.len) {
+        if (std.mem.eql(u8, arg, "--root")) {
+            if (i + 1 >= args.len) return error.MissingOptionValue;
             i += 1;
             options.root = args[i];
-        } else if (std.mem.eql(u8, arg, "--checks") and i + 1 < args.len) {
+        } else if (std.mem.eql(u8, arg, "--checks")) {
+            if (i + 1 >= args.len) return error.MissingOptionValue;
             i += 1;
-            options.checks = std.fmt.parseInt(usize, args[i], 10) catch 1;
+            options.checks = std.fmt.parseInt(usize, args[i], 10) catch return error.InvalidCheckCount;
+            if (options.checks == 0) return error.InvalidCheckCount;
+        } else if (std.mem.startsWith(u8, arg, "--")) {
+            return error.UnknownOption;
         } else {
             try rest.append(arena, arg);
         }
@@ -100,21 +105,31 @@ pub fn main(init: std.process.Init) !u8 {
     var out_buffer: [8192]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(io, &out_buffer);
     const w = &stdout.interface;
-    defer w.flush() catch {};
 
     const args = try init.minimal.args.toSlice(arena);
     const argv = if (args.len > 1) args[1..] else args[0..0];
     if (argv.len == 0) {
         try w.writeAll(help_text);
+        try w.flush();
         return 0;
     }
     const command = Command.parse(argv[0]) orelse {
         try w.print("There is no zagd command called \"{s}\". Run zagd help to see the commands.\n", .{argv[0]});
+        try w.flush();
         return 2;
     };
-    const options = try parseOptions(arena, argv[1..]);
+    const options = parseOptions(arena, argv[1..]) catch |err| {
+        switch (err) {
+            error.MissingOptionValue => try w.writeAll("An option is missing its value. Run \"zagd help\" to see the options.\n"),
+            error.InvalidCheckCount => try w.writeAll("--checks needs a whole number greater than zero.\n"),
+            error.UnknownOption => try w.writeAll("That option is not one zagd knows. Run \"zagd help\" to see the options.\n"),
+            else => return err,
+        }
+        try w.flush();
+        return 2;
+    };
 
-    return switch (command) {
+    const status_code = switch (command) {
         .help => blk: {
             try w.writeAll(help_text);
             break :blk 0;
@@ -125,6 +140,8 @@ pub fn main(init: std.process.Init) !u8 {
         .history => try history(arena, io, w, options),
         .serve => try serve(arena, io, w, options),
     };
+    try w.flush();
+    return status_code;
 }
 
 fn openWorkspace(arena: std.mem.Allocator, io: std.Io, options: Options) !zag.workspace.service.Opened {
@@ -158,18 +175,45 @@ fn status(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Opti
             try w.writeAll("\n");
         }
     }
-    return if (opened.report.isHealthy()) 0 else 1;
+    const audit = try opened.service.auditContent(io);
+    try writeContentStatus(w, audit);
+    return if (opened.report.isHealthy() and audit.isHealthy()) 0 else 1;
+}
+
+fn writeContentStatus(w: *std.Io.Writer, audit: zag.events.content_store.AuditReport) !void {
+    if (audit.isHealthy()) {
+        try w.print("  Content store: {d} referenced object(s) verified; no extra entries found.\n", .{audit.references});
+        return;
+    }
+    try w.print("  Content store: {d} issue(s): {d} missing, {d} changed, {d} size mismatch(es), {d} unreferenced and {d} unexpected.\n", .{
+        audit.issueCount(),
+        audit.missing.len,
+        audit.changed.len,
+        audit.size_mismatches.len,
+        audit.unreferenced.len,
+        audit.unexpected.len,
+    });
 }
 
 fn verify(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
     const opened = try openWorkspace(arena, io, options);
-    if (opened.report.chainBreak) |b| {
-        try w.print("The log is broken at event {d}.\n", .{b.sequence});
+    if (!opened.report.logIsHealthy()) {
+        try opened.report.writeSummary(w);
         try w.writeAll("Keep the file as it is. A broken log is evidence, not a fault to repair.\n");
+        return 1;
+    }
+    const audit = try opened.service.auditContent(io);
+    if (!audit.isHealthy()) {
+        try w.writeAll("The event log verified, but the content store did not.\n");
+        try writeContentStatus(w, audit);
+        try w.writeAll("Run \"zag objects --root <directory>\" for the affected hashes and paths. Nothing was changed.\n");
         return 1;
     }
     try w.print("The log verified end to end: {d} events, each one hashed to the one before it.\n", .{
         opened.report.eventCount,
+    });
+    try w.print("The content store verified: {d} referenced object(s), with matching hashes and byte counts and no extra entries.\n", .{
+        audit.references,
     });
     return 0;
 }
@@ -187,6 +231,10 @@ fn plan(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Option
 
 fn history(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
     const opened = try openWorkspace(arena, io, options);
+    const incomplete = !opened.report.logIsHealthy();
+    if (incomplete) {
+        try w.writeAll("The log is incomplete or damaged, so these results cover only its verified prefix.\n\n");
+    }
     const query_text = try std.mem.join(arena, " ", options.rest);
     const parsed = try zag.workspace.history.parse(arena, query_text);
     for (parsed.problems) |problem| {
@@ -197,7 +245,7 @@ fn history(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Opt
     const index = try opened.service.blocks();
     const results = try zag.workspace.history.run(arena, index, parsed.query, .{ .now = wallClock(io), .limit = 20 });
     try results.writeList(w);
-    return 0;
+    return if (incomplete) 1 else 0;
 }
 
 /// Hold the workspace open and re-check it. Each check re-reads the log from
@@ -211,7 +259,9 @@ fn serve(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Optio
         defer check_arena.deinit();
         const opened = try openWorkspace(check_arena.allocator(), io, options);
         try opened.report.writeSummary(w);
-        if (!opened.report.isHealthy()) worst = 1;
+        const audit = try opened.service.auditContent(io);
+        try writeContentStatus(w, audit);
+        if (!opened.report.isHealthy() or !audit.isHealthy()) worst = 1;
         try w.flush();
     }
     return worst;
@@ -262,4 +312,55 @@ test "options are read from the argument list" {
     try testing.expectEqual(@as(usize, 3), options.checks);
     try testing.expectEqual(@as(usize, 1), options.rest.len);
     try testing.expectEqualStrings("status:failed", options.rest[0]);
+    try testing.expectError(error.MissingOptionValue, parseOptions(arena, &.{"--root"}));
+    try testing.expectError(error.InvalidCheckCount, parseOptions(arena, &.{ "--checks", "zero" }));
+    try testing.expectError(error.InvalidCheckCount, parseOptions(arena, &.{ "--checks", "0" }));
+    try testing.expectError(error.UnknownOption, parseOptions(arena, &.{"--unknown"}));
+}
+
+test "verify includes unreferenced command-output objects" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var store = zag.events.content_store.Store.init(arena, root);
+    _ = try store.put("left by a crash");
+    try store.flush(io);
+
+    var buffer: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    const status_code = try verify(arena, io, &writer, .{ .root = root });
+    try testing.expectEqual(@as(u8, 1), status_code);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "1 unreferenced") != null);
+}
+
+test "history labels results from a damaged log as incomplete" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const workspace = try std.fmt.allocPrint(arena, "{s}/.workspace", .{root});
+    try std.Io.Dir.cwd().createDirPath(io, workspace);
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = try std.fmt.allocPrint(arena, "{s}/events.jsonl", .{workspace}),
+        .data = "not an event\n",
+    });
+
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    const status_code = try history(arena, io, &writer, .{ .root = root, .rest = &.{"status:failed"} });
+    try testing.expectEqual(@as(u8, 1), status_code);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "verified prefix") != null);
 }
