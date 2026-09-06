@@ -485,7 +485,10 @@ fn checkSentences(
                 previous_was_negative = false;
             }
         }
-        if (negatives >= 2) {
+        // A table row is data, not a sentence to rewrite. Its cells often list
+        // what is absent, and the rules for prose already step around tables
+        // for sentence length and noun clusters.
+        if (negatives >= 2 and !is_table) {
             try add(arena, findings, position, .double_negative, .minor, sentence.text, "This sentence uses two or more negatives. State what is true instead of what is not.", null);
         }
 
@@ -1010,6 +1013,35 @@ test "reports the permission prompt example from the design" {
         .audience = audience_mod.operator_under_pressure,
     });
     try std.testing.expect(!good.has(.prompt_without_subject));
+}
+
+test "a table row is data, not prose to rewrite" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The same words in a table cell and in a sentence. Only the sentence is a
+    // finding: a cell that lists what is absent is a record, not an argument.
+    const table =
+        \\| Platform | Evidence |
+        \\| --- | --- |
+        \\| macOS | No native test run; no pseudoterminal, and no terminal settings |
+    ;
+    const prose = "There is no native test run, no pseudoterminal, and no terminal settings.";
+
+    const table_report = try check(arena, table, .{ .kind = .body, .audience = audience_mod.developer });
+    for (table_report.findings) |finding| {
+        try std.testing.expect(finding.rule != .double_negative);
+    }
+
+    // The same words as a sentence are still reported, so the exemption is
+    // about the shape of a table and not about these particular words.
+    const prose_report = try check(arena, prose, .{ .kind = .body, .audience = audience_mod.developer });
+    var found = false;
+    for (prose_report.findings) |finding| {
+        if (finding.rule == .double_negative) found = true;
+    }
+    try std.testing.expect(found);
 }
 
 test "reports an error message with no next step and a raw code" {
