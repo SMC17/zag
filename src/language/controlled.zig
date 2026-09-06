@@ -180,7 +180,7 @@ pub fn check(arena: std.mem.Allocator, source: []const u8, options: Options) !Re
     const limit = options.text_type.sentenceLimit();
 
     for (analysis.sentences, 0..) |sentence, index| {
-        const position = text.positionOf(source, sentence.span.start);
+        const position = analysis.positionOf(sentence.span.start);
         const words = analysis.wordsOf(index);
 
         if (sentence.words > limit) {
@@ -238,7 +238,7 @@ pub fn check(arena: std.mem.Allocator, source: []const u8, options: Options) !Re
         for (words) |word| {
             const raw = text.trimWord(word.text);
             if (raw.len == 0) continue;
-            const at = text.positionOf(source, word.span.start);
+            const at = analysis.positionOf(word.span.start);
 
             if (std.mem.indexOfScalar(u8, raw, '\'') != null and raw.len > 2) {
                 try findings.append(arena, .{
@@ -322,7 +322,7 @@ pub fn check(arena: std.mem.Allocator, source: []const u8, options: Options) !Re
             if (s.span.start >= paragraph.start and s.span.start < paragraph.end) count += 1;
         }
         if (count > options.max_paragraph_sentences) {
-            const position = text.positionOf(source, paragraph.start);
+            const position = analysis.positionOf(paragraph.start);
             try findings.append(arena, .{
                 .rule = .paragraph_too_long,
                 .line = position.line,

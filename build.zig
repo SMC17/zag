@@ -49,6 +49,21 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(daemon);
 
+    // ---- Benchmarks --------------------------------------------------------
+    // Kept out of the test step: a measurement that runs on every build is a
+    // measurement nobody reads, and it makes the tests slow enough to skip.
+    const bench = b.addExecutable(.{
+        .name = "zag-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zag", .module = zag }},
+        }),
+    });
+    const run_bench = b.addRunArtifact(bench);
+    b.step("bench", "Measure the throughput of the parts that sit in a hot path").dependOn(&run_bench.step);
+
     const run_cli = b.addRunArtifact(cli);
     run_cli.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cli.addArgs(args);

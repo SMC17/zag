@@ -20,6 +20,8 @@ something, it is not, and `zag agents AGENTS.md` will say so.
 - Put a comment at the top of each file that says what the file is for and why
   it works the way it does. Do not describe what the code already says.
 - Cover new behaviour with a test that would fail without it.
+- Watch the shape of a loop, not only its result. A scan inside a loop over the
+  same list is quadratic, and `zig build bench` is where that shows up.
 - Keep a function's errors typed. Do not return a generic error where a named
   one tells the caller what to do.
 - Pass memory in. A module takes an allocator; it does not choose one.
@@ -46,6 +48,8 @@ something, it is not, and `zag agents AGENTS.md` will say so.
 - `src/workspace` folds that log into blocks and sessions, and holds workflows,
   structured history and the headless workspace service.
 - `src/editor` holds the command line as an editing document.
+- `bench/` holds the throughput measurements. Run `zig build bench
+  -Doptimize=ReleaseFast` before and after a change to a hot path.
 - `src/terminal` holds the escape-sequence parser, the screen and the
   pseudoterminal.
 - `src/ai` holds capabilities, the policy engine, approvals and governance.
