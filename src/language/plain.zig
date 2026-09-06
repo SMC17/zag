@@ -803,10 +803,10 @@ fn suggestedVerb(word: []const u8) ?[]const u8 {
 
 fn isFunctionWord(word: []const u8) bool {
     const list = [_][]const u8{
-        "the", "a", "an", "and", "or", "but", "if", "then", "than", "with", "without",
-        "from", "into", "onto", "over", "under", "about", "after", "before", "for",
-        "that", "this", "these", "those", "when", "while", "each", "every", "any",
-        "you", "your", "they", "their", "its", "his", "her", "our", "will", "does",
+        "the",   "a",     "an",   "and",   "or",    "but",   "if",    "then",   "than", "with", "without",
+        "from",  "into",  "onto", "over",  "under", "about", "after", "before", "for",  "that", "this",
+        "these", "those", "when", "while", "each",  "every", "any",   "you",    "your", "they", "their",
+        "its",   "his",   "her",  "our",   "will",  "does",
     };
     for (list) |w| {
         if (std.ascii.eqlIgnoreCase(w, word)) return true;

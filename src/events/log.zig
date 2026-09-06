@@ -24,6 +24,9 @@ pub const Timestamp = timeutil.Timestamp;
 
 /// Domain separator for the chain. Changing it starts a different log.
 pub const genesis_label = "zag.event-log.v1";
+/// A single active log is bounded so opening it never requires unbounded
+/// memory. Rotation and migration must be explicit before this limit changes.
+pub const max_file_bytes: u64 = 64 * 1024 * 1024;
 
 pub const Break = struct {
     /// Index of the first entry that does not match its chain.
@@ -41,6 +44,16 @@ pub const AppendOptions = struct {
     actor: Actor,
     causedBy: ?event_mod.EventId = null,
     correlation: ?event_mod.EventId = null,
+};
+
+/// A complete line that could not be decoded as an event. This is different
+/// from a torn final line: the newline proves that the writer considered the
+/// entry complete, so silently treating it as a crash remnant would hide
+/// corruption.
+pub const DecodeIssue = struct {
+    line: usize,
+    byte_offset: usize,
+    byte_count: usize,
 };
 
 pub const Log = struct {
@@ -65,6 +78,21 @@ pub const Log = struct {
     pub fn last(self: Log) ?Envelope {
         if (self.entries.items.len == 0) return null;
         return self.entries.items[self.entries.items.len - 1];
+    }
+
+    /// Restrict this in-memory view to a verified prefix. This never changes
+    /// the source file; callers use it so projections cannot consume entries
+    /// at or after a reported chain break.
+    pub fn retainPrefix(self: *Log, prefix_len: usize) void {
+        std.debug.assert(prefix_len <= self.entries.items.len);
+        self.entries.shrinkRetainingCapacity(prefix_len);
+        if (self.last()) |entry| {
+            self.head = entry.chainHash;
+            self.next_sequence = entry.sequence + 1;
+        } else {
+            self.head = Hash.of(genesis_label);
+            self.next_sequence = 1;
+        }
     }
 
     /// Append one event. The returned envelope is the record; the caller does
@@ -142,9 +170,15 @@ pub const Log = struct {
         log: Log,
         /// Entries read successfully.
         recovered: usize,
+        /// Exclusive byte offset after each decoded entry, in source order.
+        /// Recovery uses these original boundaries instead of re-encoding a
+        /// record and pretending the replacement bytes are the evidence.
+        entry_ends: []const usize,
         /// Bytes at the end of the file that were not a complete entry. A
         /// non-zero value means a process died while writing.
         torn_bytes: usize,
+        /// The first complete line that was not a valid event.
+        malformed: ?DecodeIssue = null,
     };
 
     /// Read a log back. A torn final line is dropped and reported, never
@@ -152,30 +186,52 @@ pub const Log = struct {
     pub fn loadJsonLines(arena: std.mem.Allocator, source: []const u8, id_seed: u64) !LoadResult {
         var log = Log.init(arena, id_seed);
         var recovered: usize = 0;
+        var entry_ends: std.ArrayList(usize) = .empty;
         var torn: usize = 0;
+        var malformed: ?DecodeIssue = null;
 
         var offset: usize = 0;
+        var line_number: usize = 1;
         while (offset < source.len) {
+            const line_start = offset;
             const newline = std.mem.indexOfScalarPos(u8, source, offset, '\n') orelse {
                 torn = source.len - offset;
                 break;
             };
             const line = std.mem.trim(u8, source[offset..newline], " \t\r");
             offset = newline + 1;
-            if (line.len == 0) continue;
+            if (line.len == 0) {
+                line_number += 1;
+                continue;
+            }
 
             const parsed = std.json.parseFromSliceLeaky(Envelope, arena, line, .{
                 .allocate = .alloc_always,
             }) catch {
-                torn = source.len - (offset - (newline + 1 - offset));
+                malformed = .{
+                    .line = line_number,
+                    .byte_offset = line_start,
+                    .byte_count = newline - line_start,
+                };
                 break;
             };
             try log.entries.append(arena, parsed);
             log.head = parsed.chainHash;
-            log.next_sequence = parsed.sequence + 1;
+            // Sequence is untrusted until `verify` runs. Saturation keeps a
+            // hostile maximum value from trapping before it can be reported
+            // as out of order.
+            log.next_sequence = parsed.sequence +| 1;
             recovered += 1;
+            try entry_ends.append(arena, offset);
+            line_number += 1;
         }
-        return .{ .log = log, .recovered = recovered, .torn_bytes = torn };
+        return .{
+            .log = log,
+            .recovered = recovered,
+            .entry_ends = entry_ends.items,
+            .torn_bytes = torn,
+            .malformed = malformed,
+        };
     }
 
     pub fn since(self: Log, sequence: u64) []const Envelope {
@@ -259,6 +315,8 @@ test "the log survives a torn write" {
 
     const round = try Log.loadJsonLines(arena, complete, 44);
     try testing.expectEqual(@as(usize, 2), round.recovered);
+    try testing.expectEqual(@as(usize, 2), round.entry_ends.len);
+    try testing.expectEqual(complete.len, round.entry_ends[1]);
     try testing.expectEqual(@as(usize, 0), round.torn_bytes);
     try testing.expect((try round.log.verify()) == null);
 
@@ -266,8 +324,99 @@ test "the log survives a torn write" {
     const torn_source = complete[0 .. complete.len - 20];
     const torn = try Log.loadJsonLines(arena, torn_source, 44);
     try testing.expectEqual(@as(usize, 1), torn.recovered);
+    try testing.expectEqual(@as(usize, 1), torn.entry_ends.len);
     try testing.expect(torn.torn_bytes > 0);
     try testing.expect((try torn.log.verify()) == null);
+}
+
+test "every possible truncation recovers only complete event boundaries" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var gen: idmod.Generator = .init(49, 1_788_000_000_000);
+    var log = Log.init(arena, 50);
+    const actor = testActor(&gen);
+    const session = gen.next(idmod.SessionId);
+    const at = try Timestamp.parseIso("2026-09-04T20:00:00Z");
+    _ = try log.append(.{ .session_opened = .{ .session = session, .workingDirectory = "/tmp" } }, .{ .at = at, .actor = actor });
+    _ = try log.append(.{ .user_message = .{ .session = session, .text = "all cut points" } }, .{ .at = at, .actor = actor });
+
+    var encoded: std.Io.Writer.Allocating = .init(arena);
+    try log.writeJsonLines(&encoded.writer);
+    const complete = encoded.written();
+    for (0..complete.len + 1) |cut| {
+        const loaded = try Log.loadJsonLines(arena, complete[0..cut], 50);
+        try testing.expect((try loaded.log.verify()) == null);
+        try testing.expectEqual(loaded.recovered, loaded.entry_ends.len);
+        if (cut == 0 or complete[cut - 1] == '\n') {
+            try testing.expectEqual(@as(usize, 0), loaded.torn_bytes);
+        } else {
+            try testing.expect(loaded.torn_bytes > 0);
+        }
+        for (loaded.entry_ends) |end| {
+            try testing.expect(end <= cut);
+            try testing.expect(complete[end - 1] == '\n');
+        }
+    }
+}
+
+test "a malformed complete line is corruption, not a torn write" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var gen: idmod.Generator = .init(47, 1_788_000_000_000);
+    var log = Log.init(arena, 48);
+    const actor = testActor(&gen);
+    const session = gen.next(idmod.SessionId);
+    const at = try Timestamp.parseIso("2026-09-04T20:00:00Z");
+
+    _ = try log.append(.{ .session_opened = .{ .session = session, .workingDirectory = "/tmp" } }, .{ .at = at, .actor = actor });
+    _ = try log.append(.{ .user_message = .{ .session = session, .text = "hello" } }, .{ .at = at, .actor = actor });
+
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    try log.writeJsonLines(&aw.writer);
+    const complete = aw.written();
+    const first_end = std.mem.indexOfScalar(u8, complete, '\n').? + 1;
+    const damaged = try std.fmt.allocPrint(arena, "{s}not an event\n{s}", .{
+        complete[0..first_end],
+        complete[first_end..],
+    });
+
+    const loaded = try Log.loadJsonLines(arena, damaged, 48);
+    try testing.expectEqual(@as(usize, 1), loaded.recovered);
+    try testing.expectEqual(@as(usize, 0), loaded.torn_bytes);
+    try testing.expectEqual(@as(usize, 2), loaded.malformed.?.line);
+    try testing.expectEqual(first_end, loaded.malformed.?.byte_offset);
+}
+
+test "an untrusted maximum sequence is rejected without overflowing" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var gen: idmod.Generator = .init(51, 1_788_000_000_000);
+    var log = Log.init(arena, 52);
+    const actor = testActor(&gen);
+    const session = gen.next(idmod.SessionId);
+    const at = try Timestamp.parseIso("2026-09-04T20:00:00Z");
+    _ = try log.append(.{ .session_opened = .{ .session = session, .workingDirectory = "/tmp" } }, .{ .at = at, .actor = actor });
+
+    var encoded: std.Io.Writer.Allocating = .init(arena);
+    try log.writeJsonLines(&encoded.writer);
+    const hostile = try std.mem.replaceOwned(
+        u8,
+        arena,
+        encoded.written(),
+        "\"sequence\":1",
+        "\"sequence\":18446744073709551615",
+    );
+    try testing.expect(!std.mem.eql(u8, hostile, encoded.written()));
+
+    const loaded = try Log.loadJsonLines(arena, hostile, 52);
+    const broken = (try loaded.log.verify()).?;
+    try testing.expectEqual(Break.Reason.sequence_out_of_order, broken.reason);
 }
 
 test "replay rebuilds a projection" {

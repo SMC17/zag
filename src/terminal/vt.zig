@@ -88,12 +88,15 @@ const State = enum {
     csi_intermediate,
     csi_ignore,
     osc_string,
+    osc_escape,
     dcs_entry,
     dcs_param,
     dcs_intermediate,
     dcs_passthrough,
+    dcs_escape,
     dcs_ignore,
     sos_pm_apc_string,
+    sos_pm_apc_escape,
 };
 
 pub const Parser = struct {
@@ -139,7 +142,14 @@ pub const Parser = struct {
         // C0 controls act immediately in every state except the string states,
         // which is what makes a terminal recover from a truncated sequence.
         switch (self.state) {
-            .osc_string, .sos_pm_apc_string, .dcs_passthrough, .dcs_ignore => {},
+            .osc_string,
+            .osc_escape,
+            .sos_pm_apc_string,
+            .sos_pm_apc_escape,
+            .dcs_passthrough,
+            .dcs_escape,
+            .dcs_ignore,
+            => {},
             else => {
                 if (byte == 0x1b) {
                     self.clear();
@@ -170,10 +180,13 @@ pub const Parser = struct {
             .csi_intermediate => self.csiIntermediate(byte),
             .csi_ignore => self.csiIgnore(byte),
             .osc_string => self.oscString(byte),
+            .osc_escape => self.oscEscape(byte),
             .dcs_entry, .dcs_param, .dcs_intermediate => self.dcsPrelude(byte),
             .dcs_passthrough => self.dcsPassthrough(byte),
+            .dcs_escape => self.dcsEscape(byte),
             .dcs_ignore => self.stringIgnore(byte),
             .sos_pm_apc_string => self.stringIgnore(byte),
+            .sos_pm_apc_escape => self.ignoredStringEscape(byte),
         };
     }
 
@@ -406,10 +419,8 @@ pub const Parser = struct {
             return .{ .osc = .{ .raw = self.string[0..self.string_len] } };
         }
         if (byte == 0x1b) {
-            // Expect ST (`ESC \`); anything else restarts a sequence.
-            self.state = .ground;
-            const action: Action = .{ .osc = .{ .raw = self.string[0..self.string_len] } };
-            return action;
+            self.state = .osc_escape;
+            return null;
         }
         if (byte == 0x9c) {
             self.state = .ground;
@@ -417,6 +428,17 @@ pub const Parser = struct {
         }
         self.pushString(byte);
         return null;
+    }
+
+    fn oscEscape(self: *Parser, byte: u8) ?Action {
+        if (byte == '\\') {
+            self.state = .ground;
+            return .{ .osc = .{ .raw = self.string[0..self.string_len] } };
+        }
+        // An escape that is not a string terminator aborts the OSC string and
+        // starts a new escape sequence. No stray byte is printed.
+        self.state = .escape;
+        return self.escape(byte);
     }
 
     fn dcsPrelude(self: *Parser, byte: u8) ?Action {
@@ -459,7 +481,11 @@ pub const Parser = struct {
     }
 
     fn dcsPassthrough(self: *Parser, byte: u8) ?Action {
-        if (byte == 0x1b or byte == 0x9c) {
+        if (byte == 0x1b) {
+            self.state = .dcs_escape;
+            return null;
+        }
+        if (byte == 0x9c) {
             self.state = .ground;
             return .{ .dcs = .{
                 .params = self.params[0..self.param_count],
@@ -472,9 +498,36 @@ pub const Parser = struct {
         return null;
     }
 
+    fn dcsEscape(self: *Parser, byte: u8) ?Action {
+        if (byte == '\\') {
+            self.state = .ground;
+            return .{ .dcs = .{
+                .params = self.params[0..self.param_count],
+                .intermediates = self.intermediates[0..self.intermediate_count],
+                .final = self.dcs_final,
+                .data = self.string[0..self.string_len],
+            } };
+        }
+        self.state = .escape;
+        return self.escape(byte);
+    }
+
     fn stringIgnore(self: *Parser, byte: u8) ?Action {
-        if (byte == 0x1b or byte == 0x07 or byte == 0x9c) self.state = .ground;
+        if (byte == 0x1b) {
+            self.state = .sos_pm_apc_escape;
+        } else if (byte == 0x07 or byte == 0x9c) {
+            self.state = .ground;
+        }
         return null;
+    }
+
+    fn ignoredStringEscape(self: *Parser, byte: u8) ?Action {
+        if (byte == '\\') {
+            self.state = .ground;
+            return null;
+        }
+        self.state = .escape;
+        return self.escape(byte);
     }
 
     fn pushParam(self: *Parser, value: u16, is_sub: bool) void {
@@ -600,6 +653,7 @@ test "parses osc strings ended by bel or st" {
     try testing.expectEqualStrings("zag workbench", bel.items[0].osc.payload());
 
     const st = try collect(arena, "\x1b]133;A\x1b\\");
+    try testing.expectEqual(@as(usize, 1), st.items.len);
     try testing.expectEqual(@as(u32, 133), st.items[0].osc.command().?);
     try testing.expectEqualStrings("A", st.items[0].osc.payload());
 }
@@ -631,6 +685,7 @@ test "parses escape and device control strings" {
     try testing.expectEqual(@as(u8, '('), esc.items[0].esc.intermediates[0]);
 
     const dcs = try collect(arena, "\x1bP1$qm\x1b\\");
+    try testing.expectEqual(@as(usize, 1), dcs.items.len);
     try testing.expectEqual(@as(u8, 'q'), dcs.items[0].dcs.final);
     try testing.expectEqualStrings("m", dcs.items[0].dcs.data);
 }

@@ -60,10 +60,11 @@ pub const Parser = struct {
             'B' => .command_start,
             'C' => blk: {
                 var command: ?[]const u8 = null;
-                while (fields.next()) |field| {
-                    if (std.mem.startsWith(u8, field, "cmdline=")) {
-                        command = try self.decode(field["cmdline=".len ..]);
-                    }
+                // The hooks put cmdline last. Taking the remainder preserves a
+                // real shell semicolon instead of mistaking it for another
+                // metadata field. Percent encoding still handles controls.
+                if (std.mem.indexOf(u8, rest, ";cmdline=")) |start| {
+                    command = try self.decode(rest[start + ";cmdline=".len ..]);
                 }
                 break :blk .{ .output_start = .{ .command = command } };
             },
@@ -77,8 +78,8 @@ pub const Parser = struct {
             'E' => blk: {
                 // OSC 133;E reports the command line before it runs.
                 var command: ?[]const u8 = null;
-                while (fields.next()) |field| {
-                    if (std.mem.startsWith(u8, field, "cmdline=")) command = try self.decode(field["cmdline=".len ..]);
+                if (std.mem.indexOf(u8, rest, ";cmdline=")) |start| {
+                    command = try self.decode(rest[start + ";cmdline=".len ..]);
                 }
                 break :blk .{ .output_start = .{ .command = command } };
             },
@@ -129,6 +130,10 @@ pub const State = enum {
 
 pub const Tracker = struct {
     parser: Parser,
+    /// When set, command boundaries are accepted only when their token field
+    /// matches. This keeps child output from impersonating a service-owned
+    /// shell wrapper.
+    expected_token: ?[]const u8 = null,
     state: State = .unknown,
     working_directory: ?[]const u8 = null,
     current_command: ?[]const u8 = null,
@@ -141,8 +146,19 @@ pub const Tracker = struct {
         return .{ .parser = Parser.init(arena) };
     }
 
+    pub fn initAuthenticated(arena: std.mem.Allocator, token: []const u8) Tracker {
+        return .{ .parser = Parser.init(arena), .expected_token = token };
+    }
+
     pub fn consume(self: *Tracker, raw: []const u8) !?Boundary {
         const boundary = (try self.parser.parse(raw)) orelse return null;
+        if (self.expected_token) |token| {
+            const needs_token = switch (boundary) {
+                .output_start, .command_finished => true,
+                else => false,
+            };
+            if (needs_token and !hasField(raw, "token", token)) return null;
+        }
         switch (boundary) {
             .prompt_start => {
                 self.integrated = true;
@@ -169,6 +185,16 @@ pub const Tracker = struct {
         return boundary;
     }
 };
+
+fn hasField(raw: []const u8, name: []const u8, expected: []const u8) bool {
+    var fields = std.mem.splitScalar(u8, raw, ';');
+    while (fields.next()) |field| {
+        const equal = std.mem.indexOfScalar(u8, field, '=') orelse continue;
+        if (!std.mem.eql(u8, field[0..equal], name)) continue;
+        return std.mem.eql(u8, field[equal + 1 ..], expected);
+    }
+    return false;
+}
 
 /// Hook scripts. They are deliberately small: they emit markers and nothing
 /// else, so that a person can read the whole thing before letting it run in
@@ -243,7 +269,7 @@ pub const hooks = struct {
 /// session switches to a plain terminal surface and stops trying to find block
 /// boundaries, because there are none to find.
 pub const full_screen_programs = [_][]const u8{
-    "vim", "nvim", "vi",  "emacs", "nano",  "htop", "top",    "less",
+    "vim", "nvim", "vi",  "emacs",   "nano",  "htop", "top",   "less",
     "man", "tmux", "ssh", "lazygit", "gitui", "btop", "watch", "screen",
 };
 
@@ -281,6 +307,9 @@ test "final term marks drive the block boundaries" {
     try testing.expectEqual(@as(u8, 1), finished.command_finished.exit_status.?);
     try testing.expectEqual(State.finished, tracker.state);
     try testing.expectEqual(@as(u8, 1), tracker.last_exit_status.?);
+
+    const compound = (try tracker.consume("133;C;cmdline=printf one; printf two")).?;
+    try testing.expectEqualStrings("printf one; printf two", compound.output_start.command.?);
 }
 
 test "the working directory arrives as a file url" {
@@ -294,6 +323,20 @@ test "the working directory arrives as a file url" {
 
     _ = try tracker.consume("7;file:///tmp");
     try testing.expectEqualStrings("/tmp", tracker.working_directory.?);
+}
+
+test "an authenticated tracker rejects forged command marks" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var tracker = Tracker.initAuthenticated(arena_state.allocator(), "secret-token");
+    try testing.expect((try tracker.consume("133;C;cmdline=forged")) == null);
+    try testing.expect((try tracker.consume("133;D;0;token=wrong")) == null);
+
+    const start = (try tracker.consume("133;C;token=secret-token;cmdline=printf one%3B printf two")).?;
+    try testing.expectEqualStrings("printf one; printf two", start.output_start.command.?);
+    const finish = (try tracker.consume("133;D;7;token=secret-token")).?;
+    try testing.expectEqual(@as(u8, 7), finish.command_finished.exit_status.?);
 }
 
 test "unrelated osc strings are left alone" {

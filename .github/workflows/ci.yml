@@ -9,22 +9,38 @@ on:
     branches: ["**"]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out the repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Zig 0.16.0
         run: |
-          python3 -m pip install --quiet 'ziglang==0.16.0'
-          echo "$(python3 -c 'import ziglang, os; print(os.path.dirname(ziglang.__file__))')" >> "$GITHUB_PATH"
+          curl --fail --location --silent --show-error \
+            --output zig.tar.xz \
+            https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+          echo '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  zig.tar.xz' | sha256sum --check --strict
+          tar --extract --file zig.tar.xz
+          echo "$PWD/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
 
       - name: Show the toolchain
         run: zig version
 
       - name: Run the tests and audit the repository
-        run: zig build check
+        run: zig build check --summary all
+
+      - name: Test the memory-safe release build
+        run: zig build test -Doptimize=ReleaseSafe --summary all
 
       - name: Check that the generated files are up to date
         run: |
@@ -53,3 +69,29 @@ jobs:
 
       - name: Show the lifecycle record
         run: ./zig-out/bin/zag lifecycle
+
+  cross-compile:
+    name: compile ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-macos
+          - x86_64-windows
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Zig 0.16.0
+        run: |
+          curl --fail --location --silent --show-error \
+            --output zig.tar.xz \
+            https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+          echo '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  zig.tar.xz' | sha256sum --check --strict
+          tar --extract --file zig.tar.xz
+          echo "$PWD/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
+
+      - name: Compile without claiming platform support
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe --summary all
