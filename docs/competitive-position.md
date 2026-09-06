@@ -82,18 +82,27 @@ can rewrite it.
 
 ## What zag has today
 
-Measured on this machine, in a release build, best of five runs
-(`zig build bench` prints the current figures):
+The throughput of the paths that sit in a hot loop is measured by
+`zig build bench -Doptimize=ReleaseFast`, which prints the figures for the
+machine it runs on. This document does not repeat those figures, because a
+number here would be a number from somebody else's computer. The same commit
+measured 75 MiB/s of terminal stream on one cloud machine and 56 MiB/s on
+another; the code did not change between them.
 
-| Path | Throughput |
-| --- | --- |
-| Terminal stream into the screen, escapes and marks included | 75 MiB/s |
-| Plain text into the screen | 48 MiB/s |
-| Events appended and hash-chained | 350,000 events/s |
-| Events verified end to end | 437,000 events/s |
-| Blocks folded from the log | 1,190,000 blocks/s |
-| History query over 20,000 blocks | 326 microseconds |
-| Prose through the plain-language rules | 12 MiB/s |
+What survives a change of machine is the ratio between two runs on one machine.
+These were measured in a single session, on one host, before and after the
+changes named:
+
+| Path | Change | Why |
+| --- | --- | --- |
+| Plain text into the screen | 5.5 times faster | Scrolling copied the whole screen and shifted the scrollback down one place for every line printed. Rows and scrollback are rings now. |
+| Blocks folded from the log | 11 times faster | Folding scanned every block for each parent link and each git change. Both are indexed now. |
+| Prose through the plain-language rules | 180 times faster at 128 KiB | Placing a finding walked the text from the start, so checking a document cost the square of its length. A line index makes it linear. |
+| Keystrokes into the editor buffer | No longer quadratic | Typing added a piece and copied the undo buffer for each keystroke. An append extends the last piece and grows the buffer in place. |
+
+Run the harness to see what your own machine does. It reports the build mode,
+the best of several runs, and the spread between them. A busy machine is then
+visible, instead of being reported as a slow program.
 
 Built, tested and audited by the build:
 

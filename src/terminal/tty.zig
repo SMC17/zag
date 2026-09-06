@@ -121,15 +121,6 @@ pub const Tty = struct {
         };
     }
 
-    /// True when there is input waiting, or when the wait ran out.
-    pub fn waitReadable(self: Tty, timeout_ms: i32) bool {
-        if (comptime !supported) return false;
-        var fds = [_]posix.pollfd{.{ .fd = self.input, .events = posix.POLL.IN, .revents = 0 }};
-        const ready = posix.poll(&fds, timeout_ms) catch return false;
-        if (ready == 0) return false;
-        return fds[0].revents & (posix.POLL.IN | posix.POLL.HUP) != 0;
-    }
-
     pub fn read(self: Tty, buffer: []u8) Error!usize {
         if (comptime !supported) return error.Unsupported;
         const rc = linux.read(self.input, buffer.ptr, buffer.len);
