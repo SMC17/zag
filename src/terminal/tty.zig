@@ -17,7 +17,10 @@ const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
 
-pub const supported = builtin.os.tag == .linux or builtin.os.tag.isDarwin();
+/// The controlling terminal is driven with Linux system calls, so this is the
+/// only platform where it works today. Everywhere else the calls below report
+/// that rather than pretending, and the program still compiles.
+pub const supported = builtin.os.tag == .linux;
 
 pub const Error = error{
     /// Standard input is not a terminal. Piped input is a legitimate thing to
@@ -46,11 +49,17 @@ pub const Tty = struct {
     original: ?posix.termios = null,
 
     pub fn init() Tty {
-        return .{ .input = 0, .output = 1 };
+        // Taken from the standard streams rather than written as 0 and 1: a
+        // handle is not an integer on every platform, and this has to compile
+        // everywhere even though it only runs on one.
+        return .{
+            .input = std.Io.File.stdin().handle,
+            .output = std.Io.File.stdout().handle,
+        };
     }
 
     pub fn isTerminal(self: Tty) bool {
-        if (!supported) return false;
+        if (comptime !supported) return false;
         _ = posix.tcgetattr(self.input) catch return false;
         return true;
     }
@@ -60,7 +69,7 @@ pub const Tty = struct {
     /// that, and doing it twice is what produces doubled characters and a
     /// control-C that kills the wrong process.
     pub fn enterRaw(self: *Tty) Error!void {
-        if (!supported) return error.Unsupported;
+        if (comptime !supported) return error.Unsupported;
         const original = posix.tcgetattr(self.input) catch return error.NotATerminal;
         self.original = original;
 
@@ -92,6 +101,7 @@ pub const Tty = struct {
     /// Put the terminal back. Safe to call more than once, and safe to call
     /// when raw mode was never entered.
     pub fn restore(self: *Tty) void {
+        if (comptime !supported) return;
         const original = self.original orelse return;
         posix.tcsetattr(self.input, .FLUSH, original) catch {};
         self.original = null;
@@ -101,7 +111,7 @@ pub const Tty = struct {
     /// the size each time round the loop needs no signal handler, and a signal
     /// handler that writes to a global is the usual source of resize bugs.
     pub fn size(self: Tty) Error!Size {
-        if (!supported) return error.Unsupported;
+        if (comptime !supported) return error.Unsupported;
         var ws: Winsize = undefined;
         const result = linux.ioctl(self.output, linux.T.IOCGWINSZ, @intFromPtr(&ws));
         if (linux.errno(result) != .SUCCESS) return error.NotATerminal;
@@ -113,6 +123,7 @@ pub const Tty = struct {
 
     /// True when there is input waiting, or when the wait ran out.
     pub fn waitReadable(self: Tty, timeout_ms: i32) bool {
+        if (comptime !supported) return false;
         var fds = [_]posix.pollfd{.{ .fd = self.input, .events = posix.POLL.IN, .revents = 0 }};
         const ready = posix.poll(&fds, timeout_ms) catch return false;
         if (ready == 0) return false;
@@ -120,6 +131,7 @@ pub const Tty = struct {
     }
 
     pub fn read(self: Tty, buffer: []u8) Error!usize {
+        if (comptime !supported) return error.Unsupported;
         const rc = linux.read(self.input, buffer.ptr, buffer.len);
         if (linux.errno(rc) != .SUCCESS) return error.SettingsRefused;
         return rc;
@@ -128,6 +140,7 @@ pub const Tty = struct {
     /// Write every byte, retrying a short write. Output to a terminal is
     /// allowed to stop early, and dropping the rest garbles the screen.
     pub fn write(self: Tty, bytes: []const u8) Error!void {
+        if (comptime !supported) return error.Unsupported;
         var written: usize = 0;
         while (written < bytes.len) {
             const rc = linux.write(self.output, bytes[written..].ptr, bytes.len - written);
@@ -161,6 +174,7 @@ pub const Ready = struct {
 };
 
 pub fn waitEither(tty_fd: posix.fd_t, pty_fd: posix.fd_t, timeout_ms: i32) Ready {
+    if (comptime !supported) return .{};
     var fds = [_]posix.pollfd{
         .{ .fd = tty_fd, .events = posix.POLL.IN, .revents = 0 },
         .{ .fd = pty_fd, .events = posix.POLL.IN, .revents = 0 },
