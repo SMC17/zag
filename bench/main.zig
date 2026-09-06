@@ -409,7 +409,12 @@ pub fn main(init: std.process.Init) !u8 {
         \\lands. A spread far above 1.0 means the machine was busy with other
         \\work, and the numbers from that run are worth little.
         \\
-        \\What they are not: a comparison with another terminal. That takes both
+        \\What they are not: portable. The same commit measured 75 MiB/s of
+        \\terminal stream on one cloud machine and 56 MiB/s on another, with no
+        \\change to the code. Compare a number here only with another number
+        \\from the same machine.
+        \\
+        \\Nor are they a comparison with another terminal. That takes both
         \\programs, one machine and one workload, and this harness runs only one
         \\of the two.
         \\
