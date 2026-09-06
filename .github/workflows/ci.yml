@@ -42,6 +42,9 @@ jobs:
       - name: Test the memory-safe release build
         run: zig build test -Doptimize=ReleaseSafe --summary all
 
+      - name: Build the operator binaries
+        run: zig build --summary all
+
       - name: Check that the generated files are up to date
         run: |
           zig build emit
