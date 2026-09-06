@@ -32,7 +32,7 @@ graph, an audit trail and an agent's context are all views of the same events.
 
 | Part | What it does |
 | --- | --- |
-| `src/events` | The typed event union, and an append-only log whose entries are chained by hash |
+| `src/events` | The typed event union, append-only hash chain and immutable content-addressed output store |
 | `src/workspace` | Blocks, sessions, workflows, structured history, and the workspace service |
 | `src/editor` | The command line as an editing document, with undo that groups by intent |
 | `src/terminal` | Escape-sequence parser, screen with scrollback, shell integration, real pseudoterminal, and the recording terminal |
@@ -75,13 +75,15 @@ zag lifecycle                  # the lifecycle record, and what has not started
 zag evidence                   # the conformance statement, from recorded evidence
 zag history "status:failed zig" # search recorded work, not a text file
 zag knowledge                  # the knowledge under .workspace/, and what is overdue
+zag objects --root .           # audit stored command output without changing it
+zag recover --root .           # inspect a damaged log and print a recovery plan
 ```
 
 `zagd` holds a workspace open for clients, remote people and background agents:
 
 ```
 zagd status                    # what is in the workspace
-zagd verify                    # check the event log from end to end
+zagd verify                    # check the event log and stored command output
 zagd plan                      # what each step of a workflow would need
 zagd history "branch:main"     # the same search, without the tool
 ```
@@ -128,8 +130,11 @@ request -> plan -> typed tool request -> policy decision
 
 - There is no free-form shell tool. Each request names one capability and one
   resource.
-- A path is normalised before it is matched, so a path cannot climb out of the
-  workspace it was given.
+- A path is normalised before policy matching, so textual `..` traversal is
+  rejected. Event logs, objects and recovery evidence also reject a symbolic
+  link in the final path component. This is not a filesystem sandbox:
+  beneath-only execution through a workspace directory handle is still on the
+  roadmap.
 - An operation that cannot be undone stops and asks, in words that name the
   operation and its consequence.
 - A repository instruction file shapes behaviour. It can never grant a
@@ -141,8 +146,13 @@ request -> plan -> typed tool request -> policy decision
 - `docs/standards-conformance.md` — which standards apply and how each is checked
 - `docs/plain-language.md` — how ISO 24495 is applied, and what a checker cannot decide
 - `docs/competitive-position.md` — what zag beats, what beats zag, and the order that changes
+- `docs/roadmap.md` — what is complete, what comes next and the evidence each milestone needs
+- `docs/threat-model.md` — trust boundaries, implemented controls and residual security work
+- `docs/platform-support.md` — compile evidence, runtime evidence and explicit platform exclusions
 - `docs/adr/` — why the architecture is the way it is
 - `AGENTS.md` — how to work in this repository
+- `CONTRIBUTING.md` — how to prepare and check a change
+- `SECURITY.md` — how to report a vulnerability without publishing exploit details
 - `llms.txt` — the machine-readable index
 
 ## Licence
