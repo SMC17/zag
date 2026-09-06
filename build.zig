@@ -88,10 +88,12 @@ pub fn build(b: *std.Build) void {
     // `zig build check` is the release gate: it runs the tests and then makes
     // the tool audit the repository's own documentation, standards registry and
     // metadata. A build that cannot state its own conformance evidence fails.
+    const fmt = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "--check", "build.zig", "src" });
     const self_check = b.addRunArtifact(cli);
     self_check.addArgs(&.{ "check", "--repo", "." });
-    self_check.step.dependOn(&run_lib_tests.step);
+    self_check.step.dependOn(test_step);
     const check_step = b.step("check", "Run tests, then audit the repository against its standards profile");
+    check_step.dependOn(&fmt.step);
     check_step.dependOn(&self_check.step);
 
     // ---- Generated interchange artefacts ---------------------------------

@@ -76,9 +76,9 @@ pub fn positionOf(text: []const u8, offset: usize) Position {
 /// Abbreviations that carry no explanation burden in this product's text,
 /// because every intended reader already uses them daily.
 pub const common_abbreviations = [_][]const u8{
-    "AI", "API", "CI", "CLI", "CPU", "CSV", "GPU", "HTML", "HTTP", "HTTPS",
-    "ID",  "IO",  "JSON", "OS", "PDF", "RAM", "SI", "SQL", "TLS", "UI",
-    "URL", "USB", "UTC", "UTF", "XML", "YAML", "ZIP",
+    "AI",  "API", "CI",   "CLI", "CPU", "CSV",  "GPU", "HTML", "HTTP", "HTTPS",
+    "ID",  "IO",  "JSON", "OS",  "PDF", "RAM",  "SI",  "SQL",  "TLS",  "UI",
+    "URL", "USB", "UTC",  "UTF", "XML", "YAML", "ZIP",
 };
 
 /// Words that a plain-language checker asks the author to replace, and the
@@ -138,14 +138,14 @@ pub const vague_quantifiers = [_][]const u8{
 /// Verbs that appear at the start of an instruction. Used to decide whether a
 /// label or a step actually tells the reader what to do.
 pub const imperative_verbs = [_][]const u8{
-    "add",     "allow",  "apply",  "cancel", "change",  "check",   "choose", "clear",
-    "close",   "copy",   "create", "delete", "deny",    "disable", "enable", "end",
-    "enter",   "export", "find",   "fix",    "give",    "import",  "install", "keep",
-    "move",    "open",   "pause",  "pick",   "read",    "rename",  "replace", "restart",
-    "restore", "resume", "review", "run",    "save",    "select",  "send",    "set",
-    "share",   "show",   "sign",   "skip",   "start",   "stop",    "try",     "turn",
-    "undo",    "update", "use",    "view",   "write",   "remove",  "reject",  "approve",
-    "grant",   "revoke", "retry",  "connect", "download", "upload", "publish", "print",
+    "add",     "allow",  "apply",  "cancel",  "change",   "check",   "choose",  "clear",
+    "close",   "copy",   "create", "delete",  "deny",     "disable", "enable",  "end",
+    "enter",   "export", "find",   "fix",     "give",     "import",  "install", "keep",
+    "move",    "open",   "pause",  "pick",    "read",     "rename",  "replace", "restart",
+    "restore", "resume", "review", "run",     "save",     "select",  "send",    "set",
+    "share",   "show",   "sign",   "skip",    "start",    "stop",    "try",     "turn",
+    "undo",    "update", "use",    "view",    "write",    "remove",  "reject",  "approve",
+    "grant",   "revoke", "retry",  "connect", "download", "upload",  "publish", "print",
 };
 
 /// Forms of "to be" used by the passive-voice heuristic.
@@ -156,18 +156,18 @@ pub const modal_verbs = [_][]const u8{ "will", "would", "can", "could", "may", "
 /// Idioms and figures of speech that an easy-to-read audience should not have
 /// to decode.
 pub const idioms = [_][]const u8{
-    "out of the box", "under the hood", "up and running", "hit the ground running",
-    "in a nutshell",  "rule of thumb",  "state of the art", "best of breed",
-    "moving parts",   "low hanging fruit", "on the fly", "at the end of the day",
+    "out of the box", "under the hood",    "up and running",   "hit the ground running",
+    "in a nutshell",  "rule of thumb",     "state of the art", "best of breed",
+    "moving parts",   "low hanging fruit", "on the fly",       "at the end of the day",
 };
 
 /// Abbreviations that name standards bodies and published standards. A
 /// developer or an auditor reads these daily; a general reader does not, so
 /// they are accepted only for the audiences that know them.
 pub const standards_abbreviations = [_][]const u8{
-    "ISO",  "IEC",  "EN",   "NIST", "ANSI", "NISO", "W3C",  "OASIS",
-    "WCAG", "DITA", "RDF",  "SKOS", "OWL",  "DCAT", "UCUM", "SI",
-    "PROV", "ASD",  "STE",  "FAIR", "LMF",  "MAF",  "ISO/IEC", "ANSI/NISO",
+    "ISO",  "IEC",  "EN",  "NIST", "ANSI", "NISO", "W3C",     "OASIS",
+    "WCAG", "DITA", "RDF", "SKOS", "OWL",  "DCAT", "UCUM",    "SI",
+    "PROV", "ASD",  "STE", "FAIR", "LMF",  "MAF",  "ISO/IEC", "ANSI/NISO",
 };
 
 pub fn isStandardsAbbreviation(word: []const u8) bool {
@@ -209,9 +209,10 @@ pub fn isModal(word: []const u8) bool {
 pub fn looksLikePastParticiple(word: []const u8) bool {
     if (word.len < 5) return false;
     const irregular = [_][]const u8{
-        "done", "made", "given", "taken", "written", "shown", "known", "found",
-        "seen", "sent", "kept", "held", "built", "run", "read", "set", "put",
-        "chosen", "drawn", "begun", "brought", "caught", "left", "lost", "met",
+        "done", "made",   "given", "taken", "written", "shown",  "known", "found",
+        "seen", "sent",   "kept",  "held",  "built",   "run",    "read",  "set",
+        "put",  "chosen", "drawn", "begun", "brought", "caught", "left",  "lost",
+        "met",
     };
     for (irregular) |i| {
         if (std.ascii.eqlIgnoreCase(i, word)) return true;
@@ -514,7 +515,8 @@ test "splits sentences without breaking on decimals or abbreviations" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const a = try analyse(arena,
+    const a = try analyse(
+        arena,
         "The agent ran 3.5 tests. It failed once, e.g. on the parser. Run it again?",
     );
     try std.testing.expectEqual(@as(usize, 3), a.sentenceCount());

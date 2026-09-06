@@ -2,13 +2,18 @@
 
 > A standards-native, Zig-native workbench where people and agents do engineering work in one recorded workspace.
 
-Everything that happens becomes a typed event in a hash-chained log. Agents propose typed tool requests; a local policy engine decides them. Terminology, metadata, accessibility, data quality and AI governance are enforced by the build, not described in a document.
+Everything that happens becomes a typed event in a hash-chained log with content-addressed command output, a read-only object audit and evidence-preserving recovery. Agents propose typed tool requests; a local policy engine decides them. Terminology, metadata, accessibility, data quality and AI governance are enforced by the build, not described in a document.
 
 ## Docs
 
 - [README](/README.md): What the workbench is and how to build it
 - [Architecture](/docs/architecture.md): The event graph, the block model and the standards control plane
 - [Standards conformance](/docs/standards-conformance.md): Which standards apply, how each is checked, and what is not established
+- [Roadmap](/docs/roadmap.md): What is complete, what comes next and how completion will be proved
+- [Threat model](/docs/threat-model.md): Trust boundaries, implemented controls and residual security work
+- [Platform support](/docs/platform-support.md): Compile evidence, runtime evidence and explicit platform exclusions
+- [Contributing](/CONTRIBUTING.md): How to prepare and check a change
+- [Security policy](/SECURITY.md): How to report a vulnerability privately
 - [Plain language](/docs/plain-language.md): How ISO 24495 is applied to product text, and what the checker cannot decide
 - [Glossary](/docs/glossary.md): The registered concepts and their definitions
 - [Competitive position](/docs/competitive-position.md): What zag does that other terminals do not, what it cannot do yet, and the order that changes
