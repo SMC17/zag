@@ -178,10 +178,20 @@ pub const hooks = struct {
         \\# zag shell integration for bash.
         \\# It reports where prompts and commands start and end. It changes
         \\# nothing else about your shell.
+        \\#
+        \\# PS0 is expanded once, after bash has read a command line and before
+        \\# it runs it. That is exactly one mark for one command. The DEBUG trap
+        \\# is not used: it fires before every simple command, including the
+        \\# ones inside the prompt's own functions, which produces marks for
+        \\# commands nobody typed.
         \\__zag_prompt_start() { printf '\033]133;A\007'; }
         \\__zag_command_start() { printf '\033]133;B\007'; }
         \\__zag_report_cwd() { printf '\033]7;file://%s%s\007' "${HOSTNAME:-}" "$PWD"; }
-        \\__zag_preexec() { printf '\033]133;C;cmdline=%s\007' "$1"; }
+        \\__zag_preexec() {
+        \\  local number rest
+        \\  read -r number rest <<< "$(HISTTIMEFORMAT= history 1)"
+        \\  printf '\033]133;C;cmdline=%s\007' "$rest"
+        \\}
         \\__zag_precmd() {
         \\  local status=$?
         \\  printf '\033]133;D;%s\007' "$status"
@@ -189,7 +199,7 @@ pub const hooks = struct {
         \\  __zag_prompt_start
         \\}
         \\PROMPT_COMMAND="__zag_precmd${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
-        \\trap '__zag_preexec "$BASH_COMMAND"' DEBUG
+        \\PS0='$(__zag_preexec)'"${PS0:-}"
         \\PS1="\[$(__zag_command_start)\]$PS1"
     ;
 

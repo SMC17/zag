@@ -133,11 +133,15 @@ pub const Index = struct {
         // Latest known git context for each session, so a block records the
         // state of the repository at the moment it ran.
         var git_by_session: std.AutoArrayHashMapUnmanaged([16]u8, GitContext) = .empty;
+        // Positions of blocks that have not finished yet, so a git change can
+        // reach them without walking the whole list.
+        var open_blocks: std.ArrayList(usize) = .empty;
 
         for (log.entries.items) |entry| {
             switch (entry.payload) {
                 .command_submitted => |e| {
                     try position.put(arena, e.block.raw.bytes, index.blocks.items.len);
+                    try open_blocks.append(arena, index.blocks.items.len);
                     try index.blocks.append(arena, .{
                         .id = e.block,
                         .session = e.session,
@@ -176,6 +180,7 @@ pub const Index = struct {
                 .agent_started => |e| {
                     const block_id = BlockId.fromRaw(e.agent.raw);
                     try position.put(arena, block_id.raw.bytes, index.blocks.items.len);
+                    try open_blocks.append(arena, index.blocks.items.len);
                     try index.blocks.append(arena, .{
                         .id = block_id,
                         .session = e.session,
@@ -250,26 +255,41 @@ pub const Index = struct {
                     };
                     try git_by_session.put(arena, e.session.raw.bytes, context);
                     // Blocks already open in this session pick up the change
-                    // too, because they are still running under it.
-                    for (index.blocks.items) |*block| {
-                        if (!block.session.eql(e.session)) continue;
+                    // too, because they are still running under it. Only the
+                    // open ones are visited: a session has a handful of those
+                    // at a time, and scanning every block that ever ran would
+                    // make a long log quadratic to fold.
+                    var kept: usize = 0;
+                    for (open_blocks.items) |at| {
+                        const block = &index.blocks.items[at];
                         if (block.finishedAt != null) continue;
+                        open_blocks.items[kept] = at;
+                        kept += 1;
+                        if (!block.session.eql(e.session)) continue;
                         block.git = context;
                     }
+                    open_blocks.shrinkRetainingCapacity(kept);
                 },
                 else => {},
             }
         }
 
-        // Fill in children from the parent links.
+        // Fill in children from the parent links. Every block is looked up by
+        // identifier rather than by scanning, because scanning turns folding a
+        // long session into quadratic work: a workspace with twenty thousand
+        // blocks would do four hundred million comparisons to answer a
+        // question that is one hash lookup for each block.
+        var by_id: std.AutoArrayHashMapUnmanaged([16]u8, usize) = .empty;
+        try by_id.ensureTotalCapacity(arena, index.blocks.items.len);
+        for (index.blocks.items, 0..) |block, i| by_id.putAssumeCapacity(block.id.raw.bytes, i);
+
         for (index.blocks.items, 0..) |block, i| {
             const parent = block.parent orelse continue;
-            for (index.blocks.items) |*candidate| {
-                if (!candidate.id.eql(parent)) continue;
-                var children: std.ArrayList(BlockId) = .{ .items = @constCast(candidate.children), .capacity = candidate.children.len };
-                try children.append(arena, index.blocks.items[i].id);
-                candidate.children = children.items;
-            }
+            const at = by_id.get(parent.raw.bytes) orelse continue;
+            const candidate = &index.blocks.items[at];
+            var children: std.ArrayList(BlockId) = .{ .items = @constCast(candidate.children), .capacity = candidate.children.len };
+            try children.append(arena, index.blocks.items[i].id);
+            candidate.children = children.items;
         }
         return index;
     }

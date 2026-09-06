@@ -142,9 +142,14 @@ pub const Service = struct {
     /// Set when the log on disk failed verification. While it is set, `append`
     /// refuses, so a damaged log is never extended.
     sealed: bool = false,
-    /// Events appended since the last flush, so a flush writes the whole file
-    /// once rather than after every event.
-    unflushed: usize = 0,
+    /// How many entries and how many bytes are already on disk. A flush writes
+    /// only what is past them, because rewriting the whole log after every
+    /// command turns a long session into quadratic work and quadratic writes.
+    flushedEntries: usize = 0,
+    flushedBytes: u64 = 0,
+    /// Set when the file on disk ends in an incomplete line. The next flush
+    /// rewrites the file once, which is the only way to drop the torn tail.
+    needsRewrite: bool = false,
 
     /// Open a workspace: read the log, verify it, fold it, and read the
     /// knowledge base. Never repairs anything.
@@ -153,12 +158,16 @@ pub const Service = struct {
         var created = false;
         var chain_break: ?log_mod.Break = null;
 
+        var flushed_bytes: u64 = 0;
+        var torn = false;
         if (options.persist) {
             const path = try logPath(arena, options.root);
             if (readFileIfPresent(arena, io, path)) |contents| {
                 const loaded = try log_mod.Log.loadJsonLines(arena, contents, options.seed);
                 log = loaded.log;
                 chain_break = try log.verify();
+                torn = loaded.torn_bytes > 0;
+                flushed_bytes = contents.len - loaded.torn_bytes;
             } else {
                 created = true;
             }
@@ -167,11 +176,13 @@ pub const Service = struct {
         }
 
         var knowledge = base_mod.Base.init(arena, options.root);
+        var problems: std.ArrayList(base_mod.Finding) = .empty;
         if (options.persist) {
-            loadKnowledge(arena, io, options.root, &knowledge) catch {};
+            try loadKnowledge(arena, io, options.root, &knowledge, &problems);
         }
         const known = try knowledgeConcepts(arena);
-        const findings = try knowledge.review(options.now, known);
+        var findings = try knowledge.review(options.now, known);
+        try findings.appendSlice(arena, problems.items);
 
         const policy = try policy_mod.repositoryWriteNoNetwork(options.root, arena);
         const index = try block_mod.Index.build(arena, log);
@@ -188,6 +199,9 @@ pub const Service = struct {
             .ids = idmod.Generator.init(options.seed, @divFloor(options.now.ns, timeutil.ns_per_ms)),
             .persist = options.persist,
             .sealed = chain_break != null,
+            .flushedEntries = log.count(),
+            .flushedBytes = flushed_bytes,
+            .needsRewrite = torn,
         };
         const report: OpenReport = .{
             .root = options.root,
@@ -213,18 +227,41 @@ pub const Service = struct {
         return contents;
     }
 
-    fn loadKnowledge(arena: std.mem.Allocator, io: std.Io, root: []const u8, into: *base_mod.Base) !void {
+    /// Read every entry under `.workspace/`. A file that cannot be read or
+    /// parsed becomes a finding rather than an exception: one malformed rule
+    /// must not hide the rest of the knowledge base, and it must not disappear
+    /// quietly either.
+    fn loadKnowledge(
+        arena: std.mem.Allocator,
+        io: std.Io,
+        root: []const u8,
+        into: *base_mod.Base,
+        problems: *std.ArrayList(base_mod.Finding),
+    ) !void {
         for (std.enums.values(base_mod.Kind)) |kind| {
             const dir_path = try std.fmt.allocPrint(arena, "{s}/{s}/{s}", .{ root, workspace_directory, kind.directory() });
             var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch continue;
             defer dir.close(io);
             var it = dir.iterate();
-            while (try it.next(io)) |entry| {
+            while (it.next(io) catch null) |entry| {
                 if (entry.kind != .file) continue;
                 if (!std.mem.endsWith(u8, entry.name, ".md")) continue;
                 const file_path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ dir_path, entry.name });
-                const contents = dir.readFileAlloc(io, entry.name, arena, .limited(4 * 1024 * 1024)) catch continue;
-                _ = try into.addSource(file_path, contents);
+                const contents = dir.readFileAlloc(io, entry.name, arena, .limited(4 * 1024 * 1024)) catch {
+                    try problems.append(arena, .{
+                        .code = .unreadable,
+                        .path = file_path,
+                        .message = "This file could not be read.",
+                    });
+                    continue;
+                };
+                into.addSource(file_path, contents) catch |err| {
+                    try problems.append(arena, .{
+                        .code = .unreadable,
+                        .path = file_path,
+                        .message = try std.fmt.allocPrint(arena, "This file could not be read as knowledge: {s}.", .{@errorName(err)}),
+                    });
+                };
             }
         }
     }
@@ -235,7 +272,6 @@ pub const Service = struct {
     pub fn append(self: *Service, payload: event_mod.WorkspaceEvent) !event_mod.Envelope {
         if (self.sealed) return error.LogBroken;
         const envelope = try self.log.append(payload, .{ .at = self.clock, .actor = self.actor });
-        self.unflushed += 1;
         return envelope;
     }
 
@@ -245,17 +281,51 @@ pub const Service = struct {
 
     /// Write the log to disk. Called after a batch of work rather than after
     /// every event, and a no-op for a workspace held in memory.
+    /// Write what is not yet on disk.
+    ///
+    /// The log is one JSON object per line and it only ever grows, so a flush
+    /// appends the new lines at the byte offset the last flush ended at. The
+    /// whole file is rewritten only once, and only when the file on disk ended
+    /// in a torn line that has to be dropped.
     pub fn flush(self: *Service, io: std.Io) !void {
-        if (!self.persist or self.unflushed == 0) return;
+        if (!self.persist) return;
+        const pending = self.log.entries.items[self.flushedEntries..];
+        if (pending.len == 0 and !self.needsRewrite) return;
+
         const dir_path = try std.fmt.allocPrint(self.arena, "{s}/{s}", .{ self.root, workspace_directory });
         var cwd = std.Io.Dir.cwd();
         cwd.createDirPath(io, dir_path) catch {};
         const path = try logPath(self.arena, self.root);
 
-        var out: std.Io.Writer.Allocating = .init(self.arena);
-        try self.log.writeJsonLines(&out.writer);
-        try cwd.writeFile(io, .{ .sub_path = path, .data = out.written() });
-        self.unflushed = 0;
+        if (self.needsRewrite or self.flushedBytes == 0) {
+            var out: std.Io.Writer.Allocating = .init(self.arena);
+            defer out.deinit();
+            try self.log.writeJsonLines(&out.writer);
+            try cwd.writeFile(io, .{ .sub_path = path, .data = out.written() });
+            self.flushedEntries = self.log.count();
+            self.flushedBytes = out.written().len;
+            self.needsRewrite = false;
+            return;
+        }
+
+        var tail: std.Io.Writer.Allocating = .init(self.arena);
+        defer tail.deinit();
+        for (pending) |entry| {
+            try std.json.Stringify.value(entry, .{}, &tail.writer);
+            try tail.writer.writeByte('\n');
+        }
+        const bytes = tail.written();
+
+        const file = try cwd.openFile(io, path, .{ .mode = .write_only });
+        defer file.close(io);
+        var buffer: [4096]u8 = undefined;
+        var writer = file.writer(io, &buffer);
+        writer.pos = self.flushedBytes;
+        try writer.interface.writeAll(bytes);
+        try writer.interface.flush();
+
+        self.flushedEntries = self.log.count();
+        self.flushedBytes += bytes.len;
     }
 
     /// The block list, folded from the log as it stands now.
@@ -321,7 +391,6 @@ pub const Service = struct {
         );
         try session.close("the command finished");
         self.clock = session.clock;
-        self.unflushed += 1;
 
         const index = try self.blocks();
         var mine: std.ArrayList(block_mod.Block) = .empty;
@@ -547,6 +616,85 @@ test "a workspace round-trips through a file on disk" {
     try testing.expectEqual(@as(usize, 2), reopened.report.eventCount);
     try testing.expect(reopened.report.chainBreak == null);
     try testing.expectEqual(@as(usize, 1), reopened.report.sessionCount);
+}
+
+test "a flush appends rather than rewriting the whole log" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const at = try Timestamp.parseIso("2026-09-06T09:00:00Z");
+
+    const opened = try Service.open(arena, io, .{ .root = root, .actor = testActor(), .now = at });
+    var service = opened.service;
+    const session = service.ids.next(idmod.SessionId);
+    _ = try service.append(.{ .session_opened = .{ .session = session, .workingDirectory = root } });
+    try service.flush(io);
+    const after_first = service.flushedBytes;
+    try testing.expect(after_first > 0);
+
+    // A second flush writes only the new line, so the offset moves by exactly
+    // the length of what was added.
+    _ = try service.append(.{ .user_message = .{ .session = session, .text = "second" } });
+    try service.flush(io);
+    try testing.expect(service.flushedBytes > after_first);
+    try testing.expectEqual(@as(usize, 2), service.flushedEntries);
+
+    // Nothing to write means no work at all.
+    const unchanged = service.flushedBytes;
+    try service.flush(io);
+    try testing.expectEqual(unchanged, service.flushedBytes);
+
+    // The file still holds a complete, verifiable log.
+    const reopened = try Service.open(arena, io, .{ .root = root, .actor = testActor(), .now = at });
+    try testing.expectEqual(@as(usize, 2), reopened.report.eventCount);
+    try testing.expect(reopened.report.chainBreak == null);
+}
+
+test "a torn line is dropped once, and the log stays verifiable" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const at = try Timestamp.parseIso("2026-09-06T09:00:00Z");
+
+    const opened = try Service.open(arena, io, .{ .root = root, .actor = testActor(), .now = at });
+    var service = opened.service;
+    const session = service.ids.next(idmod.SessionId);
+    _ = try service.append(.{ .session_opened = .{ .session = session, .workingDirectory = root } });
+    try service.flush(io);
+
+    // A process that stopped while writing leaves an incomplete last line.
+    const path = try std.fmt.allocPrint(arena, "{s}/{s}/{s}", .{ root, workspace_directory, log_file_name });
+    var cwd = std.Io.Dir.cwd();
+    const contents = try cwd.readFileAlloc(io, path, arena, .limited(1 << 20));
+    const torn = try std.fmt.allocPrint(arena, "{s}{{\"id\":\"evt_01", .{contents});
+    try cwd.writeFile(io, .{ .sub_path = path, .data = torn });
+
+    const reopened = try Service.open(arena, io, .{ .root = root, .actor = testActor(), .now = at });
+    var recovered = reopened.service;
+    try testing.expectEqual(@as(usize, 1), reopened.report.eventCount);
+    try testing.expect(recovered.needsRewrite);
+
+    _ = try recovered.append(.{ .user_message = .{ .session = session, .text = "after the crash" } });
+    try recovered.flush(io);
+    try testing.expect(!recovered.needsRewrite);
+
+    const third = try Service.open(arena, io, .{ .root = root, .actor = testActor(), .now = at });
+    try testing.expectEqual(@as(usize, 2), third.report.eventCount);
+    try testing.expect(third.report.chainBreak == null);
 }
 
 test "a damaged log is reported and never extended" {
