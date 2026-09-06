@@ -35,7 +35,7 @@ graph, an audit trail and an agent's context are all views of the same events.
 | `src/events` | The typed event union, append-only hash chain and immutable content-addressed output store |
 | `src/workspace` | Blocks, sessions, workflows, structured history, and the workspace service |
 | `src/editor` | The command line as an editing document, with undo that groups by intent |
-| `src/terminal` | Escape-sequence parser, screen with scrollback, shell integration, real pseudoterminal |
+| `src/terminal` | Escape-sequence parser, screen with scrollback, shell integration, real pseudoterminal, and the recording terminal |
 | `src/ai` | Capabilities, the policy engine, approvals, typed tools, risk, impact, transparency, generated cards |
 | `src/language` | The plain-language pass, with controlled-English and easy-to-read profiles |
 | `src/knowledge` | The concept system, the thesaurus view, the published vocabulary and the workspace knowledge base |
@@ -52,6 +52,7 @@ zig build test     # run every test
 zig build          # build the tools
 zig build check    # run the tests, then audit this repository
 zig build emit     # regenerate the schemas, the vocabulary and llms.txt
+zig build bench -Doptimize=ReleaseFast   # measure the hot paths
 ```
 
 You need Zig 0.16.0.
@@ -59,6 +60,7 @@ You need Zig 0.16.0.
 ## Use it
 
 ```
+zag term                       # a shell in a terminal that records what you do
 zag doctor                     # what this build can and cannot do
 zag run -- zig build test      # run a command and record it as a block
 zag lint README.md             # check text against the plain-language rules
@@ -143,7 +145,8 @@ request -> plan -> typed tool request -> policy decision
 - `docs/architecture.md` — the event graph, the block model and the control plane
 - `docs/standards-conformance.md` — which standards apply and how each is checked
 - `docs/plain-language.md` — how ISO 24495 is applied, and what a checker cannot decide
-- `docs/roadmap.md` — what is complete, what comes next and the evidence each milestone needs
+- `docs/competitive-position.md` — how zag compares with other terminals, and what it cannot do yet
+- `docs/roadmap.md` — what is complete, what happens next, and the evidence each milestone needs
 - `docs/threat-model.md` — trust boundaries, implemented controls and residual security work
 - `docs/platform-support.md` — compile evidence, runtime evidence and explicit platform exclusions
 - `docs/adr/` — why the architecture is the way it is

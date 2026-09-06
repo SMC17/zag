@@ -90,6 +90,8 @@ pub const terminal = struct {
     pub const shell_integration = @import("terminal/shell_integration.zig");
     pub const pty = @import("terminal/pty.zig");
     pub const session = @import("terminal/session.zig");
+    pub const tty = @import("terminal/tty.zig");
+    pub const interactive = @import("terminal/interactive.zig");
 };
 
 pub const ai = struct {

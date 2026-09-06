@@ -249,7 +249,7 @@ pub fn check(arena: std.mem.Allocator, source: []const u8, options: Options) !Re
 
     try checkSentences(arena, &findings, analysis, options, &seen_abbreviations);
     try checkParagraphs(arena, &findings, analysis, options);
-    try checkPhrases(arena, &findings, prose, options);
+    try checkPhrases(arena, &findings, analysis.lines, prose, options);
     try checkKindDuties(arena, &findings, prose, analysis, options);
     try checkTerminology(arena, &findings, analysis, options);
     try checkMachineValues(arena, &findings, analysis, options);
@@ -397,7 +397,7 @@ fn checkSentences(
     const instructing = options.purpose == .instruct or options.kind == .procedure;
 
     for (analysis.sentences, 0..) |sentence, index| {
-        const position = text.positionOf(analysis.source, sentence.span.start);
+        const position = analysis.positionOf(sentence.span.start);
 
         // A table is not a sentence. Measuring one as prose reports a
         // hundred-word "sentence" that no author can act on.
@@ -414,7 +414,7 @@ fn checkSentences(
             var w: usize = 0;
             while (w + 1 < words.len) : (w += 1) {
                 if (text.isBeVerb(text.trimWord(words[w].text)) and text.looksLikePastParticiple(text.trimWord(words[w + 1].text))) {
-                    const at = text.positionOf(analysis.source, words[w].span.start);
+                    const at = analysis.positionOf(words[w].span.start);
                     try add(arena, findings, at, .passive_voice_in_instruction, .major, try std.fmt.allocPrint(arena, "{s} {s}", .{ words[w].text, words[w + 1].text }), "This instruction does not say who acts. Name the actor and use the plain verb.", try std.fmt.allocPrint(arena, "\"the agent {s}s ...\" or \"{s} ...\"", .{ stripEd(text.trimWord(words[w + 1].text)), stripEd(text.trimWord(words[w + 1].text)) }));
                     break;
                 }
@@ -449,7 +449,7 @@ fn checkSentences(
             if (verb_index) |vi| {
                 const share = @as(f32, @floatFromInt(vi)) / @as(f32, @floatFromInt(words.len));
                 if (share > 0.6) {
-                    const at = text.positionOf(analysis.source, words[vi].span.start);
+                    const at = analysis.positionOf(words[vi].span.start);
                     try add(arena, findings, at, .action_at_end, .minor, sentence.text, try std.fmt.allocPrint(arena, "The action \"{s}\" appears near the end of the sentence. Start the sentence with it.", .{words[vi].text}), null);
                 }
             }
@@ -464,12 +464,25 @@ fn checkSentences(
             }
         }
 
-        // Double negatives.
+        // Double negatives. A list of absences ("no window, no font, no
+        // images") repeats one negative across a list; it is not the sentence
+        // that makes a reader work out what two negatives cancel to. Only the
+        // first "no" of such a run counts.
         var negatives: usize = 0;
+        var previous_was_negative = false;
         for (words) |word| {
             const t = text.trimWord(word.text);
-            if (std.ascii.eqlIgnoreCase(t, "not") or std.ascii.eqlIgnoreCase(t, "never") or std.ascii.eqlIgnoreCase(t, "no") or std.mem.startsWith(u8, t, "un") and t.len > 5 or std.ascii.eqlIgnoreCase(t, "cannot")) {
-                negatives += 1;
+            const is_negative = std.ascii.eqlIgnoreCase(t, "not") or
+                std.ascii.eqlIgnoreCase(t, "never") or
+                std.ascii.eqlIgnoreCase(t, "no") or
+                (std.mem.startsWith(u8, t, "un") and t.len > 5) or
+                std.ascii.eqlIgnoreCase(t, "cannot");
+            if (is_negative) {
+                const in_list = previous_was_negative or startsListedAbsence(analysis.source, word.span);
+                if (!in_list) negatives += 1;
+                previous_was_negative = true;
+            } else {
+                previous_was_negative = false;
             }
         }
         if (negatives >= 2) {
@@ -486,7 +499,7 @@ fn checkSentences(
                     if (run == 0) run_start = i;
                     run += 1;
                     if (run == 4) {
-                        const at = text.positionOf(analysis.source, words[run_start].span.start);
+                        const at = analysis.positionOf(words[run_start].span.start);
                         try add(arena, findings, at, .noun_cluster, .advisory, try std.fmt.allocPrint(arena, "{s} {s} {s} {s}", .{ words[run_start].text, words[run_start + 1].text, words[run_start + 2].text, words[run_start + 3].text }), "Four words in a row with no linking word are hard to parse. Add a preposition, or split the phrase.", null);
                     }
                 } else {
@@ -499,7 +512,7 @@ fn checkSentences(
         for (words, 0..) |word, word_index| {
             const raw = text.trimWord(word.text);
             if (raw.len == 0) continue;
-            const at = text.positionOf(analysis.source, word.span.start);
+            const at = analysis.positionOf(word.span.start);
 
             const known_here = text.isCommonAbbreviation(raw) or
                 isConventionalFileName(raw) or
@@ -563,6 +576,17 @@ fn checkSentences(
     }
 }
 
+/// True when the word sits in a comma-separated list of absences, which is one
+/// idea written out, not a stack of negatives.
+fn startsListedAbsence(source: []const u8, span: text.Span) bool {
+    var at = span.start;
+    // Walk back over the separator to the word before it.
+    while (at > 0 and (source[at - 1] == ' ' or source[at - 1] == ',' or source[at - 1] == '\n')) : (at -= 1) {
+        if (source[at - 1] == ',') return true;
+    }
+    return false;
+}
+
 fn checkParagraphs(
     arena: std.mem.Allocator,
     findings: *std.ArrayList(Finding),
@@ -574,10 +598,17 @@ fn checkParagraphs(
     // differently, so they get different limits: sentences for a paragraph,
     // items for a list.
     const list_item_limit: usize = 9;
+    // Sentences and paragraphs both run in order through the text, so one
+    // walk covers both. Restarting the sentence list for every paragraph made
+    // checking a long document quadratic in its own length.
+    var next_sentence: usize = 0;
     for (analysis.paragraphs) |paragraph| {
+        while (next_sentence < analysis.sentences.len and
+            analysis.sentences[next_sentence].span.start < paragraph.start) : (next_sentence += 1)
+        {}
         var sentences: usize = 0;
-        for (analysis.sentences) |s| {
-            if (s.span.start < paragraph.start or s.span.start >= paragraph.end) continue;
+        var scan = next_sentence;
+        while (scan < analysis.sentences.len and analysis.sentences[scan].span.start < paragraph.end) : (scan += 1) {
             sentences += 1;
         }
         // List items are counted from the lines, not from the sentences. A
@@ -598,7 +629,7 @@ fn checkParagraphs(
         // A table is neither a paragraph nor a list. A reader scans down one
         // column, so the limits for prose say nothing useful about it.
         if (table_rows > 0) continue;
-        const position = text.positionOf(analysis.source, paragraph.start);
+        const position = analysis.positionOf(paragraph.start);
         if (items > 0) {
             if (items > list_item_limit) {
                 try add(arena, findings, position, .paragraph_too_long, .minor, "", try std.fmt.allocPrint(arena, "This list has {d} items. Keep a list to {d} or fewer, or group the items under headings.", .{ items, list_item_limit }), null);
@@ -612,6 +643,7 @@ fn checkParagraphs(
 fn checkPhrases(
     arena: std.mem.Allocator,
     findings: *std.ArrayList(Finding),
+    lines: text.LineIndex,
     source: []const u8,
     options: Options,
 ) !void {
@@ -619,7 +651,7 @@ fn checkPhrases(
         var offset: usize = 0;
         while (offset < source.len) {
             const found = text.findPhrase(source[offset..], s.from) orelse break;
-            const at = text.positionOf(source, offset + found);
+            const at = lines.positionOf(offset + found);
             const suggestion = if (s.to.len == 0)
                 try std.fmt.allocPrint(arena, "delete \"{s}\"", .{s.from})
             else
@@ -632,7 +664,7 @@ fn checkPhrases(
     if (options.audience.condition == .accessibility_supported or options.audience.expertise == .general) {
         for (text.idioms) |idiom| {
             if (text.findPhrase(source, idiom)) |found| {
-                const at = text.positionOf(source, found);
+                const at = lines.positionOf(found);
                 try add(arena, findings, at, .idiom, .major, idiom, try std.fmt.allocPrint(arena, "\"{s}\" is a figure of speech. Say plainly what happens.", .{idiom}), null);
             }
         }
@@ -647,7 +679,7 @@ fn checkKindDuties(
     options: Options,
 ) !void {
     const trimmed = std.mem.trim(u8, source, " \t\n");
-    const start = text.positionOf(source, 0);
+    const start = analysis.positionOf(0);
 
     switch (options.kind) {
         .button_label, .menu_item => {
@@ -701,7 +733,7 @@ fn checkTerminology(
             var offset: usize = 0;
             while (offset < analysis.source.len) {
                 const found = text.findPhrase(analysis.source[offset..], designation.text) orelse break;
-                const at = text.positionOf(analysis.source, offset + found);
+                const at = analysis.positionOf(offset + found);
                 try add(arena, findings, at, .non_preferred_term, .major, designation.text, try std.fmt.allocPrint(arena, "\"{s}\" is a term we no longer use. The registered term for this concept is \"{s}\".", .{ designation.text, concept.preferred }), try std.fmt.allocPrint(arena, "{s}", .{concept.preferred}));
                 offset += found + designation.text.len;
             }
@@ -719,7 +751,7 @@ fn checkMachineValues(
     for (analysis.words) |word| {
         const raw = text.trimWord(word.text);
         if (raw.len == 0) continue;
-        const at = text.positionOf(analysis.source, word.span.start);
+        const at = analysis.positionOf(word.span.start);
 
         switch (datetime.looksAmbiguous(raw)) {
             .none => {},
