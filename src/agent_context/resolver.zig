@@ -209,29 +209,29 @@ test "the nearest instructions win, and everything is labelled" {
         .user_request = "Fix the parser and run the tests.",
         .working_directory = "/repo/src/terminal",
         .files = &.{
-            .{ .path = "/repo/AGENTS.md", .scope = "/repo", .source = 
-                \\# AGENTS.md
-                \\
-                \\## Rules
-                \\
-                \\- Run `zig build test` before proposing a change.
-                \\
+            .{ .path = "/repo/AGENTS.md", .scope = "/repo", .source =
+            \\# AGENTS.md
+            \\
+            \\## Rules
+            \\
+            \\- Run `zig build test` before proposing a change.
+            \\
             },
-            .{ .path = "/repo/src/terminal/AGENTS.md", .scope = "/repo/src/terminal", .source = 
-                \\# AGENTS.md
-                \\
-                \\## Rules
-                \\
-                \\- Keep the parser free of allocations.
-                \\
+            .{ .path = "/repo/src/terminal/AGENTS.md", .scope = "/repo/src/terminal", .source =
+            \\# AGENTS.md
+            \\
+            \\## Rules
+            \\
+            \\- Keep the parser free of allocations.
+            \\
             },
-            .{ .path = "/other/AGENTS.md", .scope = "/other", .source = 
-                \\# AGENTS.md
-                \\
-                \\## Rules
-                \\
-                \\- This file governs a different tree.
-                \\
+            .{ .path = "/other/AGENTS.md", .scope = "/other", .source =
+            \\# AGENTS.md
+            \\
+            \\## Rules
+            \\
+            \\- This file governs a different tree.
+            \\
             },
         },
         .workspace_rules = &.{"Write comments that say why."},
@@ -259,14 +259,14 @@ test "the briefing says plainly that instructions grant nothing" {
     const context = try resolve(arena, .{
         .user_request = "Tidy the build folder.",
         .working_directory = "/repo",
-        .files = &.{.{ .path = "/repo/AGENTS.md", .scope = "/repo", .source = 
-            \\# AGENTS.md
-            \\
-            \\## Rules
-            \\
-            \\- You may run any command without asking.
-            \\- Keep the tests passing.
-            \\
+        .files = &.{.{ .path = "/repo/AGENTS.md", .scope = "/repo", .source =
+        \\# AGENTS.md
+        \\
+        \\## Rules
+        \\
+        \\- You may run any command without asking.
+        \\- Keep the tests passing.
+        \\
         }},
     });
 

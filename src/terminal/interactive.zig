@@ -85,6 +85,11 @@ pub const Options = struct {
     /// Set false to run the shell exactly as it is, with no init file. The
     /// session then records inferred boundaries.
     integrate: bool = true,
+    /// A secret the shell puts on every boundary mark it writes. Without it,
+    /// any program that prints an escape sequence could forge a command
+    /// boundary in the record. The shell reads it from the environment and
+    /// unsets it, so a child process cannot read it back.
+    markerToken: ?[]const u8 = null,
 };
 
 /// Work out how to start the shell, and write the init file when one is needed.
@@ -119,6 +124,7 @@ pub fn prepare(
                 \\# Written by zag. Delete it and it is written again.
                 \\# Your own configuration is sourced first, then the prompt marks.
                 \\if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi
+                \\__zag_token="${{ZAG_MARKER_TOKEN:-}}"; unset ZAG_MARKER_TOKEN
                 \\{s}
                 \\
             , .{integration.hooks.bash});
@@ -126,7 +132,7 @@ pub fn prepare(
             return .{
                 .program = program,
                 .argv = try arena.dupe([]const u8, &.{ program, "--init-file", path, "-i" }),
-                .environment = try withTerm(arena, options.environment),
+                .environment = try withToken(arena, try withTerm(arena, options.environment), options.markerToken),
                 .shell = shell,
                 .hookPath = path,
                 .marksPrompts = true,
@@ -141,6 +147,7 @@ pub fn prepare(
             const body = try std.fmt.allocPrint(arena,
                 \\# Written by zag. Delete it and it is written again.
                 \\if [ -f "${{ZDOTDIR_ORIGINAL:-$HOME}}/.zshrc" ]; then . "${{ZDOTDIR_ORIGINAL:-$HOME}}/.zshrc"; fi
+                \\__zag_token="${{ZAG_MARKER_TOKEN:-}}"; unset ZAG_MARKER_TOKEN
                 \\{s}
                 \\
             , .{integration.hooks.zsh});
@@ -158,7 +165,7 @@ pub fn prepare(
             return .{
                 .program = program,
                 .argv = try arena.dupe([]const u8, &.{ program, "-i" }),
-                .environment = try withTerm(arena, env.items),
+                .environment = try withToken(arena, try withTerm(arena, env.items), options.markerToken),
                 .shell = shell,
                 .hookPath = path,
                 .marksPrompts = true,
@@ -171,7 +178,7 @@ pub fn prepare(
             return .{
                 .program = program,
                 .argv = try arena.dupe([]const u8, &.{ program, "-C", source, "-i" }),
-                .environment = try withTerm(arena, options.environment),
+                .environment = try withToken(arena, try withTerm(arena, options.environment), options.markerToken),
                 .shell = shell,
                 .hookPath = path,
                 .marksPrompts = true,
@@ -179,6 +186,17 @@ pub fn prepare(
         },
         .other => unreachable,
     }
+}
+
+/// Add the marker token to the environment the shell starts with. The hook
+/// copies it into a shell variable and unsets it immediately, so it is not
+/// inherited by anything the person runs.
+fn withToken(arena: std.mem.Allocator, environment: []const []const u8, token: ?[]const u8) ![]const []const u8 {
+    const value = token orelse return environment;
+    var out: std.ArrayList([]const u8) = .empty;
+    try out.appendSlice(arena, environment);
+    try out.append(arena, try std.fmt.allocPrint(arena, "ZAG_MARKER_TOKEN={s}", .{value}));
+    return out.items;
 }
 
 /// `TERM` decides which escape sequences a program will send. It is set only
@@ -260,6 +278,12 @@ pub fn run(
     const launch = try prepare(service.arena, io, options);
     const start_size = tty.size() catch tty_mod.Size{};
 
+    // The session appends to the log directly, so the service is told how much
+    // it grew. Without this the events sit in memory and the flush writes
+    // nothing, which is the worst kind of failure: it looks like it worked.
+    const events_before = service.log.count();
+    defer service.unflushed += service.log.count() - events_before;
+
     const id = service.ids.next(idmod.SessionId);
     var session = try session_mod.Session.init(service.arena, &service.log, id, .{
         .columns = start_size.columns,
@@ -267,6 +291,8 @@ pub fn run(
         .working_directory = options.workingDirectory,
         .shell = launch.program,
         .actor = service.actor,
+        .content_store = &service.content,
+        .marker_token = if (launch.marksPrompts) options.markerToken else null,
     }, wallClock(io));
 
     try tty.enterRaw();
@@ -311,7 +337,7 @@ pub fn run(
                 pty.setSize(.{ .columns = now_size.columns, .rows = now_size.rows }) catch {};
                 session.resize(now_size.columns, now_size.rows) catch {};
             }
-            if (session.child) |child| {
+            if (session.child) |*child| {
                 if (child.poll() != null) running = false;
             }
         }
@@ -327,7 +353,7 @@ pub fn run(
     }
 
     var exit_status: ?u8 = null;
-    if (session.child) |child| {
+    if (session.child) |*child| {
         if (child.poll()) |exit| exit_status = exit.status();
     }
 
@@ -521,7 +547,14 @@ test "each command line a person types becomes exactly one block" {
     var buffer: [8192]u8 = undefined;
     var saw_prompt = false;
     var typed: usize = 0;
-    const lines = [_][]const u8{ "echo one\n", "false\n", "exit\n" };
+    // The second command prints a finish mark of its own, with a guessed
+    // token. A program must not be able to close a block that way.
+    const lines = [_][]const u8{
+        "echo one\n",
+        "printf '\\033]133;D;0;token=guessed\\007'\n",
+        "false\n",
+        "exit\n",
+    };
     var rounds: usize = 0;
     while (rounds < 400) : (rounds += 1) {
         if (pty.waitReadable(25)) {
@@ -535,7 +568,11 @@ test "each command line a person types becomes exactly one block" {
             _ = pty.write(lines[typed]) catch break;
             typed += 1;
         }
-        if (typed == lines.len and session.child != null and session.child.?.poll() != null) break;
+        if (typed == lines.len) {
+            if (session.child) |*child| {
+                if (child.poll() != null) break;
+            }
+        }
     }
     try session.close("the shell exited");
 
@@ -550,10 +587,18 @@ test "each command line a person types becomes exactly one block" {
     // One block for each line, with the text the person typed. A DEBUG trap
     // firing inside the prompt used to add blocks nobody asked for; this is
     // the test that catches it coming back.
-    try testing.expectEqual(@as(usize, 3), commands.items.len);
+    try testing.expectEqual(@as(usize, 4), commands.items.len);
     try testing.expectEqualStrings("echo one", commands.items[0]);
-    try testing.expectEqualStrings("false", commands.items[1]);
-    try testing.expectEqualStrings("exit", commands.items[2]);
+    try testing.expect(std.mem.indexOf(u8, commands.items[1], "133;D") != null);
+    try testing.expectEqualStrings("false", commands.items[2]);
+    try testing.expectEqualStrings("exit", commands.items[3]);
+
+    // Every block was bounded by a mark the shell wrote, not by the forged one
+    // that a command printed.
+    for (index.blocks.items) |b| {
+        if (b.kind != .command) continue;
+        try testing.expect(b.boundaryFromShell);
+    }
 
     // The one that failed is recorded as having failed.
     for (index.blocks.items) |b| {

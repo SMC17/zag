@@ -27,6 +27,8 @@ const Command = enum {
     accessibility,
     report,
     events,
+    objects,
+    recover,
     agents,
     run,
     shell_hook,
@@ -57,6 +59,8 @@ const Command = enum {
             .{ .name = "accessibility", .command = .accessibility },
             .{ .name = "report", .command = .report },
             .{ .name = "events", .command = .events },
+            .{ .name = "objects", .command = .objects },
+            .{ .name = "recover", .command = .recover },
             .{ .name = "agents", .command = .agents },
             .{ .name = "run", .command = .run },
             .{ .name = "shell-hook", .command = .shell_hook },
@@ -94,6 +98,8 @@ pub const help_text =
     \\  accessibility       Show the accessibility statement and check the themes.
     \\  report              Show an example report in the product's notation.
     \\  events <file>       Verify an event log and summarise what happened.
+    \\  objects             Audit every command-output object without changing it.
+    \\  recover             Plan recovery of a damaged event log without changing it.
     \\  agents <file>       Read an instruction file and show what it asks for.
     \\  run -- <command>    Run a command on a real terminal and record it as a block.
     \\  shell-hook <shell>  Print the shell integration for bash, zsh, fish or pwsh.
@@ -113,6 +119,7 @@ pub const help_text =
     \\  --repo <directory>  Audit this directory.
     \\  --root <directory>  Read the workspace in this directory.
     \\  --raw               Start the shell with no added prompt marks.
+    \\  --approve-truncate  Apply the recovery plan after preserving the original log.
     \\
     \\Read more in README.md, or run "zag doctor" to see this build.
     \\
@@ -128,10 +135,15 @@ const Options = struct {
     root: []const u8 = ".",
     /// Run the shell exactly as it is, with no generated init file.
     raw: bool = false,
+    approve_truncate: bool = false,
     positional: []const []const u8 = &.{},
     /// Everything after `--`.
     passthrough: []const []const u8 = &.{},
 };
+
+fn approvalOptionIsValid(command: Command, options: Options) bool {
+    return !options.approve_truncate or command == .recover;
+}
 
 fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
     var options: Options = .{};
@@ -156,6 +168,10 @@ fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
         }
         if (std.mem.eql(u8, arg, "--raw")) {
             options.raw = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--approve-truncate")) {
+            options.approve_truncate = true;
             continue;
         }
         const named = [_]struct { flag: []const u8, field: *[]const u8 }{
@@ -226,6 +242,11 @@ pub fn main(init: std.process.Init) !u8 {
         try w.flush();
         return 2;
     };
+    if (!approvalOptionIsValid(command, options)) {
+        try w.writeAll("--approve-truncate applies only to \"zag recover\". Nothing was changed.\n");
+        try w.flush();
+        return 2;
+    }
 
     var environment: std.ArrayList([]const u8) = .empty;
     {
@@ -272,6 +293,8 @@ fn run(
         .accessibility => try accessibilityReport(arena, w),
         .report => try exampleReport(arena, w),
         .events => try events(arena, io, w, options),
+        .objects => try contentObjects(arena, io, w, options),
+        .recover => try recoverWorkspace(arena, io, w, options),
         .agents => try agentsFile(arena, io, w, options),
         .run => try runCommand(arena, io, w, options),
         .shell_hook => try shellHook(w, options),
@@ -301,6 +324,9 @@ fn doctor(arena: std.mem.Allocator, w: *std.Io.Writer) !u8 {
     try w.print("  Terminal on a real pseudoterminal:  {s}\n", .{if (zag.terminal.pty.supported) "yes" else "not on this platform"});
     try w.print("  Record an interactive shell:        {s}\n", .{if (zag.terminal.pty.supported and zag.terminal.tty.supported) "yes, with zag term" else "not on this platform"});
     try w.writeAll("  Typed workspace event log:          yes\n");
+    try w.writeAll("  Verified command-output store:      yes\n");
+    try w.writeAll("  Read-only object audit:             yes\n");
+    try w.writeAll("  Evidence-preserving log recovery:   yes\n");
     try w.writeAll("  Capability policy and approvals:    yes\n");
     try w.writeAll("  Plain-language checks:              yes\n");
     try w.writeAll("  Terminology and metadata registry:  yes\n");
@@ -314,6 +340,8 @@ fn doctor(arena: std.mem.Allocator, w: *std.Io.Writer) !u8 {
     try w.writeAll("  Run on Windows or macOS terminals. The pseudoterminal layer is Linux only so far.\n");
     try w.writeAll("  Split the screen. There are no tabs, panes or splits yet.\n");
     try w.writeAll("  Be configured. There is no settings file and no key bindings yet.\n\n");
+    try w.writeAll("  Enforce file and network policy at the operating-system boundary. The concrete executors are not written.\n");
+    try w.writeAll("  Run on Windows or macOS terminals. The pseudoterminal layer is Linux only so far.\n\n");
 
     const system = try zag.knowledge.vocabulary.build(arena);
     try w.print("The vocabulary holds {d} concepts.\n", .{system.count()});
@@ -722,8 +750,17 @@ fn events(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Opti
 
     const loaded = try zag.events.log.Log.loadJsonLines(arena, source, 1);
     try w.print("{d} events read from {s}.\n", .{ loaded.recovered, path });
+    var status: u8 = 0;
     if (loaded.torn_bytes > 0) {
-        try w.print("The last {d} bytes were an incomplete entry, so they were left out. That usually means a process stopped while writing.\n", .{loaded.torn_bytes});
+        try w.print("The last {d} bytes are an incomplete entry. They remain in the file but are not part of the recovered prefix.\n", .{loaded.torn_bytes});
+        status = 1;
+    }
+    if (loaded.malformed) |issue| {
+        try w.print("Line {d} is a complete but malformed record at byte {d}. Records after it were not accepted.\n", .{
+            issue.line,
+            issue.byte_offset,
+        });
+        status = 1;
     }
 
     if (try loaded.log.verify()) |broken| {
@@ -731,7 +768,11 @@ fn events(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Opti
         try w.writeAll("Everything before that entry is intact. Everything from it onwards has been changed since it was written.\n");
         return 1;
     }
-    try w.writeAll("The log verifies: every entry still hashes to what it did when it was written.\n\n");
+    if (status == 0) {
+        try w.writeAll("The log verifies: every entry still hashes to what it did when it was written.\n\n");
+    } else {
+        try w.writeAll("The recovered prefix verifies, but the complete file does not pass verification.\n\n");
+    }
 
     const graph = try zag.events.graph.Graph.build(arena, loaded.log);
     var all: std.ArrayList(usize) = .empty;
@@ -740,6 +781,127 @@ fn events(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Opti
     try summary.writeSentence(w);
     try w.writeAll("\n\n");
     try graph.writeTree(w);
+    return status;
+}
+
+/// Inspect the immutable command-output store. The command is deliberately
+/// read-only: unreferenced bytes may be the only evidence left by a crash.
+fn contentObjects(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
+    const opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.root,
+        .actor = workbenchActor(),
+        .now = wallClock(io),
+    }) catch |err| {
+        try w.print("zag could not open the workspace in {s}: {s}. Check the path and its permissions, then run the audit again.\n", .{
+            options.root,
+            @errorName(err),
+        });
+        return 1;
+    };
+    const audit = opened.service.auditContent(io) catch |err| {
+        try w.print("zag could not inspect the content store in {s}: {s}. Preserve the store and check its permissions before trying again.\n", .{
+            options.root,
+            @errorName(err),
+        });
+        return 1;
+    };
+
+    try w.print("Content store for {s}\n", .{options.root});
+    try w.print("  {d} unique command-output references in the verified log prefix.\n", .{audit.references});
+    try w.print("  {d} canonical objects inspected.\n", .{audit.objects});
+    if (!opened.report.logIsHealthy()) {
+        try w.writeAll("  The event log is incomplete or damaged, so unreferenced results apply only to its verified prefix.\n");
+    }
+    for (audit.missing) |hash| {
+        try w.writeAll("  Missing ");
+        try hash.format(w);
+        try w.writeAll(". Restore its bytes from a trusted copy before replaying this command.\n");
+    }
+    for (audit.changed) |object| {
+        try w.writeAll("  Changed ");
+        try object.hash.format(w);
+        try w.print(" at {s}. Preserve it, then restore bytes whose hash matches its name.\n", .{object.path});
+    }
+    for (audit.size_mismatches) |mismatch| {
+        try w.writeAll("  Size mismatch ");
+        try mismatch.hash.format(w);
+        try w.print(": the event records {d} bytes but the verified object has {d} bytes. Repair the event only through an approved recovery or migration.\n", .{
+            mismatch.expected_bytes,
+            mismatch.actual_bytes,
+        });
+    }
+    for (audit.unreferenced) |object| {
+        try w.writeAll("  Unreferenced ");
+        try object.hash.format(w);
+        try w.print(" at {s}. It was kept because it may be crash evidence.\n", .{object.path});
+    }
+    for (audit.unexpected) |path| {
+        try w.print("  Unexpected entry {s}. It was not followed or changed.\n", .{path});
+    }
+    if (audit.isHealthy() and opened.report.logIsHealthy()) {
+        try w.writeAll("  Every referenced object matches its BLAKE3-256 address and recorded byte count. No unreferenced or unexpected entries were found.\n");
+        return 0;
+    }
+    try w.print("  {d} content-store issue(s) found. Nothing was changed.\n", .{audit.issueCount()});
+    return 1;
+}
+
+/// Describe or apply an event-log truncation. The approval flag is explicit
+/// because recovery discards bytes from the active log even though it first
+/// preserves those bytes as evidence.
+fn recoverWorkspace(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
+    const plan = zag.events.recovery.inspect(arena, io, options.root) catch |err| {
+        try w.print("zag could not inspect the event log in {s}: {s}. Check the path and its permissions; nothing was changed.\n", .{
+            options.root,
+            @errorName(err),
+        });
+        return 1;
+    };
+
+    try w.print("Recovery plan for {s}\n", .{plan.source_path});
+    if (!plan.source_exists) {
+        try w.writeAll("  No event log exists. There is nothing to recover, and nothing was changed.\n");
+        return 0;
+    }
+    try w.print("  Original log: {d} bytes, BLAKE3-256 ", .{plan.original_bytes});
+    try plan.original_hash.format(w);
+    try w.writeAll(".\n");
+    if (!plan.needsRecovery()) {
+        try w.print("  All {d} events and {d} bytes verify. No recovery is needed, and nothing was changed.\n", .{
+            plan.kept_events,
+            plan.kept_bytes,
+        });
+        return 0;
+    }
+
+    try w.print("  Verified prefix: {d} events in {d} bytes.\n", .{ plan.kept_events, plan.kept_bytes });
+    try w.print("  Proposed truncation: remove {d} bytes from the active log.\n", .{plan.removed_bytes});
+    if (plan.chain_break) |broken| {
+        try w.print("  Reason: event sequence {d} fails {s}.\n", .{ broken.sequence, @tagName(broken.reason) });
+    }
+    if (plan.malformed) |issue| {
+        try w.print("  Reason: line {d} is a malformed complete record at byte {d}.\n", .{ issue.line, issue.byte_offset });
+    }
+    if (plan.torn_bytes > 0) {
+        try w.print("  Reason: the log ends with {d} incomplete bytes.\n", .{plan.torn_bytes});
+    }
+    try w.print("  Evidence copy: {s}\n", .{plan.evidence_path});
+
+    if (!options.approve_truncate) {
+        try w.writeAll("Nothing was changed. Review this plan, then rerun with --approve-truncate to preserve the original log and apply this exact truncation.\n");
+        return 1;
+    }
+
+    zag.events.recovery.apply(arena, io, plan) catch |err| {
+        try w.print("Recovery did not complete: {s}. Preserve the active log and the planned evidence path, then inspect both before trying again.\n", .{@errorName(err)});
+        return 1;
+    };
+    try w.print("Recovery completed. The original {d} bytes are preserved at {s}.\n", .{ plan.original_bytes, plan.evidence_path });
+    try w.print("The active log now contains the verified {d}-event, {d}-byte prefix. Run \"zag objects --root {s}\" before deleting any unreferenced content.\n", .{
+        plan.kept_events,
+        plan.kept_bytes,
+        options.root,
+    });
     return 0;
 }
 
@@ -765,8 +927,9 @@ fn historySearch(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, option
         try w.print("zag could not open the workspace in {s}.\n", .{options.root});
         return 1;
     };
-    if (opened.report.chainBreak) |broken| {
-        try w.print("The log is broken at event {d}, so the results below stop being trustworthy there.\n\n", .{broken.sequence});
+    const incomplete = !opened.report.logIsHealthy();
+    if (incomplete) {
+        try w.writeAll("The log is incomplete or damaged, so these results cover only its verified prefix.\n\n");
     }
     const index = try opened.service.blocks();
     const results = try zag.workspace.history.run(arena, index, parsed.query, .{
@@ -774,7 +937,7 @@ fn historySearch(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, option
         .limit = 20,
     });
     try results.writeList(w);
-    return 0;
+    return if (incomplete) 1 else 0;
 }
 
 /// Show the workspace knowledge base: what is there, who owns it, and what is
@@ -867,6 +1030,18 @@ fn interactiveTerminal(
         options.root,
         zag.workspace.service.workspace_directory,
     });
+
+    // A secret on every boundary mark, so output printed by a program cannot
+    // forge a command boundary in the record.
+    var token_bytes: [16]u8 = undefined;
+    try io.randomSecure(&token_bytes);
+    var token_buffer: [32]u8 = undefined;
+    const hex = "0123456789abcdef";
+    for (token_bytes, 0..) |byte, index| {
+        token_buffer[index * 2] = hex[byte >> 4];
+        token_buffer[index * 2 + 1] = hex[byte & 0x0f];
+    }
+    const marker_token = try arena.dupe(u8, &token_buffer);
     try w.writeAll("Recording this session. Leave the shell to stop.\n");
     try w.flush();
 
@@ -875,6 +1050,7 @@ fn interactiveTerminal(
         .environment = environment,
         .hookDirectory = hook_directory,
         .integrate = !options.raw,
+        .markerToken = marker_token,
     }) catch |err| {
         tty.restore();
         switch (err) {
@@ -938,15 +1114,31 @@ fn runCommand(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: 
         return 1;
     };
     var service = opened.service;
-    if (opened.report.chainBreak) |broken| {
-        try w.print("The event log is broken at event {d}, so nothing new will be written to it.\n", .{broken.sequence});
+    if (!opened.report.logIsHealthy()) {
+        try opened.report.writeSummary(w);
         try w.writeAll("Keep the file as it is. A broken log is evidence, not a fault to repair.\n");
         return 1;
     }
 
     const command_text = try std.mem.join(arena, " ", options.passthrough);
-    const result = try service.runCommand(command_text, zag.core.time.Duration.fromSeconds(120));
-    try service.flush(io);
+    const result = service.runCommand(command_text, zag.core.time.Duration.fromSeconds(120)) catch |err| switch (err) {
+        error.ContentTooLarge => {
+            try w.writeAll("The command produced more than 64 MiB of captured output. Redirect large output to a file, then run the command again.\n");
+            return 1;
+        },
+        else => {
+            try w.print("zag could not run the command: {s}. Check the command and workspace, then run it again.\n", .{@errorName(err)});
+            return 1;
+        },
+    };
+    service.flush(io) catch |err| {
+        if (err == error.LogTooLarge) {
+            try w.writeAll("The command ran, but the active event log would exceed 64 MiB. The workspace is sealed. Preserve it and define an approved rotation or migration before writing more events.\n");
+            return 1;
+        }
+        try w.print("The command ran, but zag could not commit its record: {s}. The workspace is sealed against further writes; preserve it and inspect the storage before retrying.\n", .{@errorName(err)});
+        return 1;
+    };
 
     try w.print("{s}\n", .{std.mem.trim(u8, result.screen, " \n")});
     try w.writeAll("\nRecorded as:\n");
@@ -1143,12 +1335,18 @@ fn evidenceReport(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, optio
     }
 
     // The workspace knowledge base, against ISO 30401 and ISO 10013.
-    const workspace_opened = zag.workspace.service.Service.open(arena, io, .{
+    const workspace = zag.workspace.service.Service.open(arena, io, .{
         .root = options.repo,
         .actor = workbenchActor(),
         .now = wallClock(io),
-    }) catch null;
-    if (workspace_opened) |workspace| {
+    }) catch |err| {
+        try w.print("zag could not read workspace knowledge in {s}: {s}. Fix the path or permissions, then generate the evidence again. No evidence file was written.\n", .{
+            options.repo,
+            @errorName(err),
+        });
+        return 1;
+    };
+    {
         var missing_owner: usize = 0;
         var overdue: usize = 0;
         var stateless: usize = 0;
@@ -1361,7 +1559,7 @@ fn writeGenerated(
 ) !void {
     const full = try std.fs.path.join(arena, &.{ out_root, relative_path });
     if (std.fs.path.dirname(full)) |parent| {
-        dir.createDirPath(io, parent) catch {};
+        try dir.createDirPath(io, parent);
     }
     try dir.writeFile(io, .{ .sub_path = full, .data = body });
 }
@@ -1613,10 +1811,19 @@ fn check(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Optio
         .{ .path = "docs/standards-conformance.md", .kind = .body },
         .{ .path = "docs/plain-language.md", .kind = .body },
         .{ .path = "docs/competitive-position.md", .kind = .body },
+        .{ .path = "docs/roadmap.md", .kind = .body },
+        .{ .path = "docs/threat-model.md", .kind = .body },
+        .{ .path = "docs/platform-support.md", .kind = .body },
+        .{ .path = "CONTRIBUTING.md", .kind = .body },
+        .{ .path = "SECURITY.md", .kind = .body },
     };
     for (documents) |document| {
         const path = try std.fs.path.join(arena, &.{ options.repo, document.path });
-        const source = dir.readFileAlloc(io, path, arena, .limited(8 << 20)) catch continue;
+        const source = dir.readFileAlloc(io, path, arena, .limited(8 << 20)) catch |err| {
+            try w.print("  TEXT zag could not read {s}: {s}.\n", .{ document.path, @errorName(err) });
+            text_findings += 1;
+            continue;
+        };
         const report = try zag.language.plain.check(arena, source, .{
             .kind = document.kind,
             .audience = profile.audience,
@@ -1659,8 +1866,9 @@ fn check(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Optio
             try w.print("  {s} AGENTS.md:{d} {s}\n", .{ finding.code.text(), finding.line, finding.message });
             problems += 1;
         }
-    } else |_| {
-        try w.writeAll("Instruction file: none found.\n");
+    } else |err| {
+        try w.print("Instruction file: zag could not read AGENTS.md: {s}.\n", .{@errorName(err)});
+        problems += 1;
     }
 
     // 9. The workspace knowledge base. ISO 30401 asks for named owners and for
@@ -1670,7 +1878,11 @@ fn check(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Optio
         .root = options.repo,
         .actor = workbenchActor(),
         .now = wallClock(io),
-    }) catch null;
+    }) catch |err| blk: {
+        try w.print("Workspace knowledge: zag could not open it: {s}.\n", .{@errorName(err)});
+        problems += 1;
+        break :blk null;
+    };
     if (opened) |workspace| {
         try w.print("Workspace knowledge: {d} entries, {d} problem(s).\n", .{
             workspace.report.knowledgeCount,
@@ -1680,8 +1892,8 @@ fn check(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Optio
             try w.print("  {s} {s}: {s}\n", .{ finding.code.text(), finding.path, finding.message });
             problems += 1;
         }
-        if (workspace.report.chainBreak) |broken| {
-            try w.print("  LOG The event log is broken at event {d}.\n", .{broken.sequence});
+        if (!workspace.report.logIsHealthy()) {
+            try w.writeAll("  LOG The event log is incomplete or damaged.\n");
             problems += 1;
         }
         // Knowledge an agent reads is product text, so it is held to the same
@@ -1774,9 +1986,10 @@ test "options parse, including the passthrough after two dashes" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const options = try parseOptions(arena, &.{ "--profile", "legal", "--json", "file.md", "--", "echo", "hello" });
+    const options = try parseOptions(arena, &.{ "--profile", "legal", "--json", "--approve-truncate", "file.md", "--", "echo", "hello" });
     try testing.expectEqualStrings("legal", options.profile);
     try testing.expect(options.json);
+    try testing.expect(options.approve_truncate);
     try testing.expectEqual(@as(usize, 1), options.positional.len);
     try testing.expectEqualStrings("file.md", options.positional[0]);
     try testing.expectEqual(@as(usize, 2), options.passthrough.len);
@@ -1784,6 +1997,8 @@ test "options parse, including the passthrough after two dashes" {
 
     try testing.expectError(error.MissingOptionValue, parseOptions(arena, &.{"--profile"}));
     try testing.expectError(error.UnknownOption, parseOptions(arena, &.{"--wat"}));
+    try testing.expect(approvalOptionIsValid(.recover, options));
+    try testing.expect(!approvalOptionIsValid(.doctor, options));
 }
 
 test "the metadata registry the tool publishes is valid" {
@@ -1800,6 +2015,126 @@ test "the metadata registry the tool publishes is valid" {
     try testing.expectEqualStrings("workingDirectory", registry.canonicalKey("cwd").?);
     try testing.expectEqualStrings("exitStatus", registry.canonicalKey("exit_code").?);
     try testing.expectEqualStrings("at", registry.canonicalKey("timestamp").?);
+}
+
+test "events rejects a malformed complete record without hiding it as torn" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/events.jsonl", .{tmp.sub_path});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "not an event\n" });
+
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    const status = try events(arena, io, &writer, .{ .positional = &.{path} });
+    try testing.expectEqual(@as(u8, 1), status);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "complete but malformed") != null);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "recovered prefix verifies") != null);
+}
+
+test "objects reports an unreferenced object and does not delete it" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var store = zag.events.content_store.Store.init(arena, root);
+    const hash = try store.put("crash evidence");
+    try store.flush(io);
+
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    const status = try contentObjects(arena, io, &writer, .{ .root = root });
+    try testing.expectEqual(@as(u8, 1), status);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "Unreferenced") != null);
+    try testing.expectEqualStrings("crash evidence", try store.read(io, hash, 1024));
+}
+
+test "recover plans first and applies only with explicit approval" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const workspace = try std.fmt.allocPrint(arena, "{s}/.workspace", .{root});
+    const path = try std.fmt.allocPrint(arena, "{s}/events.jsonl", .{workspace});
+    try std.Io.Dir.cwd().createDirPath(io, workspace);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "torn" });
+
+    var plan_buffer: [4096]u8 = undefined;
+    var plan_writer = std.Io.Writer.fixed(&plan_buffer);
+    try testing.expectEqual(@as(u8, 1), try recoverWorkspace(arena, io, &plan_writer, .{ .root = root }));
+    try testing.expect(std.mem.indexOf(u8, plan_writer.buffered(), "Nothing was changed") != null);
+    try testing.expectEqualStrings("torn", try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(16)));
+
+    var apply_buffer: [4096]u8 = undefined;
+    var apply_writer = std.Io.Writer.fixed(&apply_buffer);
+    try testing.expectEqual(@as(u8, 0), try recoverWorkspace(arena, io, &apply_writer, .{
+        .root = root,
+        .approve_truncate = true,
+    }));
+    try testing.expect(std.mem.indexOf(u8, apply_writer.buffered(), "Recovery completed") != null);
+    try testing.expectEqualStrings("", try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(16)));
+}
+
+test "recover reports an absent event log as a clean no-op" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try testing.expectEqual(@as(u8, 0), try recoverWorkspace(arena, io, &writer, .{
+        .root = root,
+        .approve_truncate = true,
+    }));
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "No event log exists") != null);
+    const event_path = try std.fmt.allocPrint(arena, "{s}/.workspace/events.jsonl", .{root});
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().openFile(io, event_path, .{}));
+}
+
+test "evidence generation never hides an unreadable workspace" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const event_path = try std.fmt.allocPrint(arena, "{s}/.workspace/events.jsonl", .{root});
+    try std.Io.Dir.cwd().createDirPath(io, event_path);
+
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    const status = try evidenceReport(arena, io, &writer, .{ .repo = root });
+    try testing.expectEqual(@as(u8, 1), status);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "No evidence file was written") != null);
 }
 
 test "the daemon interface describes every operation with its capability" {

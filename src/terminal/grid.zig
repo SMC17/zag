@@ -106,6 +106,7 @@ pub const Screen = struct {
     title: []const u8 = "",
 
     pub fn init(arena: std.mem.Allocator, columns: u16, rows: u16, scrollback_limit: usize) !Screen {
+        if (columns == 0 or rows == 0) return error.InvalidSize;
         const cells = try arena.alloc(Cell, @as(usize, columns) * @as(usize, rows));
         @memset(cells, .{});
         return .{
@@ -175,9 +176,17 @@ pub const Screen = struct {
     /// Feed bytes from the pseudoterminal.
     pub fn write(self: *Screen, bytes: []const u8) !void {
         for (bytes) |byte| {
-            const action = self.parser.advance(byte) orelse continue;
-            try self.apply(action);
+            _ = try self.writeByte(byte);
         }
+    }
+
+    /// Feed one byte and say whether it completed an OSC string. Sessions use
+    /// this narrower seam to separate shell boundary marks from command output
+    /// without depending on how the operating system split the reads.
+    pub fn writeByte(self: *Screen, byte: u8) !bool {
+        const action = self.parser.advance(byte) orelse return false;
+        try self.apply(action);
+        return action == .osc;
     }
 
     fn apply(self: *Screen, action: vt.Action) !void {
@@ -587,6 +596,7 @@ pub const Screen = struct {
     /// Resize the screen. Content keeps its position from the top left; lines
     /// that no longer fit move into scrollback rather than being dropped.
     pub fn resize(self: *Screen, columns: u16, rows: u16) !void {
+        if (columns == 0 or rows == 0) return error.InvalidSize;
         if (columns == self.columns and rows == self.rows) return;
         const new_cells = try self.arena.alloc(Cell, @as(usize, columns) * @as(usize, rows));
         @memset(new_cells, .{});
@@ -638,6 +648,17 @@ test "writes text and moves the cursor" {
     try screen.write("\r\nworld");
     try testing.expectEqualStrings("world", try screen.rowText(arena, 1));
     try testing.expectEqual(@as(u16, 1), screen.cursor.row);
+}
+
+test "a screen rejects a zero-sized grid" {
+    try testing.expectError(error.InvalidSize, Screen.init(testing.allocator, 0, 24, 100));
+    try testing.expectError(error.InvalidSize, Screen.init(testing.allocator, 80, 0, 100));
+
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var screen = try newScreen(arena_state.allocator());
+    try testing.expectError(error.InvalidSize, screen.resize(0, 4));
+    try testing.expectEqual(@as(u16, 20), screen.columns);
 }
 
 test "cursor positioning and erasing" {
@@ -725,6 +746,17 @@ test "osc strings are collected for the shell integration" {
     try testing.expectEqualStrings("zag", screen.title);
     try testing.expectEqualStrings("133;A", oscs[1]);
     try testing.expectEqual(@as(usize, 0), screen.drainOsc().len);
+}
+
+test "an ST terminator does not draw a backslash" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var screen = try newScreen(arena);
+    try screen.write("before\x1b]0;title\x1b\\after");
+    try testing.expectEqualStrings("beforeafter", try screen.rowText(arena, 0));
+    try testing.expectEqualStrings("title", screen.title);
 }
 
 test "insert and delete characters" {

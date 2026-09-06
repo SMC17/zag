@@ -46,9 +46,9 @@ pub const DataModuleCode = struct {
         try w.print(
             "<dmCode modelIdentCode=\"{s}\" systemDiffCode=\"{s}\" systemCode=\"{s}\" subSystemCode=\"{s}\" subSubSystemCode=\"{s}\" assyCode=\"{s}\" disassyCode=\"{s}\" disassyCodeVariant=\"{s}\" infoCode=\"{s}\" infoCodeVariant=\"{s}\" itemLocationCode=\"{s}\"/>",
             .{
-                self.model_identification, self.system_difference,     self.system,
-                self.subsystem,            self.sub_subsystem,         self.assembly,
-                self.disassembly,          self.disassembly_variant,   self.information_code,
+                self.model_identification,     self.system_difference,   self.system,
+                self.subsystem,                self.sub_subsystem,       self.assembly,
+                self.disassembly,              self.disassembly_variant, self.information_code,
                 self.information_code_variant, self.item_location,
             },
         );
