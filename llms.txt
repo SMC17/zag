@@ -11,6 +11,7 @@ Everything that happens becomes a typed event in a hash-chained log. Agents prop
 - [Standards conformance](/docs/standards-conformance.md): Which standards apply, how each is checked, and what is not established
 - [Plain language](/docs/plain-language.md): How ISO 24495 is applied to product text, and what the checker cannot decide
 - [Glossary](/docs/glossary.md): The registered concepts and their definitions
+- [Competitive position](/docs/competitive-position.md): What zag does that other terminals do not, what it cannot do yet, and the order that changes
 
 ## Machine-readable
 

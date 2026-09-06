@@ -35,6 +35,7 @@ const Command = enum {
     evidence,
     history,
     knowledge,
+    term,
 
     fn parse(text: []const u8) ?Command {
         const table = [_]struct { name: []const u8, command: Command }{
@@ -64,6 +65,7 @@ const Command = enum {
             .{ .name = "evidence", .command = .evidence },
             .{ .name = "history", .command = .history },
             .{ .name = "knowledge", .command = .knowledge },
+            .{ .name = "term", .command = .term },
         };
         for (table) |entry| {
             if (std.mem.eql(u8, entry.name, text)) return entry.command;
@@ -100,6 +102,7 @@ pub const help_text =
     \\  evidence            Write the conformance statement from recorded evidence.
     \\  history <query>     Search recorded work. For example: status:failed zig
     \\  knowledge           Show the knowledge under .workspace/, and what is overdue.
+    \\  term                Open a shell in a terminal that records what you do.
     \\
     \\Options
     \\  --profile <name>    Use this conformance profile. The default is "default".
@@ -109,6 +112,7 @@ pub const help_text =
     \\  --out <directory>   Write generated files here.
     \\  --repo <directory>  Audit this directory.
     \\  --root <directory>  Read the workspace in this directory.
+    \\  --raw               Start the shell with no added prompt marks.
     \\
     \\Read more in README.md, or run "zag doctor" to see this build.
     \\
@@ -122,6 +126,8 @@ const Options = struct {
     out: []const u8 = ".",
     repo: []const u8 = ".",
     root: []const u8 = ".",
+    /// Run the shell exactly as it is, with no generated init file.
+    raw: bool = false,
     positional: []const []const u8 = &.{},
     /// Everything after `--`.
     passthrough: []const []const u8 = &.{},
@@ -146,6 +152,10 @@ fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
         }
         if (std.mem.eql(u8, arg, "--json")) {
             options.json = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--raw")) {
+            options.raw = true;
             continue;
         }
         const named = [_]struct { flag: []const u8, field: *[]const u8 }{
@@ -217,7 +227,17 @@ pub fn main(init: std.process.Init) !u8 {
         return 2;
     };
 
-    const status = try run(arena, io, w, command, options);
+    var environment: std.ArrayList([]const u8) = .empty;
+    {
+        // The shell the person opens should behave the way it does everywhere
+        // else, so it is handed their environment rather than a made-up one.
+        const map = init.environ_map;
+        for (map.keys(), map.values()) |key, value| {
+            try environment.append(arena, try std.fmt.allocPrint(arena, "{s}={s}", .{ key, value }));
+        }
+    }
+
+    const status = try run(arena, io, w, command, options, environment.items);
     try w.flush();
     return status;
 }
@@ -228,6 +248,7 @@ fn run(
     w: *std.Io.Writer,
     command: Command,
     options: Options,
+    environment: []const []const u8,
 ) !u8 {
     return switch (command) {
         .help => blk: {
@@ -259,6 +280,7 @@ fn run(
         .evidence => try evidenceReport(arena, io, w, options),
         .history => try historySearch(arena, io, w, options),
         .knowledge => try knowledgeIndex(arena, io, w, options),
+        .term => try interactiveTerminal(arena, io, w, options, environment),
     };
 }
 
@@ -277,6 +299,7 @@ fn doctor(arena: std.mem.Allocator, w: *std.Io.Writer) !u8 {
 
     try w.writeAll("What this build can do\n");
     try w.print("  Terminal on a real pseudoterminal:  {s}\n", .{if (zag.terminal.pty.supported) "yes" else "not on this platform"});
+    try w.print("  Record an interactive shell:        {s}\n", .{if (zag.terminal.pty.supported and zag.terminal.tty.supported) "yes, with zag term" else "not on this platform"});
     try w.writeAll("  Typed workspace event log:          yes\n");
     try w.writeAll("  Capability policy and approvals:    yes\n");
     try w.writeAll("  Plain-language checks:              yes\n");
@@ -288,7 +311,9 @@ fn doctor(arena: std.mem.Allocator, w: *std.Io.Writer) !u8 {
     try w.writeAll("  Draw its own window. The renderer is not written; the accessibility tree it must publish is.\n");
     try w.writeAll("  Talk to a language server. The editor surfaces are not written.\n");
     try w.writeAll("  Reach a model provider. The runtime and its policy are written; no provider is wired in.\n");
-    try w.writeAll("  Run on Windows or macOS terminals. The pseudoterminal layer is Linux only so far.\n\n");
+    try w.writeAll("  Run on Windows or macOS terminals. The pseudoterminal layer is Linux only so far.\n");
+    try w.writeAll("  Split the screen. There are no tabs, panes or splits yet.\n");
+    try w.writeAll("  Be configured. There is no settings file and no key bindings yet.\n\n");
 
     const system = try zag.knowledge.vocabulary.build(arena);
     try w.print("The vocabulary holds {d} concepts.\n", .{system.count()});
@@ -795,6 +820,75 @@ fn workbenchActor() zag.events.event.Actor {
 fn wallClock(io: std.Io) zag.core.time.Timestamp {
     const raw = std.Io.Timestamp.now(io, .real);
     return .{ .ns = @intCast(raw.nanoseconds) };
+}
+
+/// Open a shell in a terminal that records what happens in it.
+///
+/// This is the workbench used as a terminal rather than as a tool: the person's
+/// own shell, their own configuration, and a record of every command that they
+/// can search and verify afterwards.
+fn interactiveTerminal(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+    environment: []const []const u8,
+) !u8 {
+    var tty = zag.terminal.tty.Tty.init();
+    if (!tty.isTerminal()) {
+        try w.writeAll("zag term needs a terminal. Run it from a shell rather than from a pipe.\n");
+        return 2;
+    }
+    if (!zag.terminal.pty.supported) {
+        try w.writeAll("This build cannot open a pseudoterminal on this platform yet.\n");
+        return 1;
+    }
+
+    const opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.root,
+        .actor = .{
+            .id = zag.core.id.ActorId.fromRaw(.{ .bytes = [_]u8{0} ** 16 }),
+            .kind = .person,
+            .label = "you",
+        },
+        .now = wallClock(io),
+    }) catch {
+        try w.print("zag could not open the workspace in {s}.\n", .{options.root});
+        return 1;
+    };
+    var service = opened.service;
+    if (opened.report.chainBreak) |broken| {
+        try w.print("The event log is broken at event {d}, so this session would not be recorded.\n", .{broken.sequence});
+        try w.writeAll("Keep the file as it is. A broken log is evidence, not a fault to repair.\n");
+        return 1;
+    }
+
+    const hook_directory = try std.fmt.allocPrint(arena, "{s}/{s}/shell", .{
+        options.root,
+        zag.workspace.service.workspace_directory,
+    });
+    try w.writeAll("Recording this session. Leave the shell to stop.\n");
+    try w.flush();
+
+    const outcome = zag.terminal.interactive.run(&service, &tty, io, .{
+        .workingDirectory = options.root,
+        .environment = environment,
+        .hookDirectory = hook_directory,
+        .integrate = !options.raw,
+    }) catch |err| {
+        tty.restore();
+        switch (err) {
+            error.NotATerminal => try w.writeAll("zag term needs a terminal. Run it from a shell rather than from a pipe.\n"),
+            error.Unsupported => try w.writeAll("This build cannot open a pseudoterminal on this platform yet.\n"),
+            else => return err,
+        }
+        return 1;
+    };
+    try service.flush(io);
+
+    try w.writeAll("\n");
+    try outcome.writeSummary(w);
+    return outcome.exitStatus orelse 0;
 }
 
 fn agentsFile(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
@@ -1518,6 +1612,7 @@ fn check(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Optio
         .{ .path = "docs/architecture.md", .kind = .body },
         .{ .path = "docs/standards-conformance.md", .kind = .body },
         .{ .path = "docs/plain-language.md", .kind = .body },
+        .{ .path = "docs/competitive-position.md", .kind = .body },
     };
     for (documents) |document| {
         const path = try std.fs.path.join(arena, &.{ options.repo, document.path });

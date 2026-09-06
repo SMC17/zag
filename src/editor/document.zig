@@ -259,6 +259,22 @@ pub const Document = struct {
     /// Change the text without recording history. Only `replace`, `undo` and
     /// `redo` call it.
     fn applyRaw(self: *Document, target: Range, new_text: []const u8) !void {
+        // Typing at the end is what a command line does almost every time. When
+        // the last piece already points at the end of the add buffer, the new
+        // text extends it. Without this the piece list grows by one for every
+        // keystroke, and every later edit pays to walk it.
+        if (target.isEmpty() and target.start == self.byte_len and new_text.len > 0) {
+            if (self.pieces.items.len > 0) {
+                const last = &self.pieces.items[self.pieces.items.len - 1];
+                if (last.source == .add and last.start + last.len == self.add.items.len) {
+                    try self.add.appendSlice(self.gpa, new_text);
+                    last.len += new_text.len;
+                    self.byte_len += new_text.len;
+                    return;
+                }
+            }
+        }
+
         const first = try self.splitAt(target.start);
         var removed_len: usize = 0;
         var cut_to = first;
@@ -310,9 +326,11 @@ pub const Document = struct {
             if (last.intent.mergesWith(change.intent) and last.at + last.inserted.len == change.at and change.removed.len == 0) {
                 // A typing burst: extend the previous change rather than
                 // stacking one entry for each keystroke.
-                const merged = try std.mem.concat(self.gpa, u8, &.{ last.inserted, change.inserted });
-                self.gpa.free(last.inserted);
-                last.inserted = merged;
+                // Grown in place where the allocator can, rather than copied
+                // whole for each keystroke, which made a long burst quadratic.
+                const grown = try self.gpa.realloc(@constCast(last.inserted), last.inserted.len + change.inserted.len);
+                @memcpy(grown[last.inserted.len..], change.inserted);
+                last.inserted = grown;
                 self.gpa.free(last.cursorsAfter);
                 last.cursorsAfter = change.cursorsAfter;
                 self.gpa.free(change.removed);

@@ -101,6 +101,22 @@ A second reading of the same text names the parts of a command line: the
 program, the options, the quoted arguments and the operators. An unclosed quote
 is reported, because pressing enter on one hangs the shell.
 
+### The recording terminal
+
+`zag term` is the workbench used as a terminal. It starts the person's own shell
+on a real pseudoterminal, passes every byte through in both directions, and folds
+the output into the event log on the way past. Close the shell and the session is
+a set of blocks that `zag history` can search and anyone can verify.
+
+Nothing interprets the person's keystrokes. A terminal that second guesses the
+keyboard breaks the programs it hosts, so the loop forwards input untouched and
+does its work on the output side.
+
+Shell integration is offered, never imposed. A shell the workbench knows is
+started with a small init file that sources the person's own configuration first
+and then adds the prompt marks. A shell it does not know still records, with
+inferred boundaries, and every block says which kind it got.
+
 ### The terminal
 
 `src/terminal` holds four things. There is the Digital Equipment Corporation
@@ -180,8 +196,11 @@ test suite checks the approval prompts against the language rules.
 
 ## What is not built yet
 
-- The graphical renderer. The accessibility tree it must publish is built, and
-  is checked, so the renderer has a contract to meet.
+- The graphical renderer. `zag term` runs inside the terminal a person already
+  has. The accessibility tree a renderer must publish is built and checked, so
+  it has a contract to meet.
+- Tabs, panes and splits. One shell to a session.
+- A settings file and key bindings. Nothing is configurable yet.
 - The graphical editor surface. The document model underneath it is built.
 - The language-server client.
 - The model providers. The runtime, the policy and the tool types are built.
