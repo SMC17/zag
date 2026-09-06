@@ -4,6 +4,11 @@ zag has a tested substrate, not a finished workbench. This roadmap separates
 what the repository demonstrates today from work that still needs design,
 implementation and evaluation.
 
+This file decides the order the work happens in. `docs/competitive-position.md`
+says where zag stands against other terminals and what it cannot do yet; it
+points here rather than keeping an order of its own, so that two documents
+cannot give two answers.
+
 ## Completed foundation
 
 The current code provides typed events, a verified hash chain, immutable
@@ -16,6 +21,12 @@ The persistence path classifies incomplete and malformed records separately,
 refuses to extend either one, checks the exact on-disk prefix under a lock and
 appends only new records. Command deadlines use a monotonic clock, terminate a
 process group and record a timeout.
+
+`zag term` runs a person's own shell on that pseudoterminal and records the
+session. Command boundaries carry a per-session secret, so output printed by a
+program cannot forge one. `zig build bench` measures the paths that sit in a hot
+loop, best of several runs, and prints the build mode and the spread with each
+number.
 
 `zag objects` now performs the non-destructive whole-store audit needed before
 garbage collection: missing, changed, size-mismatched, unreferenced and
@@ -45,7 +56,7 @@ certification.
   after event sync. Include directory-entry durability and a real recovery
   exercise after each injected failure.
 
-## Priority 1: enforce the security model at execution
+## Priority 1: enforce the security model where it executes
 
 - Open files relative to a workspace directory handle with symlink-safe,
   beneath-only resolution. Rejecting a symbolic link in a record's final path
@@ -61,7 +72,23 @@ certification.
 - Add secret detection and redaction policy for terminal output, model context,
   diagnostic bundles and security reports.
 
-## Priority 1: finish the product surfaces
+## Priority 2: make the terminal one a person can live in
+
+Everything here is small, and each item ends in something a person can use.
+`zag term` records a session today, but nothing about it can be changed without
+editing Zig.
+
+- Read a settings file for the shell, the scrollback size, the colours and the
+  key bindings. Report an unreadable setting by name and carry on with the
+  default rather than refusing to start.
+- Show the state of the session while it runs: the working directory, the
+  branch, and whether the shell is marking its boundaries.
+- Hold more than one shell in one recorded session, with each block naming the
+  pane it came from.
+- Index the blocks, so a query does not walk them. State the size the index is
+  built for and measure a query at that size.
+
+## Priority 3: finish the large surfaces
 
 - Build the graphical renderer against the existing semantic accessibility
   tree, then evaluate complete tasks with keyboard and screen-reader users.
@@ -69,13 +96,15 @@ certification.
   document and diagnostic models.
 - Implement the daemon interface described by the generated OpenAPI document,
   with authentication, authorisation, version negotiation and backpressure.
-- Add model-provider adapters behind the policy and transparency boundary.
-- Add macOS pseudoterminal and Windows ConPTY implementations with the same
-  behavioural test suite used on Linux.
+- Add model-provider adapters behind the policy and transparency boundary. They
+  depend on the typed executors in Priority 1: a provider with nothing to
+  execute under a decision proves nothing about the boundary.
+- Add macOS pseudoterminal and Windows ConPTY implementations, and the terminal
+  settings each one needs, with the same behavioural test suite used on Linux.
 - Define remote replay, reconnect and conflict semantics before allowing more
   than one machine to append to a workspace.
 
-## Priority 2: release and interoperability
+## Priority 4: release and interoperability
 
 - Turn the compile-only entries in `docs/platform-support.md` into supported
   targets with native test evidence. Add performance budgets and repeatable
@@ -96,6 +125,9 @@ certification.
 | Milestone | Required evidence |
 | --- | --- |
 | Durable record | Fault-injection tests, object audit, recovery exercise and signed checkpoint verification |
+| Configurable terminal | A settings file read at start, a named report for each unreadable setting, and tests for the defaults |
+| Many shells in one session | Two shells recorded in one log, each block naming its pane, and the log verifying afterwards |
+| Fast recall | A stated index size, a measured query at that size, and the measurement repeated by the benchmark harness |
 | Enforced agent boundary | Executor integration tests, path and network escape tests, and an independent security review |
 | Accessible desktop | Automated checks plus task completion with keyboard and screen-reader users |
 | Remote workspace | Authentication review, reconnect tests, conflict tests and load results with declared units |

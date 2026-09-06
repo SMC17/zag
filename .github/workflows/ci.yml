@@ -57,7 +57,11 @@ jobs:
       - name: Check the product's own text
         run: |
           ./zig-out/bin/zag lint README.md AGENTS.md docs/architecture.md \
-            docs/standards-conformance.md docs/plain-language.md
+            docs/standards-conformance.md docs/plain-language.md \
+            docs/competitive-position.md docs/roadmap.md
+
+      - name: Measure the hot paths
+        run: zig build bench -Doptimize=ReleaseFast
 
       - name: Show the workspace knowledge and verify the log
         run: |

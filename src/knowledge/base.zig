@@ -110,6 +110,8 @@ pub const FindingCode = enum {
     unknown_concept,
     duplicate_id,
     superseded_still_referenced,
+    /// The file is there, but it could not be read or parsed.
+    unreadable,
 
     pub fn text(self: FindingCode) []const u8 {
         return switch (self) {
@@ -120,6 +122,7 @@ pub const FindingCode = enum {
             .unknown_concept => "KB05",
             .duplicate_id => "KB06",
             .superseded_still_referenced => "KB07",
+            .unreadable => "KB08",
         };
     }
 };

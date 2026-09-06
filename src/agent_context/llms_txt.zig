@@ -236,6 +236,7 @@ pub fn workbenchDocument() Document {
                     .{ .title = "Security policy", .url = "/SECURITY.md", .note = "How to report a vulnerability privately" },
                     .{ .title = "Plain language", .url = "/docs/plain-language.md", .note = "How ISO 24495 is applied to product text, and what the checker cannot decide" },
                     .{ .title = "Glossary", .url = "/docs/glossary.md", .note = "The registered concepts and their definitions" },
+                    .{ .title = "Competitive position", .url = "/docs/competitive-position.md", .note = "What zag does that other terminals do not, what it cannot do yet, and the order that changes" },
                 },
             },
             .{

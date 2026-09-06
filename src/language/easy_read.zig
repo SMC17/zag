@@ -86,7 +86,7 @@ pub fn check(arena: std.mem.Allocator, source: []const u8, options: Options) !Re
     const analysis = try text.analyse(arena, source);
 
     for (analysis.sentences, 0..) |sentence, index| {
-        const position = text.positionOf(source, sentence.span.start);
+        const position = analysis.positionOf(sentence.span.start);
         const words = analysis.wordsOf(index);
 
         if (sentence.words > options.max_sentence_words) {
@@ -121,7 +121,7 @@ pub fn check(arena: std.mem.Allocator, source: []const u8, options: Options) !Re
         var w: usize = 0;
         while (w + 1 < words.len) : (w += 1) {
             if (text.isBeVerb(text.trimWord(words[w].text)) and text.looksLikePastParticiple(text.trimWord(words[w + 1].text))) {
-                const at = text.positionOf(source, words[w].span.start);
+                const at = analysis.positionOf(words[w].span.start);
                 try findings.append(arena, .{
                     .rule = .passive_voice,
                     .line = at.line,
@@ -135,7 +135,7 @@ pub fn check(arena: std.mem.Allocator, source: []const u8, options: Options) !Re
         for (words) |word| {
             const raw = text.trimWord(word.text);
             if (raw.len == 0) continue;
-            const at = text.positionOf(source, word.span.start);
+            const at = analysis.positionOf(word.span.start);
 
             if (text.looksLikeAbbreviation(raw) and !isExplained(raw, options)) {
                 try findings.append(arena, .{
@@ -192,7 +192,7 @@ pub fn check(arena: std.mem.Allocator, source: []const u8, options: Options) !Re
 
     for (text.idioms) |idiom| {
         if (text.findPhrase(source, idiom)) |found| {
-            const at = text.positionOf(source, found);
+            const at = analysis.positionOf(found);
             try findings.append(arena, .{
                 .rule = .figure_of_speech,
                 .line = at.line,
@@ -205,7 +205,7 @@ pub fn check(arena: std.mem.Allocator, source: []const u8, options: Options) !Re
 
     for (source, 0..) |c, i| {
         if (c == '&' or c == '/' or c == '~' or c == '|' or c == '*' or c == '<' or c == '>') {
-            const at = text.positionOf(source, i);
+            const at = analysis.positionOf(i);
             try findings.append(arena, .{
                 .rule = .special_character,
                 .line = at.line,

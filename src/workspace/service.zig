@@ -227,11 +227,13 @@ pub const Service = struct {
         }
 
         var knowledge = base_mod.Base.init(arena, options.root);
+        var problems: std.ArrayList(base_mod.Finding) = .empty;
         if (options.persist) {
-            try loadKnowledge(arena, io, options.root, &knowledge);
+            try loadKnowledge(arena, io, options.root, &knowledge, &problems);
         }
         const known = try knowledgeConcepts(arena);
-        const findings = try knowledge.review(options.now, known);
+        var findings = try knowledge.review(options.now, known);
+        try findings.appendSlice(arena, problems.items);
 
         const policy = try policy_mod.repositoryWriteNoNetwork(options.root, arena);
         const index = try block_mod.Index.build(arena, log);
@@ -289,7 +291,17 @@ pub const Service = struct {
         return contents;
     }
 
-    fn loadKnowledge(arena: std.mem.Allocator, io: std.Io, root: []const u8, into: *base_mod.Base) !void {
+    /// Read every entry under `.workspace/`. A file that cannot be read or
+    /// parsed becomes a finding rather than an exception: one malformed rule
+    /// must not hide the rest of the knowledge base, and it must not disappear
+    /// quietly either.
+    fn loadKnowledge(
+        arena: std.mem.Allocator,
+        io: std.Io,
+        root: []const u8,
+        into: *base_mod.Base,
+        problems: *std.ArrayList(base_mod.Finding),
+    ) !void {
         for (std.enums.values(base_mod.Kind)) |kind| {
             const dir_path = try std.fmt.allocPrint(arena, "{s}/{s}/{s}", .{ root, workspace_directory, kind.directory() });
             var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch |err| switch (err) {
@@ -298,12 +310,25 @@ pub const Service = struct {
             };
             defer dir.close(io);
             var it = dir.iterate();
-            while (try it.next(io)) |entry| {
+            while (it.next(io) catch null) |entry| {
                 if (entry.kind != .file) continue;
                 if (!std.mem.endsWith(u8, entry.name, ".md")) continue;
                 const file_path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ dir_path, entry.name });
-                const contents = try dir.readFileAlloc(io, entry.name, arena, .limited(4 * 1024 * 1024));
-                _ = try into.addSource(file_path, contents);
+                const contents = dir.readFileAlloc(io, entry.name, arena, .limited(4 * 1024 * 1024)) catch {
+                    try problems.append(arena, .{
+                        .code = .unreadable,
+                        .path = file_path,
+                        .message = "This file could not be read.",
+                    });
+                    continue;
+                };
+                into.addSource(file_path, contents) catch |err| {
+                    try problems.append(arena, .{
+                        .code = .unreadable,
+                        .path = file_path,
+                        .message = try std.fmt.allocPrint(arena, "This file could not be read as knowledge: {s}.", .{@errorName(err)}),
+                    });
+                };
             }
         }
     }
