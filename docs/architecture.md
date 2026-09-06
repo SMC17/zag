@@ -58,7 +58,44 @@ that point to the end of the log.
 
 On disk it is one JSON object per line. A process that stops while writing
 leaves an incomplete final line. Loading reports how many entries were
-recovered and how many bytes were incomplete. It never guesses at the rest.
+recovered and how many bytes were incomplete. A complete line that does not
+decode is reported as corruption, not disguised as a crash remnant. Either
+condition seals the service against further writes.
+
+New records are appended under an exclusive advisory lock. Before the append,
+the service compares the exact byte count and BLAKE3 digest it saw when it
+opened. A stale second writer therefore fails instead of replacing events from
+the first writer. The file is synchronized before a flush is reported as
+complete. An active log cannot grow beyond 64 MiB; a flush that would cross the
+limit is rejected and sealed before any of its pending event bytes are written.
+
+Command output lives in `.workspace/objects/b3/`, addressed by its BLAKE3-256
+digest. An object is written and synchronized before an event may refer to it.
+Existing objects are never replaced and are checked again when read. A crash
+can leave an unreferenced object, but cannot commit a reference to a partially
+replaced object. On systems with POSIX permissions, new event and object files
+are readable and writable only by their owner; new object directories are
+owner-only too.
+
+`zag objects` hashes every canonical object in fixed-size chunks and compares
+the store with command-output references in the verified log prefix. It checks
+each address and recorded byte count, reports missing, changed, mismatched,
+unreferenced and unexpected entries, and changes none of them. `zagd verify`
+applies the same audit after it verifies the event chain.
+
+Opening a workspace remains non-repairing. `zag recover` first prints the exact
+event and byte boundary it would keep. It changes the active log only with
+`--approve-truncate`, after an exclusive lock, a second source check and an
+immutable evidence copy named by the original log's BLAKE3-256 digest. The
+truncated prefix is synchronized and verified before success is reported.
+Event logs, objects and recovery evidence do not follow a symbolic link in the
+final path component. Parent-directory confinement still belongs to the
+unimplemented filesystem executor and is not claimed here.
+
+The chain detects a change relative to the head stored in the same file. It is
+not proof of authorship: someone who can replace the whole file can compute a
+new chain. The roadmap requires signed external checkpoints before any stronger
+claim is made.
 
 ### Blocks
 
@@ -114,6 +151,18 @@ same for everyone. The parser sits behind a seam, so it can be replaced with
 libghostty-vt without disturbing anything above it. What sits above it is the
 part that is ours: the block model, the event stream and the workspace.
 
+PTY read boundaries do not define block boundaries. The session parses one byte
+at a time, removes shell control marks from stored output and records the same
+bytes whether a fast command arrives in one read or many. Command deadlines use
+a monotonic clock. At the deadline, zag signals the process group, waits briefly
+for cleanup and then kills the group if needed.
+
+The wrapper used by `zag run` adds a random token to its start and finish
+marks, then removes the token from the command's environment. Output that prints
+an untrusted finish mark cannot close that block. Standard marks from an
+interactive shell hook have no such proof yet, so the event records only that
+the boundary arrived in shell-marker form.
+
 ### Agents
 
 `src/ai` holds the capability model, the policy engine, the approval prompts,
@@ -135,6 +184,11 @@ automated action passes through. `zagd` is a thin binary over it.
 Two properties matter more than features. First, opening a workspace never
 repairs a damaged log. A broken chain is reported, and the service then refuses
 to append, because appending destroys the evidence of where the break is.
+Events at and after the first break remain unchanged on disk but are excluded
+from every in-memory projection and content-reference audit.
+Recovery is a separate, explicit command that preserves the original bytes
+before it truncates anything. An object audit is separate too and never deletes
+an unreferenced file.
 Second, the daemon never runs a workflow step on its own. It reports which steps
 a person has to decide on, and stops there. A headless process that could act
 alone would defeat the capability model.
@@ -185,10 +239,14 @@ test suite checks the approval prompts against the language rules.
 - The graphical editor surface. The document model underneath it is built.
 - The language-server client.
 - The model providers. The runtime, the policy and the tool types are built.
+- Filesystem and network executors that enforce path and host policy at the
+  operating-system boundary. The policy can decide a typed request today; that
+  alone is not a sandbox.
 - The network interface of the daemon. It is described in
   `schemas/openapi.json`, which is generated from the types the runtime uses.
   The daemon opens a workspace, verifies it, reports on it and plans a workflow.
   It does not yet listen on a socket.
 - Windows and macOS pseudoterminals.
 
-`zag doctor` prints this list from the code, so it cannot drift.
+`zag doctor` prints the implementation boundary in short form. The roadmap
+names the evidence required to remove an item from this list.

@@ -68,6 +68,8 @@ pub const events = struct {
     pub const event = @import("events/event.zig");
     pub const log = @import("events/log.zig");
     pub const graph = @import("events/graph.zig");
+    pub const content_store = @import("events/content_store.zig");
+    pub const recovery = @import("events/recovery.zig");
 };
 
 pub const workspace = struct {
