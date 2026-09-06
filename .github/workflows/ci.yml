@@ -58,7 +58,7 @@ jobs:
         run: |
           ./zig-out/bin/zag lint README.md AGENTS.md docs/architecture.md \
             docs/standards-conformance.md docs/plain-language.md \
-            docs/competitive-position.md
+            docs/competitive-position.md docs/roadmap.md
 
       - name: Measure the hot paths
         run: zig build bench -Doptimize=ReleaseFast

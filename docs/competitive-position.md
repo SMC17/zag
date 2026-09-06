@@ -129,29 +129,29 @@ the terminal you have for now.
 
 `zag doctor` prints this list from the code, so it cannot quietly go out of date.
 
-## The order the gaps get closed in
+## Where the gaps get closed
 
-Each step is small enough to finish, and ends in something a person can use. The
-numbers in brackets are what has to be true before the step counts as done.
+`docs/roadmap.md` holds the order and the evidence each milestone needs. This
+file does not keep a second list, because a reader who opened one file and not
+the other would get a different answer.
 
-1. **Make the recorded terminal worth living in.** Configuration file, key
-   bindings, and a block-aware status line. (A person can set their scrollback
-   size and their keys without editing Zig.)
-2. **Panes and tabs inside one recorded session.** (Two shells, one log, and the
-   blocks say which pane they came from.)
-3. **A model provider behind the existing runtime.** (An agent proposes a typed
-   tool request. The policy engine decides it. The decision lands in the log.)
-4. **A search index over blocks.** (A query over a million blocks stays under a
-   millisecond.)
-5. **macOS support.** (The pseudoterminal and the terminal settings work on
-   both platforms, with the same tests passing.)
-6. **The daemon listens.** (A second client attaches to a running workspace and
-   catches up by reading the log.)
-7. **A renderer.** (A window, a font, and the accessibility tree the checker
-   already enforces.)
+The gaps above land there like this:
 
-Steps 1 to 4 make zag the best recorded terminal. Steps 5 to 7 make it a
-terminal a person can use as their only one.
+| Gap | Where it is planned |
+| --- | --- |
+| Nothing is configurable, and the session shows no state | Priority 2 |
+| One shell to a session | Priority 2 |
+| History filters walk the blocks | Priority 2 |
+| No model provider | Priority 3, after the typed executors in Priority 1 |
+| No renderer, no editor surface | Priority 3 |
+| Linux only | Priority 3 |
+| No remote attachment | Priority 3 |
+| Unbounded memory in a long session | Priority 0, with the work that protects the record |
+
+The table above is not a running order. Protecting the record and enforcing the
+security boundary come before any of it, because they are the two claims this
+project is built on. A terminal that is pleasant to use, and cannot prove what
+it recorded, has given up the thing that made it worth building.
 
 ## Where being second best is not acceptable
 
