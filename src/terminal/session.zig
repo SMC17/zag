@@ -182,6 +182,31 @@ pub const Session = struct {
         if (self.child) |child| {
             exit_status = child.wait().status();
         }
+        // A command that ends the shell, `exit` above all, never reports its
+        // own result: the shell is gone before it can. The block is closed
+        // here with the session's status, and the result is recorded as
+        // unknown rather than guessed at, because the two are not the same.
+        if (self.open_block) |block| {
+            if (self.output.items.len > 0) {
+                _ = try self.log.append(.{ .process_output = .{
+                    .block = block,
+                    .session = self.id,
+                    .contentHash = hashing.Hash.of(self.output.items),
+                    .byteCount = self.output.items.len,
+                } }, .{ .at = self.clock, .actor = self.actor });
+            }
+            const started = self.open_block_started orelse self.clock;
+            _ = try self.log.append(.{ .command_finished = .{
+                .block = block,
+                .session = self.id,
+                .exitStatus = exit_status orelse 0,
+                .duration = self.clock.since(started),
+                .signal = null,
+            } }, .{ .at = self.clock, .actor = self.actor });
+            self.open_block = null;
+            self.open_block_started = null;
+            self.output = .empty;
+        }
         if (self.pty) |pty| pty.close();
         self.pty = null;
         _ = try self.log.append(.{ .session_closed = .{

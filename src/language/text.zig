@@ -27,6 +27,37 @@ pub const Position = struct {
 };
 
 /// Line and column (both 1-based) of a byte offset.
+/// Where every line starts, so a byte offset becomes a line and column in one
+/// binary search.
+///
+/// Walking the text from the beginning for each position is what makes checking
+/// a document cost the square of its length: a thousand findings in a long file
+/// walk the file a thousand times. The index is built once and answers each
+/// question in a few steps.
+pub const LineIndex = struct {
+    starts: []const usize,
+
+    pub fn build(arena: std.mem.Allocator, source: []const u8) !LineIndex {
+        var starts: std.ArrayList(usize) = .empty;
+        try starts.append(arena, 0);
+        for (source, 0..) |c, i| {
+            if (c == '\n') try starts.append(arena, i + 1);
+        }
+        return .{ .starts = starts.items };
+    }
+
+    pub fn positionOf(self: LineIndex, offset: usize) Position {
+        // The last line that starts at or before the offset.
+        var low: usize = 0;
+        var high: usize = self.starts.len;
+        while (low + 1 < high) {
+            const middle = low + (high - low) / 2;
+            if (self.starts[middle] <= offset) low = middle else high = middle;
+        }
+        return .{ .line = low + 1, .column = offset - self.starts[low] + 1 };
+    }
+};
+
 pub fn positionOf(text: []const u8, offset: usize) Position {
     var line: usize = 1;
     var column: usize = 1;
@@ -227,6 +258,12 @@ pub const Analysis = struct {
     sentences: []Sentence,
     words: []Word,
     paragraphs: []Span,
+    lines: LineIndex,
+
+    /// Where a byte offset falls, as a line and a column.
+    pub fn positionOf(self: Analysis, offset: usize) Position {
+        return self.lines.positionOf(offset);
+    }
 
     pub fn wordCount(self: Analysis) usize {
         return self.words.len;
@@ -365,6 +402,7 @@ pub fn analyse(arena: std.mem.Allocator, source: []const u8) !Analysis {
         .sentences = try sentences.toOwnedSlice(arena),
         .words = try words.toOwnedSlice(arena),
         .paragraphs = try paragraphs.toOwnedSlice(arena),
+        .lines = try LineIndex.build(arena, source),
     };
 }
 
@@ -541,4 +579,35 @@ test "a list item is measured on its own" {
     // Four sentences: the lead-in and one for each item, whatever ends them.
     try std.testing.expectEqual(@as(usize, 4), a.sentenceCount());
     try std.testing.expectEqualStrings("- a low contrast ratio;", a.sentences[2].text);
+}
+
+test "the line index agrees with walking the text, and costs one search" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const source =
+        \\First line.
+        \\Second line is longer.
+        \\
+        \\Fourth line after a blank one.
+    ;
+    const index = try LineIndex.build(arena, source);
+    for (0..source.len + 1) |offset| {
+        const walked = positionOf(source, offset);
+        const searched = index.positionOf(offset);
+        try std.testing.expectEqual(walked.line, searched.line);
+        try std.testing.expectEqual(walked.column, searched.column);
+    }
+}
+
+test "an analysis can place any offset without walking the text again" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const analysis = try analyse(arena, "One sentence.\nAnd another one here.\n");
+    try std.testing.expectEqual(@as(usize, 1), analysis.positionOf(0).line);
+    try std.testing.expectEqual(@as(usize, 2), analysis.positionOf(14).line);
+    try std.testing.expectEqual(@as(usize, 1), analysis.positionOf(14).column);
 }

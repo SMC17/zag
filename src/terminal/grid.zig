@@ -79,7 +79,16 @@ pub const Screen = struct {
     columns: u16,
     rows: u16,
     cells: []Cell,
+    /// Rows are a ring. Scrolling the whole screen moves this offset instead
+    /// of copying every row up one place, which is the difference between one
+    /// addition and a screenful of memory traffic for every line a program
+    /// prints.
+    row_start: u16 = 0,
+    /// Scrollback is a ring too, holding at most `scrollback_limit` lines.
+    /// `scrollback_first` is where the oldest line sits. Dropping the oldest
+    /// line is then one addition rather than shifting the whole buffer down.
     scrollback: std.ArrayList([]Cell) = .empty,
+    scrollback_first: usize = 0,
     scrollback_limit: usize,
     cursor: Cursor = .{},
     saved_cursor: Cursor = .{},
@@ -109,18 +118,58 @@ pub const Screen = struct {
         };
     }
 
+    /// Where a visible row lives in the cell buffer. Every read and write of a
+    /// cell goes through here, so the ring stays an implementation detail.
+    fn storageRow(self: Screen, row: u16) u16 {
+        return @intCast((@as(usize, self.row_start) + row) % self.rows);
+    }
+
     pub fn cellAt(self: Screen, row: u16, column: u16) Cell {
         if (row >= self.rows or column >= self.columns) return .{};
-        return self.cells[@as(usize, row) * self.columns + column];
+        return self.cells[@as(usize, self.storageRow(row)) * self.columns + column];
     }
 
     fn cellPtr(self: *Screen, row: u16, column: u16) *Cell {
-        return &self.cells[@as(usize, row) * self.columns + column];
+        return &self.cells[@as(usize, self.storageRow(row)) * self.columns + column];
     }
 
     fn rowSlice(self: *Screen, row: u16) []Cell {
-        const start = @as(usize, row) * self.columns;
+        const start = @as(usize, self.storageRow(row)) * self.columns;
         return self.cells[start .. start + self.columns];
+    }
+
+    fn rowSliceConst(self: Screen, row: u16) []const Cell {
+        const start = @as(usize, self.storageRow(row)) * self.columns;
+        return self.cells[start .. start + self.columns];
+    }
+
+    /// How many lines of scrollback there are.
+    pub fn scrollbackCount(self: Screen) usize {
+        return self.scrollback.items.len;
+    }
+
+    /// One scrollback line, index 0 being the oldest.
+    fn scrollbackLine(self: Screen, index: usize) []const Cell {
+        const count = self.scrollback.items.len;
+        return self.scrollback.items[(self.scrollback_first + index) % count];
+    }
+
+    /// Put a line into scrollback. Once the buffer is full the oldest line's
+    /// memory is reused, so a session that runs for a day does not grow a
+    /// buffer for a day.
+    fn pushScrollback(self: *Screen, line: []const Cell) !void {
+        if (self.scrollback_limit == 0) return;
+        if (self.scrollback.items.len < self.scrollback_limit) {
+            try self.scrollback.append(self.arena, try self.arena.dupe(Cell, line));
+            return;
+        }
+        const oldest = self.scrollback.items[self.scrollback_first];
+        if (oldest.len == line.len) {
+            @memcpy(oldest, line);
+        } else {
+            self.scrollback.items[self.scrollback_first] = try self.arena.dupe(Cell, line);
+        }
+        self.scrollback_first = (self.scrollback_first + 1) % self.scrollback_limit;
     }
 
     /// Feed bytes from the pseudoterminal.
@@ -213,19 +262,27 @@ pub const Screen = struct {
     /// Move the scroll region up, pushing the top line into scrollback when the
     /// region starts at the top of the screen.
     fn scrollUp(self: *Screen, count: u16) !void {
+        // The whole screen scrolling is the common case by a wide margin: it
+        // is what every line of ordinary output does. That case rotates the
+        // ring and clears one row. A scroll region set by the program is rarer
+        // and keeps the straightforward copy.
+        const whole_screen = self.scroll_top == 0 and self.scroll_bottom == self.rows -| 1;
         var remaining = count;
         while (remaining > 0) : (remaining -= 1) {
-            if (self.scroll_top == 0) {
-                const line = try self.arena.dupe(Cell, self.rowSlice(0));
-                try self.scrollback.append(self.arena, line);
-                if (self.scrollback.items.len > self.scrollback_limit) {
-                    _ = self.scrollback.orderedRemove(0);
-                }
+            if (self.scroll_top == 0) try self.pushScrollback(self.rowSlice(0));
+
+            if (whole_screen) {
+                self.row_start = @intCast((@as(usize, self.row_start) + 1) % self.rows);
+                @memset(self.rowSlice(self.scroll_bottom), .{ .style = self.style });
+                continue;
             }
+
             var row = self.scroll_top;
             while (row < self.scroll_bottom) : (row += 1) {
-                const source = self.rowSlice(row + 1);
-                const target = self.rowSlice(row);
+                const source_row = self.storageRow(row + 1);
+                const target_row = self.storageRow(row);
+                const source = self.cells[@as(usize, source_row) * self.columns ..][0..self.columns];
+                const target = self.cells[@as(usize, target_row) * self.columns ..][0..self.columns];
                 @memcpy(target, source);
             }
             @memset(self.rowSlice(self.scroll_bottom), .{ .style = self.style });
@@ -462,12 +519,12 @@ pub const Screen = struct {
 
     /// Text of one on-screen row, with trailing blanks removed.
     pub fn rowText(self: Screen, arena: std.mem.Allocator, row: u16) ![]const u8 {
-        return renderLine(arena, self.cells[@as(usize, row) * self.columns ..][0..self.columns]);
+        return renderLine(arena, self.rowSliceConst(row));
     }
 
     /// Text of one scrollback line, index 0 being the oldest.
     pub fn scrollbackText(self: Screen, arena: std.mem.Allocator, index: usize) ![]const u8 {
-        return renderLine(arena, self.scrollback.items[index]);
+        return renderLine(arena, self.scrollbackLine(index));
     }
 
     fn renderLine(arena: std.mem.Allocator, cells: []const Cell) ![]const u8 {
@@ -539,13 +596,12 @@ pub const Screen = struct {
         // Rows pushed off the top are preserved as history.
         var pushed: u16 = 0;
         while (pushed < first_row) : (pushed += 1) {
-            const line = try self.arena.dupe(Cell, self.rowSlice(pushed));
-            try self.scrollback.append(self.arena, line);
+            try self.pushScrollback(self.rowSlice(pushed));
         }
 
         var row: u16 = 0;
         while (row < rows_to_keep) : (row += 1) {
-            const source = self.cells[@as(usize, first_row + row) * self.columns ..][0..self.columns];
+            const source = self.rowSliceConst(@intCast(first_row + row));
             const target = new_cells[@as(usize, row) * columns ..][0..columns];
             const copy = @min(self.columns, columns);
             @memcpy(target[0..copy], source[0..copy]);
@@ -554,6 +610,8 @@ pub const Screen = struct {
         self.cells = new_cells;
         self.columns = columns;
         self.rows = rows;
+        // The new buffer is laid out from the top, so the ring starts over.
+        self.row_start = 0;
         self.scroll_top = 0;
         self.scroll_bottom = rows -| 1;
         self.cursor.row = @min(self.cursor.row, rows - 1);
