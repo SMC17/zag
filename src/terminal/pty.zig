@@ -22,6 +22,7 @@ pub const Error = error{
     ExecFailed,
     ReadFailed,
     WriteFailed,
+    ClockFailed,
 };
 
 pub const Size = struct {
@@ -180,7 +181,7 @@ pub const Pty = struct {
         if (pid == 0) {
             // Child. Nothing here may allocate or return: on any failure the
             // child exits with a distinct status so the parent can report it.
-            _ = linux.setsid();
+            if (linux.errno(linux.setsid()) != .SUCCESS) linux.exit(126);
 
             const slave_flags: linux.O = .{ .ACCMODE = .RDWR };
             const slave_rc = linux.open(@ptrCast(&self.slave_path_buffer), slave_flags, 0);
@@ -208,13 +209,17 @@ pub const Pty = struct {
 
 pub const Child = struct {
     pid: std.posix.pid_t,
+    exit: ?Exit = null,
 
     /// Wait for the child to finish.
-    pub fn wait(self: Child) Exit {
+    pub fn wait(self: *Child) Exit {
+        if (self.exit) |exit| return exit;
         var status: u32 = 0;
         const rc = linux.waitpid(self.pid, &status, 0);
         if (linux.errno(rc) != .SUCCESS) return .unknown;
-        return decodeStatus(status);
+        const exit = decodeStatus(status);
+        self.exit = exit;
+        return exit;
     }
 
     /// Check whether the child has finished, without blocking.
@@ -223,16 +228,21 @@ pub const Child = struct {
     /// or something else already reaped it (a test runner, an init process).
     /// "I cannot tell" must not be reported as "it finished", or a caller stops
     /// reading output that has not arrived yet.
-    pub fn poll(self: Child) ?Exit {
+    pub fn poll(self: *Child) ?Exit {
+        if (self.exit) |exit| return exit;
         var status: u32 = 0;
         const rc = linux.wait4(self.pid, &status, 1, null); // WNOHANG
         if (linux.errno(rc) != .SUCCESS) return null;
         if (rc == 0) return null;
-        return decodeStatus(status);
+        const exit = decodeStatus(status);
+        self.exit = exit;
+        return exit;
     }
 
-    pub fn signal(self: Child, sig: u8) void {
-        _ = linux.kill(self.pid, @enumFromInt(sig));
+    /// Signal the whole session created by `setsid`, including grandchildren.
+    /// Killing only the shell leaves pipelines and background jobs behind.
+    pub fn signalGroup(self: Child, sig: u8) void {
+        _ = linux.kill(-self.pid, @enumFromInt(sig));
     }
 
     fn decodeStatus(status: u32) Exit {
@@ -241,6 +251,14 @@ pub const Child = struct {
         return .unknown;
     }
 };
+
+/// Current monotonic time for deadlines and elapsed durations.
+pub fn monotonicNanos() Error!i64 {
+    if (comptime !supported) return error.UnsupportedPlatform;
+    var value: linux.timespec = undefined;
+    if (linux.errno(linux.clock_gettime(.MONOTONIC, &value)) != .SUCCESS) return error.ClockFailed;
+    return @as(i64, @intCast(value.sec)) * std.time.ns_per_s + @as(i64, @intCast(value.nsec));
+}
 
 /// Build a null-terminated argument vector in `arena`.
 pub fn buildArgv(arena: std.mem.Allocator, args: []const []const u8) ![:null]?[*:0]const u8 {
@@ -300,7 +318,7 @@ test "a real command runs on a real pseudoterminal" {
 
     const argv = try buildArgv(arena, &.{ "/bin/sh", "-c", "printf 'hello from the pty\\n'; exit 3" });
     const envp = try buildEnvp(arena, &.{ "TERM=xterm-256color", "PATH=/usr/bin:/bin" });
-    const child = try pty.spawn("/bin/sh", argv.ptr, envp.ptr, null);
+    var child = try pty.spawn("/bin/sh", argv.ptr, envp.ptr, null);
 
     var collected: std.ArrayList(u8) = .empty;
     var buffer: [1024]u8 = undefined;
@@ -319,12 +337,7 @@ test "a real command runs on a real pseudoterminal" {
 
     try testing.expect(std.mem.indexOf(u8, collected.items, "hello from the pty") != null);
     const exit = child.wait();
-    // The child may already have been reaped by `poll`, in which case the exit
-    // status is not available a second time.
-    switch (exit) {
-        .exited => |code| try testing.expectEqual(@as(u8, 3), code),
-        else => {},
-    }
+    try testing.expectEqual(@as(u8, 3), exit.exited);
 }
 
 test "a pseudoterminal reports its size back to the program" {
@@ -339,7 +352,7 @@ test "a pseudoterminal reports its size back to the program" {
 
     const argv = try buildArgv(arena, &.{ "/bin/sh", "-c", "stty size 2>/dev/null || echo unavailable" });
     const envp = try buildEnvp(arena, &.{"PATH=/usr/bin:/bin"});
-    const child = try pty.spawn("/bin/sh", argv.ptr, envp.ptr, null);
+    var child = try pty.spawn("/bin/sh", argv.ptr, envp.ptr, null);
 
     var collected: std.ArrayList(u8) = .empty;
     var buffer: [512]u8 = undefined;

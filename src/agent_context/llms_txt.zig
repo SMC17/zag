@@ -221,7 +221,7 @@ pub fn workbenchDocument() Document {
     return .{
         .title = "zag workbench",
         .summary = "A standards-native, Zig-native workbench where people and agents do engineering work in one recorded workspace.",
-        .details = "Everything that happens becomes a typed event in a hash-chained log. Agents propose typed tool requests; a local policy engine decides them. Terminology, metadata, accessibility, data quality and AI governance are enforced by the build, not described in a document.",
+        .details = "Everything that happens becomes a typed event in a hash-chained log with content-addressed command output, a read-only object audit and evidence-preserving recovery. Agents propose typed tool requests; a local policy engine decides them. Terminology, metadata, accessibility, data quality and AI governance are enforced by the build, not described in a document.",
         .sections = &.{
             .{
                 .title = "Docs",
@@ -229,6 +229,11 @@ pub fn workbenchDocument() Document {
                     .{ .title = "README", .url = "/README.md", .note = "What the workbench is and how to build it" },
                     .{ .title = "Architecture", .url = "/docs/architecture.md", .note = "The event graph, the block model and the standards control plane" },
                     .{ .title = "Standards conformance", .url = "/docs/standards-conformance.md", .note = "Which standards apply, how each is checked, and what is not established" },
+                    .{ .title = "Roadmap", .url = "/docs/roadmap.md", .note = "What is complete, what comes next and how completion will be proved" },
+                    .{ .title = "Threat model", .url = "/docs/threat-model.md", .note = "Trust boundaries, implemented controls and residual security work" },
+                    .{ .title = "Platform support", .url = "/docs/platform-support.md", .note = "Compile evidence, runtime evidence and explicit platform exclusions" },
+                    .{ .title = "Contributing", .url = "/CONTRIBUTING.md", .note = "How to prepare and check a change" },
+                    .{ .title = "Security policy", .url = "/SECURITY.md", .note = "How to report a vulnerability privately" },
                     .{ .title = "Plain language", .url = "/docs/plain-language.md", .note = "How ISO 24495 is applied to product text, and what the checker cannot decide" },
                     .{ .title = "Glossary", .url = "/docs/glossary.md", .note = "The registered concepts and their definitions" },
                 },

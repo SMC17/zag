@@ -7,7 +7,7 @@ Read the last section first if you are deciding whether to trust a claim.
 
 ## The registry
 
-`standards/registry` holds 64 entries. Each one carries:
+`standards/registry` holds 65 entries. Each one carries:
 
 - the publishing body and the identifier,
 - the edition and its status: published, draft, withdrawn, superseded, guidance
@@ -17,7 +17,7 @@ Read the last section first if you are deciding whether to trust a claim.
 - one sentence saying why it applies here.
 
 `zag standards` prints the registry. The build validates it and fails when an
-entry is inconsistent. Three checks matter most:
+entry is inconsistent. Four checks matter most:
 
 - A withdrawn or superseded edition may not be enforced. ISO/IEC 40500:2012
   adopted WCAG 2.0 and is withdrawn; the 2025 edition adopts WCAG 2.2. Both are
@@ -25,6 +25,8 @@ entry is inconsistent. Three checks matter most:
 - A draft may not be enforced as though it were published. ISO 24495-4 is a
   draft, so it is recorded as guidance.
 - An entry that says it was replaced must name the entry that replaced it.
+- An effective date must parse as an ISO 8601 instant. An invalid date is not
+  silently treated as a missing date.
 
 ## Profiles
 
@@ -46,7 +48,7 @@ runs in that gate.
 
 | Area | What is checked | Where |
 | --- | --- | --- |
-| Registry | Status, edition and enforcement are consistent | `src/standards/registry.zig` |
+| Registry | Status, edition, enforcement and effective date are consistent | `src/standards/registry.zig` |
 | Terminology | Definitions are not circular, not negative and not missing; no two concepts share a preferred term; the hierarchy has no loop | `src/knowledge/concepts.zig` |
 | Thesaurus | Broader and narrower terms line up; related terms are mutual | `src/knowledge/thesaurus.zig` |
 | Metadata | One canonical name for each field; no alias collides with another field's name; a quantity domain names a unit | `src/metadata/registry.zig` |
@@ -56,6 +58,7 @@ runs in that gate.
 | Risk | Every risk has an owner and a treatment; a treatment that claims to mitigate names a control enforced by code | `src/ai/risk.zig` |
 | Impact | Excluded uses, affected groups, a route to challenge, and a mitigation for each harm | `src/ai/impact.zig` |
 | Content | Procedures have steps; warnings state a consequence; figures have text alternatives; tables have headers | `src/content/ir.zig` |
+| Record integrity | Event hashes, append boundaries, output addresses and byte counts, recovery evidence, symbolic links and size limits | `src/events`, `src/workspace` |
 | Instruction files | Any line that tries to grant a permission is reported | `src/agent_context/agents_md.zig` |
 | Workspace knowledge | Every entry under `.workspace/` names an owner, a summary, a state and a review date, and is about a concept that exists | `src/knowledge/base.zig` |
 

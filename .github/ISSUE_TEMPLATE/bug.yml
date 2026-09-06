@@ -1,0 +1,46 @@
+name: Bug report
+description: Report behaviour that is wrong or unsafe.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not report a vulnerability here. Use the private route in SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      description: Paste the zag commit or version and Zig version.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Name the operating system, architecture and terminal or shell when relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction
+      description: Give the smallest ordered steps and sample input needed to see the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Add a short log excerpt or screenshot after removing tokens and personal data.
