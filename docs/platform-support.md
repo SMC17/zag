@@ -32,3 +32,10 @@ binary.
 control of the settings on the terminal it was launched from. Both are written
 with Linux system calls today. On another platform the calls report that they
 are unsupported, which is why the source still compiles there.
+
+The shell hooks carry the same distinction between written and verified. The
+bash hook is driven end to end by a test that starts a real bash and checks the
+blocks that come out. The zsh, fish and PowerShell hooks are written, and only
+their setup is tested, because those shells are not installed in the test
+environment. Treat their boundary marks as unverified until a test observes
+them.

@@ -11,6 +11,16 @@
 //!   * OSC 133 (`FinalTerm`), the de facto standard for semantic prompts.
 //!   * OSC 7, the working-directory URL.
 //! Anything else is passed through untouched.
+//!
+//! How far each hook is tested differs, and the difference is worth knowing
+//! before relying on one. The bash hook is driven end to end by a test that
+//! starts a real bash on a pseudoterminal, types command lines into it and
+//! checks that one block comes out for each, including a command that prints a
+//! forged finish mark. The zsh, fish and PowerShell hooks are checked only for
+//! what can be checked without those shells installed: that the right file is
+//! written, and that the shell is started so as to read it. Their marker
+//! output has not been observed. Anyone adding one of those shells to the test
+//! environment should extend the pseudoterminal test to cover it.
 
 const std = @import("std");
 
