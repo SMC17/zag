@@ -247,7 +247,10 @@ pub const Registry = struct {
                 .title = entry.stringAt("title") orelse return error.MalformedRegistry,
                 .status = Status.parse(status_text) orelse return error.MalformedRegistry,
                 .enforcement = Enforcement.parse(enforcement_text) orelse return error.MalformedRegistry,
-                .valid_from = if (entry.stringAt("valid_from")) |v| timeutil.Timestamp.parseIso(v) catch null else null,
+                .valid_from = if (entry.stringAt("valid_from")) |v|
+                    timeutil.Timestamp.parseIso(v) catch return error.MalformedRegistry
+                else
+                    null,
                 .supersedes = entry.stringAt("supersedes"),
                 .replaced_by = entry.stringAt("replaced_by"),
                 .purpose = entry.stringAt("purpose") orelse "",
@@ -343,6 +346,21 @@ test "registry loads standards from toml" {
     // successor is missing from this fragment.
     try std.testing.expect(hasIssue(issues, .dangling_replacement));
     try std.testing.expect(!hasIssue(issues, .stale_edition_enforced));
+}
+
+test "registry rejects an invalid effective date" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var registry = Registry.init(arena_state.allocator());
+
+    try std.testing.expectError(error.MalformedRegistry, registry.loadStandards(
+        \\[[standard]]
+        \\identifier = "ISO 24495-1"
+        \\title = "Plain language"
+        \\status = "published"
+        \\enforcement = "mandatory"
+        \\valid_from = "not a date"
+    ));
 }
 
 test "registry refuses to enforce withdrawn or draft editions quietly" {
