@@ -70,9 +70,21 @@ Hermes Agent, cmux, Pi, term2 and Lacy. These run a model against a repository.
 They differ in model support, editor integration, sandboxing and how much of the
 loop they automate.
 
-Almost all of them are ahead of zag on the thing they exist for: zag has no model
-provider yet. The runtime, the typed tool requests, the approval prompts and the
-policy engine are built and tested; the connection to a model is not.
+Most of them are still ahead of zag on the thing they exist for. They loop:
+they ask a model, run what it asks for, and ask again, and they have spent years
+on how that loop behaves. zag asks a model once. The connectors, the typed
+executors and the policy engine are each built and tested; nothing yet runs the
+cycle between them.
+
+What zag has instead is the boundary. Twenty-eight connectors across five wire
+formats reach hosted providers and models on this computer alike. Every one of
+them passes the policy engine three times before a byte is encoded. It asks to
+use a model at all, to reach that host, and to spend that credential.
+
+A workspace can allow models on this computer and refuse every hosted one. That
+is one rule in a file, not a setting to trust. Each of those three answers
+becomes an authorisation decision with a reason, kept with the rest of the
+session.
 
 Here is what zag adds. Permission comes from a policy, not from prompt text.
 Every action an agent asks for names one capability and one resource. A local
@@ -112,7 +124,13 @@ Built, tested and audited by the build:
   rather than repairing itself.
 - Structured history: filters for result, actor, directory, branch, repository,
   exit status and time.
-- A capability model and a local policy engine, with recorded decisions.
+- A capability model and a local policy engine, with recorded decisions. The
+  policy is written by the person, in `.workspace/policy.toml`, and is never
+  shown to a model.
+- File access held inside the workspace by the kernel, and typed executors that
+  spend the decision they were given rather than one they chose.
+- Twenty-eight model connectors across five wire formats, ten of them running on
+  this computer, each gated by the policy engine before a byte is encoded.
 - A standards control plane over sixty-five standards, with evidence.
 - Plain-language, terminology, metadata, accessibility and knowledge rules
   enforced by `zig build check`.
@@ -125,8 +143,11 @@ the terminal you have for now.
 - **No renderer.** No window, no graphics card, no font shaping, no ligatures, no
   images, no cursor styles. `zag term` needs a terminal to run inside.
 - **No tabs, splits or panes.** One shell to a session.
-- **No configuration file and no key bindings.** Nothing is customisable.
-- **No model provider.** The agent runtime has nothing to call.
+- **No key bindings, no theme file.** The policy is written in a file; nothing
+  else about the terminal is.
+- **No agent loop, and no streaming.** A model can be asked one question, and
+  the request waits for the whole answer. Nothing yet runs a model's tool calls
+  through the executors and asks it again.
 - **Linux only.** The pseudoterminal uses Linux system calls directly. macOS and
   Windows are not built.
 - **No remote attachment.** The daemon opens, verifies, reports and plans. It
@@ -148,10 +169,10 @@ The gaps above land there like this:
 
 | Gap | Where it is planned |
 | --- | --- |
-| Nothing is configurable, and the session shows no state | Priority 2 |
+| Nothing but the policy is configurable, and the session shows no state | Priority 2 |
 | One shell to a session | Priority 2 |
 | History filters walk the blocks | Priority 2 |
-| No model provider | Priority 3, after the typed executors in Priority 1 |
+| No agent loop, no streaming answers | Priority 3 |
 | No renderer, no editor surface | Priority 3 |
 | Linux only | Priority 3 |
 | No remote attachment | Priority 3 |
