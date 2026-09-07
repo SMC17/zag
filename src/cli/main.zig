@@ -42,6 +42,7 @@ const Command = enum {
     policy,
     ask,
     why,
+    secrets,
 
     fn parse(text: []const u8) ?Command {
         const table = [_]struct { name: []const u8, command: Command }{
@@ -78,6 +79,7 @@ const Command = enum {
             .{ .name = "policy", .command = .policy },
             .{ .name = "ask", .command = .ask },
             .{ .name = "why", .command = .why },
+            .{ .name = "secrets", .command = .secrets },
         };
         for (table) |entry| {
             if (std.mem.eql(u8, entry.name, text)) return entry.command;
@@ -121,6 +123,7 @@ pub const help_text =
     \\  policy              Show the policy in force, and where it was read from.
     \\  ask <question>      Ask a model, through the policy. It can use tools, one decision each.
     \\  why <file> [n]      Show what an event depended on, and what it went on to affect.
+    \\  secrets <files>     Show what would be taken out of these files before recording them.
     \\
     \\Options
     \\  --profile <name>    Use this conformance profile. The default is "default".
@@ -329,6 +332,7 @@ fn run(
         .policy => try showPolicy(arena, io, w, options),
         .ask => try askAModel(arena, io, w, options, environment),
         .why => try whyDidThatHappen(arena, io, w, options),
+        .secrets => try showSecrets(arena, io, w, options),
     };
 }
 
@@ -1224,6 +1228,10 @@ fn askAModel(
         .engine = &engine,
         .sender = http.sender(),
         .credentials = view.credentials(),
+        // Nothing that looks like a credential leaves this machine, whatever
+        // the policy allowed to leave. The two are separate questions and this
+        // is the second one.
+        .redactor = try zag.security.secrets.Redactor.init(io),
     };
 
     // The loop, not a single question. A model that can read the workspace and
@@ -1322,6 +1330,69 @@ fn askAModel(
 /// the harder question: which earlier work this rests on through the files that
 /// passed between them, even when nothing caused anything and the two happened
 /// in different sessions hours apart.
+/// Show what the redactor would take out of a file, without changing it.
+///
+/// A person deciding whether to record something, or checking why a placeholder
+/// appeared in a record they already have, needs to be able to ask this
+/// directly. Nothing here writes anything, and the secrets themselves are never
+/// printed — only what kind each one is, and where.
+fn showSecrets(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+) !u8 {
+    if (options.positional.len == 0) {
+        try w.writeAll("Name the files to check. For example: zag secrets .env deploy.log\n");
+        return 2;
+    }
+
+    // A fresh salt each run. The fingerprints tell you which findings are the
+    // same credential *within this report*, and mean nothing outside it, which
+    // is what stops a printed report becoming a guessing oracle later.
+    const redactor = try zag.security.secrets.Redactor.init(io);
+    var total: usize = 0;
+    var unreadable: usize = 0;
+
+    for (options.positional) |path| {
+        const contents = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(16 << 20)) catch {
+            try w.print("{s}: could not be read.\n", .{path});
+            unreadable += 1;
+            continue;
+        };
+        const findings = try zag.security.secrets.scan(arena, contents, .{});
+        if (findings.len == 0) {
+            try w.print("{s}: nothing found.\n", .{path});
+            continue;
+        }
+        try w.print("{s}: {d} to remove.\n", .{ path, findings.len });
+        for (findings) |finding| {
+            const line = 1 + std.mem.count(u8, contents[0..finding.start], "\n");
+            const print = redactor.fingerprint(contents[finding.start..finding.end]);
+            try w.print("  line {d}: {s} ({s}, {d} bytes) {s}\n", .{
+                line,
+                finding.kind.text(),
+                finding.kind.certainty().text(),
+                finding.len(),
+                print,
+            });
+        }
+        total += findings.len;
+    }
+
+    if (total > 0) {
+        try w.writeAll(
+            \\
+            \\Each of these would be replaced by a placeholder naming its kind, before
+            \\anything was written to the record. The value itself is not printed here
+            \\and is not written anywhere by this command.
+            \\
+        );
+    }
+    if (unreadable > 0) return 2;
+    return 0;
+}
+
 fn whyDidThatHappen(
     arena: std.mem.Allocator,
     io: std.Io,

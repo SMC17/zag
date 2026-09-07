@@ -39,6 +39,7 @@ const policy_mod = @import("policy.zig");
 const capability_mod = @import("capability.zig");
 const tools = @import("tools.zig");
 const hashing = @import("../core/hash.zig");
+const secrets = @import("../security/secrets.zig");
 
 pub const Connector = catalog.Connector;
 pub const Decision = policy_mod.Decision;
@@ -131,6 +132,10 @@ pub const Attempt = struct {
     local: bool,
     /// The decisions made, in the order they were asked for.
     decisions: []const Decision,
+    /// How many credentials were taken out of the prompt before it was
+    /// encoded. Zero is worth recording as such: it is the difference between
+    /// "nothing was found" and "nobody looked".
+    redactions: usize = 0,
     /// Set when the request never went out.
     refusedAt: ?Stage = null,
     /// The prompt's hash. The prompt itself is the caller's to store or not;
@@ -217,6 +222,16 @@ pub const Transport = struct {
     engine: *policy_mod.Engine,
     sender: Sender,
     credentials: Credentials = no_credentials,
+    /// Takes credentials out of the prompt before it is encoded.
+    ///
+    /// The three policy decisions below govern *whether* bytes may leave. This
+    /// governs *which* bytes do, which is a different question: a workspace can
+    /// legitimately allow a model to read a file and still not want the AWS key
+    /// that happened to be inside it sent to a third party.
+    ///
+    /// Optional so a wire-format test need not build one. Every path that
+    /// reaches a real provider sets it.
+    redactor: ?secrets.Redactor = null,
 
     /// Decide, then send.
     ///
@@ -284,8 +299,16 @@ pub const Transport = struct {
             };
         }
 
+        // Last chance. After this the bytes are somebody else's.
+        //
+        // The redaction happens before the prompt is hashed, so the hash in the
+        // record is the hash of what actually left rather than of a draft that
+        // never existed anywhere.
+        const outgoing = try self.withoutCredentials(request, attempt);
+        attempt.promptHash = hashPrompt(outgoing);
+
         const wire = connector.wire();
-        const http = wire.encode(self.arena, connector.endpoint(api_key), request) catch {
+        const http = wire.encode(self.arena, connector.endpoint(api_key), outgoing) catch {
             return error.SendFailed;
         };
         const response = self.sender.send(self.arena, http) catch |err| {
@@ -304,6 +327,53 @@ pub const Transport = struct {
         };
         attempt.completion = completion;
         return completion;
+    }
+
+    /// A copy of `request` with credentials taken out of every text the model
+    /// would see, and `attempt.redactions` set to how many were removed.
+    ///
+    /// Tool arguments and tool results are rewritten as well as the prompt: a
+    /// file the model asked to read comes back through `tool_result`, and that
+    /// is the likeliest way a key gets into a conversation in the first place.
+    fn withoutCredentials(self: Transport, request: provider.Request, attempt: *Attempt) Error!provider.Request {
+        const redactor = self.redactor orelse return request;
+        var removed: usize = 0;
+
+        const rewrite = struct {
+            fn one(r: secrets.Redactor, arena: std.mem.Allocator, text: []const u8, total: *usize) ![]const u8 {
+                const result = try r.rewrite(arena, text);
+                total.* += result.findings.len;
+                return result.text;
+            }
+        }.one;
+
+        var messages = self.arena.alloc(provider.Message, request.messages.len) catch return error.SendFailed;
+        for (request.messages, 0..) |message, index| {
+            var blocks = self.arena.alloc(provider.Block, message.blocks.len) catch return error.SendFailed;
+            for (message.blocks, 0..) |block, at| {
+                blocks[at] = switch (block) {
+                    .text => |t| .{ .text = rewrite(redactor, self.arena, t, &removed) catch return error.SendFailed },
+                    .thinking => |t| .{ .thinking = rewrite(redactor, self.arena, t, &removed) catch return error.SendFailed },
+                    .tool_use => |t| .{ .tool_use = .{
+                        .id = t.id,
+                        .name = t.name,
+                        .argumentsJson = rewrite(redactor, self.arena, t.argumentsJson, &removed) catch return error.SendFailed,
+                    } },
+                    .tool_result => |t| .{ .tool_result = .{
+                        .toolUseId = t.toolUseId,
+                        .content = rewrite(redactor, self.arena, t.content, &removed) catch return error.SendFailed,
+                        .isError = t.isError,
+                    } },
+                };
+            }
+            messages[index] = .{ .role = message.role, .blocks = blocks };
+        }
+
+        var copy = request;
+        copy.system = rewrite(redactor, self.arena, request.system, &removed) catch return error.SendFailed;
+        copy.messages = messages;
+        attempt.redactions = removed;
+        return copy;
     }
 
     /// The typed request this attempt corresponds to, for the tool log. It is
@@ -817,4 +887,55 @@ test "an attempt describes itself in words a person can read" {
     try testing.expectEqual(Capability.@"model.infer", request.capability());
     try testing.expectEqual(Capability.@"network.connect", request.additionalCapability().?);
     try testing.expectEqualStrings("anthropic", request.infer.provider);
+}
+
+test "a credential in the prompt never reaches the wire" {
+    // Everything is allowed here, so nothing but the redaction can be the
+    // reason a key is missing from the body.
+    var fixture = try Fixture.init(&allow_everything, &.{.{ .status = 200, .body = answer }});
+    defer fixture.deinit();
+
+    // The likeliest route by which a key reaches a provider is not a person
+    // typing it. It is a file the model asked to read coming back as a tool
+    // result, so that path is exercised here alongside the prompt itself.
+    const request: provider.Request = .{
+        .model = "claude-opus-5",
+        .system = "The operator key is sk-ant-api03-" ++ "v" ** 40,
+        .messages = &.{
+            .{ .role = .user, .blocks = &.{.{ .text = "here is my token ghp_" ++ "u" ** 36 }} },
+            .{ .role = .user, .blocks = &.{.{ .tool_result = .{
+                .toolUseId = "call_1",
+                .content = "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n",
+            } }} },
+        },
+    };
+
+    var transport = fixture.transport(with_key);
+    transport.redactor = secrets.Redactor.withSalt([_]u8{7} ** 16);
+
+    var attempt: Attempt = undefined;
+    const connector = catalog.find("anthropic").?;
+    _ = try transport.send(connector, request, fixture.context(), &attempt);
+
+    try testing.expectEqual(@as(usize, 1), fixture.recorded.seen.items.len);
+    const body = fixture.recorded.seen.items[0].body;
+
+    try testing.expect(std.mem.indexOf(u8, body, "sk-ant-api03") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "ghp_") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "AKIAIOSFODNN7EXAMPLE") == null);
+    try testing.expectEqual(@as(usize, 3), attempt.redactions);
+
+    // The words around each key survive, so the model can still be told what it
+    // is looking at and why the value is not there.
+    try testing.expect(std.mem.indexOf(u8, body, "here is my token") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "AWS_ACCESS_KEY_ID=") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "redacted") != null);
+
+    // The recorded hash is the hash of what left, not of a draft that never
+    // existed anywhere. Without this the record would point at a prompt nobody
+    // ever sent.
+    var ignored: Attempt = attempt;
+    const outgoing = try transport.withoutCredentials(request, &ignored);
+    try testing.expect(attempt.promptHash.eql(hashPrompt(outgoing)));
+    try testing.expect(!attempt.promptHash.eql(hashPrompt(request)));
 }

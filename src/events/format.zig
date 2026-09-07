@@ -53,19 +53,19 @@ pub const vectors = [_]Vector{
     .{
         .describes = "a session opening: optionals at null, defaults written out",
         .line =
-        \\{"id":"evt_01M16HNP3VTQEZCJATF659CD62","sequence":1,"at":"2026-08-29T10:40:00.123456789Z","actor":{"id":"act_01M16HNP00TQEZCJATF659CD62","kind":"person","label":"you"},"causedBy":null,"correlation":null,"payload":{"session_opened":{"session":"ses_01M16HNP01KW76FPRZ4HN6TQ1D","workingDirectory":"/repo","shell":"/bin/sh","columns":80,"rows":24,"repository":null,"branch":null,"worktree":null}},"contentHash":"b3:1d1cc14bf8dea5198705781508ecd52e541b556769df3a1b96a81ae874d6b069","chainHash":"b3:da9d3690614de05e0dca077479c2e608dfe26561a4c99d3c6061591fe1d6aadd"}
+        \\{"id":"evt_01M16HNP3VKF106VVZT32WZ3F0","sequence":1,"at":"2026-08-29T10:40:00.123456789Z","actor":{"id":"act_01M16HNP00TQEZCJATF659CD62","kind":"person","label":"you"},"causedBy":null,"correlation":null,"payload":{"session_opened":{"session":"ses_01M16HNP01KW76FPRZ4HN6TQ1D","workingDirectory":"/repo","shell":"/bin/sh","columns":80,"rows":24,"repository":null,"branch":null,"worktree":null}},"contentHash":"b3:904872c03590f30172a3e2bb583bfaee1c561c8f49a527fc97fe7666dea4ba8b","chainHash":"b3:862ed628dc1dda6a94ba8939bf10cf1e23add5e5e2e6bc06fcbd0da6a7ee25a5"}
         ,
     },
     .{
         .describes = "a command submitted: a cause, a boolean, text with spaces",
         .line =
-        \\{"id":"evt_01M16HNPZ8KW76FPRZ4HN6TQ1D","sequence":2,"at":"2026-08-29T10:40:01.000000001Z","actor":{"id":"act_01M16HNP00TQEZCJATF659CD62","kind":"person","label":"you"},"causedBy":"evt_01M16HNP3VTQEZCJATF659CD62","correlation":null,"payload":{"command_submitted":{"block":"blk_01M16HNP02V3CWC3WY02PGW2MV","session":"ses_01M16HNP01KW76FPRZ4HN6TQ1D","commandText":"zig build test","workingDirectory":"/repo","boundaryFromShell":true}},"contentHash":"b3:81c85e9032caaf95ea00f3290c830bf429bde3b28152623f329644edb76668e8","chainHash":"b3:e3532fa8d6809f221f40a32142da732ef668e40ce8d08a015668d0b4133196a6"}
+        \\{"id":"evt_01M16HNPZ843TTMNTQFPHHKNJP","sequence":2,"at":"2026-08-29T10:40:01.000000001Z","actor":{"id":"act_01M16HNP00TQEZCJATF659CD62","kind":"person","label":"you"},"causedBy":"evt_01M16HNP3VTQEZCJATF659CD62","correlation":null,"payload":{"command_submitted":{"block":"blk_01M16HNP02V3CWC3WY02PGW2MV","session":"ses_01M16HNP01KW76FPRZ4HN6TQ1D","commandText":"zig build test","workingDirectory":"/repo","boundaryFromShell":true,"redactions":0}},"contentHash":"b3:9f1c26430aa5e559309071d6c8738cfc83d86d35f3ada4a29d031c333992f11c","chainHash":"b3:24aeafc1890992e48c5a7549582297ccc4531a0d3b3f526f71b58e3da560fb60"}
         ,
     },
     .{
         .describes = "a command finishing: a correlation, a duration to the nanosecond, a non-zero status",
         .line =
-        \\{"id":"evt_01M16HNRXQV3CWC3WY02PGW2MV","sequence":3,"at":"2026-08-29T10:40:02.999999999Z","actor":{"id":"act_01M16HNP00TQEZCJATF659CD62","kind":"person","label":"you"},"causedBy":"evt_01M16HNPZ8KW76FPRZ4HN6TQ1D","correlation":"evt_01M16HNP3VTQEZCJATF659CD62","payload":{"command_finished":{"block":"blk_01M16HNP02V3CWC3WY02PGW2MV","session":"ses_01M16HNP01KW76FPRZ4HN6TQ1D","exitStatus":3,"duration":"PT1.005000123S","signal":null}},"contentHash":"b3:d7cc09ee8e0022a78d7181c973fdbf3f50927ae5743f3f33cec5023c8667ef2c","chainHash":"b3:e38a2588a5d5e2707399e71430e0a95f73ff88273f795ab4ad2f4a51e5fcb2cb"}
+        \\{"id":"evt_01M16HNRXQMHQHH1JB313JYH93","sequence":3,"at":"2026-08-29T10:40:02.999999999Z","actor":{"id":"act_01M16HNP00TQEZCJATF659CD62","kind":"person","label":"you"},"causedBy":"evt_01M16HNPZ8KW76FPRZ4HN6TQ1D","correlation":"evt_01M16HNP3VTQEZCJATF659CD62","payload":{"command_finished":{"block":"blk_01M16HNP02V3CWC3WY02PGW2MV","session":"ses_01M16HNP01KW76FPRZ4HN6TQ1D","exitStatus":3,"duration":"PT1.005000123S","signal":null}},"contentHash":"b3:8e541b7240e4852156dc296fe9d0e911646640dbe7ec0db04e83e10d99709624","chainHash":"b3:314011de9fd07798c77068a6e3422e3cdbf68eab6a4e280d9e2abfdbf45f5144"}
         ,
     },
 };
