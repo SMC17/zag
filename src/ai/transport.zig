@@ -41,6 +41,7 @@ const tools = @import("tools.zig");
 const hashing = @import("../core/hash.zig");
 const secrets = @import("../security/secrets.zig");
 const netguard = @import("../security/netguard.zig");
+const stream_mod = @import("stream.zig");
 
 pub const Connector = catalog.Connector;
 pub const Decision = policy_mod.Decision;
@@ -62,6 +63,8 @@ pub const Error = error{
     ProviderRejected,
     /// The request could not be sent at all.
     SendFailed,
+    /// A streaming answer was asked for and this transport cannot read one.
+    StreamingUnavailable,
 } || std.mem.Allocator.Error;
 
 /// What a person is told when a request does not go out. None of these mention
@@ -74,6 +77,7 @@ pub fn refusalText(err: Error) []const u8 {
         error.AddressRefused => "The provider's name does not resolve to where it is supposed to go.",
         error.ProviderRejected => "The provider refused the request.",
         error.SendFailed => "The request could not be sent.",
+        error.StreamingUnavailable => "This build cannot read that provider's answer as it arrives.",
         error.OutOfMemory => "There was not enough memory to send this.",
     };
 }
@@ -233,6 +237,90 @@ pub const no_credentials: Credentials = .{
     }.lookup,
 };
 
+/// Where the bytes of a streamed answer go as they arrive.
+///
+/// A `std.Io.Writer` whose drain hands every byte straight to a stream reader
+/// and keeps nothing. That is what makes it a stream rather than a slower way
+/// of buffering: the HTTP client writes the response body into this, and this
+/// forwards it, so no complete copy of the answer exists anywhere.
+///
+/// The deltas are passed to `on_delta` as they are decoded, which is what lets
+/// a caller print an answer while the model is still writing it.
+pub const StreamSink = struct {
+    writer: std.Io.Writer,
+    reader: *stream_mod.Reader,
+    on_delta: ?*const fn (context: ?*anyopaque, delta: stream_mod.Delta) anyerror!void = null,
+    context: ?*anyopaque = null,
+    /// The first failure from the callback or the decoder. A drain cannot
+    /// return a typed error, so it is kept here and re-raised by the caller.
+    problem: ?anyerror = null,
+
+    /// The sink needs no buffer of its own: everything it is given is forwarded
+    /// immediately, so there is nothing to hold.
+    pub fn init(reader: *stream_mod.Reader) StreamSink {
+        return .{
+            .writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
+            .reader = reader,
+        };
+    }
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *StreamSink = @alignCast(@fieldParentPtr("writer", w));
+        var written: usize = 0;
+        for (data, 0..) |slice, index| {
+            // The last slice is repeated `splat` times. Almost never more than
+            // once here, and getting it wrong would silently drop bytes.
+            const times = if (index == data.len - 1) splat else 1;
+            var remaining = times;
+            while (remaining > 0) : (remaining -= 1) {
+                self.take(slice) catch |err| {
+                    if (self.problem == null) self.problem = err;
+                    return error.WriteFailed;
+                };
+                written += slice.len;
+            }
+        }
+        return written;
+    }
+
+    fn take(self: *StreamSink, chunk: []const u8) !void {
+        for (try self.reader.feed(chunk)) |delta| {
+            if (self.on_delta) |notify| try notify(self.context, delta);
+        }
+    }
+
+    /// Tell the reader the connection closed, and deliver what was left.
+    pub fn finish(self: *StreamSink) !void {
+        for (try self.reader.finish()) |delta| {
+            if (self.on_delta) |notify| try notify(self.context, delta);
+        }
+    }
+};
+
+/// Sends a request and writes the answer into a sink as it arrives.
+///
+/// Separate from `Sender` because the two return different things: one returns
+/// a body, and one returns only a status, because the body went somewhere else
+/// while it was being read.
+pub const StreamingSender = struct {
+    context: *anyopaque,
+    sendFn: *const fn (
+        context: *anyopaque,
+        arena: std.mem.Allocator,
+        request: provider.HttpRequest,
+        sink: *StreamSink,
+    ) anyerror!u16,
+
+    pub fn send(
+        self: StreamingSender,
+        arena: std.mem.Allocator,
+        request: provider.HttpRequest,
+        sink: *StreamSink,
+    ) anyerror!u16 {
+        return self.sendFn(self.context, arena, request, sink);
+    }
+};
+
 pub const Transport = struct {
     arena: std.mem.Allocator,
     engine: *policy_mod.Engine,
@@ -248,6 +336,11 @@ pub const Transport = struct {
     /// Optional so a wire-format test need not build one. Every path that
     /// reaches a real provider sets it.
     redactor: ?secrets.Redactor = null,
+    /// Sends and reads the answer as it arrives. Unset means this transport
+    /// can only wait for whole replies, and `sendStreaming` says so rather
+    /// than quietly falling back to blocking — a caller that asked to watch an
+    /// answer being written wants to know it is not going to happen.
+    streaming: ?StreamingSender = null,
     /// Checks where the provider's name actually resolves to, before anything
     /// connects.
     ///
@@ -257,11 +350,7 @@ pub const Transport = struct {
     /// reason the redactor is, and set on every path that reaches a provider.
     guard: ?netguard.Guard = null,
 
-    /// Decide, then send.
-    ///
-    /// Every path through this function that reaches the sender has three
-    /// allowed decisions behind it, and every path that does not returns them
-    /// anyway through `attempt`.
+    /// Decide, then send, then wait for the whole answer.
     pub fn send(
         self: Transport,
         connector: Connector,
@@ -269,6 +358,93 @@ pub const Transport = struct {
         context: policy_mod.Context,
         attempt: *Attempt,
     ) Error!provider.Completion {
+        const http = try self.gate(connector, request, context, attempt);
+        const response = self.sender.send(self.arena, http) catch |err| {
+            attempt.sendProblem = sendProblemText(err, connector.locality == .local);
+            return error.SendFailed;
+        };
+        attempt.status = response.status;
+
+        if (!response.ok()) {
+            attempt.providerError = messageIn(response.body);
+            return error.ProviderRejected;
+        }
+
+        const completion = connector.wire().decode(self.arena, response.body) catch {
+            return error.ProviderRejected;
+        };
+        attempt.completion = completion;
+        return completion;
+    }
+
+    /// Decide, then send, and hand back each piece of the answer as it lands.
+    ///
+    /// The same gate as `send`: the four decisions and the redaction are one
+    /// function, called by both, so a caller cannot reach a provider by
+    /// choosing the streaming door. A transport with no streaming sender
+    /// refuses rather than quietly waiting for the whole reply, because a
+    /// caller that asked to watch an answer being written should be told when
+    /// that is not going to happen.
+    pub fn sendStreaming(
+        self: Transport,
+        connector: Connector,
+        request: provider.Request,
+        context: policy_mod.Context,
+        attempt: *Attempt,
+        on_delta: ?*const fn (context: ?*anyopaque, delta: stream_mod.Delta) anyerror!void,
+        on_delta_context: ?*anyopaque,
+    ) Error!provider.Completion {
+        const streaming = self.streaming orelse return error.StreamingUnavailable;
+
+        var asked = request;
+        asked.stream = true;
+        const http = try self.gate(connector, asked, context, attempt);
+
+        var reader = stream_mod.Reader.init(self.arena, connector.format);
+        var sink = StreamSink.init(&reader);
+        sink.on_delta = on_delta;
+        sink.context = on_delta_context;
+
+        const status = streaming.send(self.arena, http, &sink) catch |err| {
+            // A failure inside the sink is the real cause and is more use than
+            // "the write failed", which is all the client can report.
+            const cause = sink.problem orelse err;
+            attempt.sendProblem = sendProblemText(cause, connector.locality == .local);
+            return error.SendFailed;
+        };
+        attempt.status = status;
+        sink.finish() catch {
+            attempt.sendProblem = "The answer stopped part way through and could not be read to the end.";
+            return error.SendFailed;
+        };
+
+        if (status < 200 or status >= 300) {
+            attempt.providerError = "The provider refused the request.";
+            return error.ProviderRejected;
+        }
+        if (reader.assembler.failed()) {
+            // The provider said what went wrong mid-stream, in its own words.
+            attempt.providerError = messageIn(reader.assembler.problem);
+            return error.ProviderRejected;
+        }
+
+        const completion = reader.completion() catch return error.ProviderRejected;
+        attempt.completion = completion;
+        return completion;
+    }
+
+    /// Every decision, in order, ending in the bytes that are ready to go out.
+    ///
+    /// One function rather than two so that a second way of sending cannot be
+    /// added with one of the decisions missing, which is how a gate stops being
+    /// a gate.
+    fn gate(
+        self: Transport,
+        connector: Connector,
+        request: provider.Request,
+        context: policy_mod.Context,
+        attempt: *Attempt,
+    ) Error!provider.HttpRequest {
         var decisions: std.ArrayList(Decision) = .empty;
         const key_variable = connector.keyVariable;
 
@@ -358,26 +534,8 @@ pub const Transport = struct {
         const outgoing = try self.withoutCredentials(request, attempt);
         attempt.promptHash = hashPrompt(outgoing);
 
-        const wire = connector.wire();
-        const http = wire.encode(self.arena, connector.endpoint(api_key), outgoing) catch {
-            return error.SendFailed;
-        };
-        const response = self.sender.send(self.arena, http) catch |err| {
-            attempt.sendProblem = sendProblemText(err, connector.locality == .local);
-            return error.SendFailed;
-        };
-        attempt.status = response.status;
-
-        if (!response.ok()) {
-            attempt.providerError = messageIn(response.body);
-            return error.ProviderRejected;
-        }
-
-        const completion = wire.decode(self.arena, response.body) catch {
-            return error.ProviderRejected;
-        };
-        attempt.completion = completion;
-        return completion;
+        return connector.wire().encode(self.arena, connector.endpoint(api_key), outgoing) catch
+            error.SendFailed;
     }
 
     /// A copy of `request` with credentials taken out of every text the model
@@ -557,6 +715,46 @@ pub const Http = struct {
         return .{ .context = self, .sendFn = sendHttp };
     }
 
+    /// The same client, reading the answer as it arrives.
+    pub fn streamingSender(self: *Http) StreamingSender {
+        return .{ .context = self, .sendFn = streamHttp };
+    }
+
+    fn streamHttp(
+        context: *anyopaque,
+        arena: std.mem.Allocator,
+        request: provider.HttpRequest,
+        sink: *StreamSink,
+    ) anyerror!u16 {
+        const self: *Http = @ptrCast(@alignCast(context));
+        var extra: std.ArrayList(std.http.Header) = .empty;
+        var content_type: []const u8 = "application/json";
+        for (request.headers) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "content-type")) {
+                content_type = header.value;
+                continue;
+            }
+            try extra.append(arena, .{ .name = header.name, .value = header.value });
+        }
+
+        // The response body is written straight into the sink, which forwards
+        // every byte to the stream reader and keeps none. No complete copy of
+        // the answer exists anywhere, which is the difference between this and
+        // a slower way of buffering.
+        const result = try self.client.fetch(.{
+            .location = .{ .url = request.url },
+            .method = .POST,
+            .payload = request.body,
+            .headers = .{ .content_type = .{ .override = content_type } },
+            .extra_headers = extra.items,
+            // A credential is in those headers, so a redirect is never
+            // followed here either.
+            .redirect_behavior = .unhandled,
+            .response_writer = &sink.writer,
+        });
+        return @intFromEnum(result.status);
+    }
+
     fn sendHttp(
         context: *anyopaque,
         arena: std.mem.Allocator,
@@ -600,6 +798,12 @@ pub const Recorded = struct {
     /// Every request that was handed over, in order. A test asserts on this to
     /// prove that a refused request never reached here at all.
     seen: std.ArrayList(provider.HttpRequest) = .empty,
+    /// How many bytes a recorded streaming answer is handed over at a time.
+    ///
+    /// One byte by default, because that is the division that finds the bugs.
+    /// A test that hands a whole stream over in one write is testing a case
+    /// that does not happen on a real network.
+    chunk_size: usize = 1,
     arena: std.mem.Allocator,
     index: usize = 0,
 
@@ -617,6 +821,32 @@ pub const Recorded = struct {
         if (self.index >= self.responses.len) return error.NoRecordedResponse;
         defer self.index += 1;
         return self.responses[self.index];
+    }
+
+    /// The same recorded answers, delivered the way a network delivers them.
+    pub fn streamingSender(self: *Recorded) StreamingSender {
+        return .{ .context = self, .sendFn = streamRecorded };
+    }
+
+    fn streamRecorded(
+        context: *anyopaque,
+        _: std.mem.Allocator,
+        request: provider.HttpRequest,
+        sink: *StreamSink,
+    ) anyerror!u16 {
+        const self: *Recorded = @ptrCast(@alignCast(context));
+        try self.seen.append(self.arena, request);
+        if (self.index >= self.responses.len) return error.NoRecordedResponse;
+        defer self.index += 1;
+        const response = self.responses[self.index];
+
+        var at: usize = 0;
+        while (at < response.body.len) {
+            const end = @min(at + @max(self.chunk_size, 1), response.body.len);
+            try sink.writer.writeAll(response.body[at..end]);
+            at = end;
+        }
+        return response.status;
     }
 };
 
@@ -1101,3 +1331,160 @@ test "every stage of the gate says what it is in words" {
         }
     }
 }
+
+test "a streamed answer passes the same gate as a whole one" {
+    // A second way of sending is how a gate stops being a gate. The decisions
+    // live in one function that both doors call, and this is the test that says
+    // so: a policy that refuses the model refuses it whichever way it is asked.
+    const refuse_infer = [_]policy_mod.Rule{.{
+        .id = "no-models",
+        .capabilities = &.{.@"model.infer"},
+        .effect = .deny,
+        .reason = "This workspace does not use models.",
+    }};
+    var fixture = try Fixture.init(&refuse_infer, &.{.{ .status = 200, .body = anthropic_sse }});
+    defer fixture.deinit();
+
+    var transport = fixture.transport(with_key);
+    transport.streaming = fixture.recorded.streamingSender();
+
+    var attempt: Attempt = undefined;
+    const connector = catalog.find("anthropic").?;
+    try testing.expectError(
+        error.NotPermitted,
+        transport.sendStreaming(connector, ask(), fixture.context(), &attempt, null, null),
+    );
+    try testing.expectEqual(Stage.infer, attempt.refusedAt.?);
+    // Nothing reached the sender. A refusal that still made the request is not
+    // a refusal.
+    try testing.expectEqual(@as(usize, 0), fixture.recorded.seen.items.len);
+}
+
+test "a credential in a streamed prompt is redacted, same as a blocking one" {
+    var fixture = try Fixture.init(&allow_everything, &.{.{ .status = 200, .body = anthropic_sse }});
+    defer fixture.deinit();
+
+    var transport = fixture.transport(with_key);
+    transport.streaming = fixture.recorded.streamingSender();
+    transport.redactor = secrets.Redactor.withSalt([_]u8{9} ** 16);
+
+    const request: provider.Request = .{
+        .model = "claude-opus-5",
+        .messages = &.{.{ .role = .user, .blocks = &.{.{ .text = "token ghp_" ++ "s" ** 36 }} }},
+    };
+
+    var attempt: Attempt = undefined;
+    _ = try transport.sendStreaming(catalog.find("anthropic").?, request, fixture.context(), &attempt, null, null);
+
+    const body = fixture.recorded.seen.items[0].body;
+    try testing.expect(std.mem.indexOf(u8, body, "ghp_") == null);
+    try testing.expectEqual(@as(usize, 1), attempt.redactions);
+    // And the request asked for a stream, which the caller never had to set.
+    try testing.expect(std.mem.indexOf(u8, body, "\"stream\":true") != null);
+}
+
+test "a streamed answer arrives in pieces and ends up whole" {
+    var fixture = try Fixture.init(&allow_everything, &.{.{ .status = 200, .body = anthropic_sse }});
+    defer fixture.deinit();
+
+    var transport = fixture.transport(with_key);
+    transport.streaming = fixture.recorded.streamingSender();
+    // One byte at a time, which is the division that finds the bugs.
+    fixture.recorded.chunk_size = 1;
+
+    // What a caller does with a stream: watch it arrive.
+    const Watcher = struct {
+        var seen: usize = 0;
+        var text: std.ArrayList(u8) = .empty;
+        var arena: std.mem.Allocator = undefined;
+
+        fn onDelta(_: ?*anyopaque, delta: stream_mod.Delta) anyerror!void {
+            seen += 1;
+            switch (delta) {
+                .text => |t| try text.appendSlice(arena, t.chunk),
+                else => {},
+            }
+        }
+    };
+    Watcher.seen = 0;
+    Watcher.text = .empty;
+    Watcher.arena = fixture.arena();
+
+    var attempt: Attempt = undefined;
+    const streamed = try transport.sendStreaming(
+        catalog.find("anthropic").?,
+        ask(),
+        fixture.context(),
+        &attempt,
+        Watcher.onDelta,
+        null,
+    );
+
+    // The caller saw the answer being written, in more than one piece. That is
+    // the whole feature: without it there is one delta at the end and this is
+    // a slower way of blocking.
+    try testing.expect(Watcher.seen > 3);
+    try testing.expectEqualStrings("Four.", Watcher.text.items);
+
+    // And the completion is the one the blocking path would have returned.
+    try testing.expectEqualStrings("Four.", try streamed.text(fixture.arena()));
+    try testing.expectEqualStrings("claude-opus-5", streamed.model);
+    try testing.expectEqual(provider.StopReason.end_turn, streamed.stopReason);
+    try testing.expectEqual(@as(u64, 10), streamed.usage.inputTokens);
+    try testing.expectEqual(@as(u64, 2), streamed.usage.outputTokens);
+    try testing.expectEqual(@as(u16, 200), attempt.status.?);
+}
+
+test "a transport with no streaming sender says so rather than blocking" {
+    var fixture = try Fixture.init(&allow_everything, &.{.{ .status = 200, .body = answer }});
+    defer fixture.deinit();
+
+    // Quietly waiting for the whole reply would look like the feature working
+    // badly rather than not being there.
+    const transport = fixture.transport(with_key);
+    var attempt: Attempt = undefined;
+    try testing.expectError(
+        error.StreamingUnavailable,
+        transport.sendStreaming(catalog.find("anthropic").?, ask(), fixture.context(), &attempt, null, null),
+    );
+}
+
+test "a provider that fails mid-stream is reported with its own words" {
+    const broken =
+        "event: content_block_delta\n" ++
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Part\"}}\n\n" ++
+        "event: error\n" ++
+        "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n";
+    var fixture = try Fixture.init(&allow_everything, &.{.{ .status = 200, .body = broken }});
+    defer fixture.deinit();
+
+    var transport = fixture.transport(with_key);
+    transport.streaming = fixture.recorded.streamingSender();
+
+    var attempt: Attempt = undefined;
+    // A 200 that turns into an error part way through. Returning the truncated
+    // answer as if it were complete is the failure worth avoiding.
+    try testing.expectError(
+        error.ProviderRejected,
+        transport.sendStreaming(catalog.find("anthropic").?, ask(), fixture.context(), &attempt, null, null),
+    );
+    try testing.expect(std.mem.indexOf(u8, attempt.providerError, "Overloaded") != null);
+}
+
+/// A short Anthropic stream, as the wire carries it.
+const anthropic_sse =
+    "event: message_start\n" ++
+    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-opus-5\",\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n" ++
+    "event: content_block_start\n" ++
+    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" ++
+    ": ping\n\n" ++
+    "event: content_block_delta\n" ++
+    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Fo\"}}\n\n" ++
+    "event: content_block_delta\n" ++
+    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ur.\"}}\n\n" ++
+    "event: content_block_stop\n" ++
+    "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" ++
+    "event: message_delta\n" ++
+    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}\n\n" ++
+    "event: message_stop\n" ++
+    "data: {\"type\":\"message_stop\"}\n\n";

@@ -137,6 +137,7 @@ pub const help_text =
     \\  --model <name>      Which model to ask for.
     \\  --turns <count>     How many times a model may be asked in one run.
     \\  --raw               Start the shell with no added prompt marks.
+    \\  --stream            Print a model's answer as it arrives, not when it finishes.
     \\  --approve-truncate  Apply the recovery plan after preserving the original log.
     \\
     \\Read more in README.md, or run "zag doctor" to see this build.
@@ -153,6 +154,8 @@ const Options = struct {
     root: []const u8 = ".",
     /// Run the shell exactly as it is, with no generated init file.
     raw: bool = false,
+    /// Print a model's answer as it arrives rather than when it is finished.
+    stream: bool = false,
     approve_truncate: bool = false,
     provider: []const u8 = "",
     model: []const u8 = "",
@@ -189,6 +192,10 @@ fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
         }
         if (std.mem.eql(u8, arg, "--raw")) {
             options.raw = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--stream")) {
+            options.stream = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--approve-truncate")) {
@@ -1231,6 +1238,7 @@ fn askAModel(
         // Nothing that looks like a credential leaves this machine, whatever
         // the policy allowed to leave. The two are separate questions and this
         // is the second one.
+        .streaming = http.streamingSender(),
         .redactor = try zag.security.secrets.Redactor.init(io),
         // And nothing connects to a host whose name does not resolve to where
         // the connector said it lives.
@@ -1244,6 +1252,17 @@ fn askAModel(
         .root = options.root,
         .io = io,
     });
+    // Printing straight to the writer as the answer arrives. The writer is
+    // flushed on each piece, because a buffered stream shown at the end is a
+    // slower way of not streaming.
+    const Live = struct {
+        fn write(target: ?*anyopaque, chunk: []const u8) anyerror!void {
+            const out: *std.Io.Writer = @ptrCast(@alignCast(target orelse return));
+            try out.writeAll(chunk);
+            try out.flush();
+        }
+    };
+
     const runner: zag.ai.loop.Runner = .{
         .arena = arena,
         .transport = transport,
@@ -1251,6 +1270,10 @@ fn askAModel(
         .engine = &engine,
         .clock = monotonic(io),
         .journal = recorder.journal(),
+        .watch = if (options.stream)
+            .{ .context = w, .textFn = Live.write }
+        else
+            null,
     };
 
     var budget: zag.ai.loop.Budget = .{};
@@ -1275,7 +1298,10 @@ fn askAModel(
         return 1;
     };
 
-    if (transcript.answer.len > 0) try w.print("{s}\n\n", .{transcript.answer});
+    // Already on screen when it was watched, so printing it again would show
+    // the answer twice.
+    if (!options.stream and transcript.answer.len > 0) try w.print("{s}\n\n", .{transcript.answer});
+    if (options.stream and transcript.answer.len > 0) try w.writeAll("\n\n");
 
     for (transcript.turns) |turn| {
         for (turn.steps) |step| {
