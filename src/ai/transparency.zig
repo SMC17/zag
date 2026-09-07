@@ -215,7 +215,7 @@ test "unmet obligations are listed rather than hidden" {
     const arena = arena_state.allocator();
 
     // Every obligation is met today, and each one says where. When one is not,
-    // it appears here with its gap, and `zag check` counts it as a problem —
+    // it appears here with its gap, and `zag-audit check` counts it as a problem —
     // it used to print the gap and leave the count at zero, so the build stayed
     // green while listing what it had not done.
     const unmet = try unmetObligations(arena);

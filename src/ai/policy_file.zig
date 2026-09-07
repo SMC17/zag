@@ -452,3 +452,128 @@ test "the description reads as sentences, and never as capability names" {
     try testing.expect(std.mem.indexOf(u8, text, "network.connect") == null);
     try testing.expect(std.mem.indexOf(u8, text, "model.infer") == null);
 }
+
+/// A starter policy, written for a person who has just set an API key and
+/// wants to ask a model a question.
+///
+/// This exists because the format defeated the person who wrote the parser. The
+/// first attempt at a policy file here was `effect = "allow"` with a
+/// `capabilities` list — a reasonable guess, and not the format. `zag policy`
+/// said exactly what was wrong, which was the difference between a puzzle and a
+/// dead end, but a good error message is a worse answer than a file that is
+/// already correct.
+///
+/// It is deliberately not the most permissive thing that works. It allows one
+/// provider by name and denies reading a credential's value, so the first
+/// policy somebody owns is one that already says no to something. A starter
+/// file that allowed everything would teach that the policy is a formality to
+/// be widened until the error stops.
+pub fn writeStarter(w: *std.Io.Writer, host: []const u8) std.Io.Writer.Error!void {
+    try w.print(
+        \\# What this workspace allows. Anything not allowed here is refused.
+        \\#
+        \\# Each [[rule]] names ONE effect — allow, ask or deny — and lists the
+        \\# capabilities it applies to. A rule with no effect does nothing, and
+        \\# this file is refused as a whole if any rule is unusable: nothing is
+        \\# granted by being written badly.
+        \\#
+        \\# Run "zag policy" to see what is in force, and "zag doctor" to see
+        \\# whether anything is missing.
+        \\
+        \\[[rule]]
+        \\id = "ask-a-model"
+        \\allow = ["model.infer"]
+        \\because = "This workspace may ask a model questions."
+        \\
+        \\[[rule]]
+        \\id = "reach-the-provider"
+        \\allow = ["network.connect"]
+        \\hosts = ["{s}"]
+        \\because = "The model runs there, and nowhere else may be reached."
+        \\
+        \\[[rule]]
+        \\id = "spend-the-key"
+        \\allow = ["credentials.use"]
+        \\because = "A request may be signed with a saved key."
+        \\
+        \\[[rule]]
+        \\id = "never-read-the-key"
+        \\deny = ["credentials.read"]
+        \\because = "Nothing needs the key's value, so nothing may see it."
+        \\
+        \\[[rule]]
+        \\id = "read-this-workspace"
+        \\allow = ["fs.read"]
+        \\because = "A model may read the files in the workspace it was asked about."
+        \\
+        \\# Uncomment to let a model run commands and change files. Read what it
+        \\# is about to do first: "ask" stops for a person, "allow" does not.
+        \\#
+        \\# [[rule]]
+        \\# id = "run-commands"
+        \\# ask = ["process.execute", "fs.write"]
+        \\# because = "A person decides each command before it runs."
+        \\
+    , .{host});
+}
+
+test "the starter policy this build writes is one this build can read" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The whole point of the starter file is that it is already correct. One
+    // that does not parse is worse than none, because it is the first thing
+    // somebody edits and it teaches them the format is broken.
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try writeStarter(&out.writer, "api.anthropic.com");
+
+    const result = try parse(arena, out.written());
+    if (!result.usable()) {
+        for (result.problems) |problem| std.debug.print("starter policy problem: {s}\n", .{problem.message});
+    }
+    try testing.expect(result.usable());
+    try testing.expectEqual(@as(usize, 0), result.problems.len);
+
+    var engine = policy_mod.Engine.init(arena, result.policy.?, 7);
+    const context = starterContext();
+
+    // It allows what asking a model needs, and refuses to read the key's value.
+    try testing.expectEqual(Effect.allow, (try engine.decide(.{ .capability = .@"model.infer" }, context)).effect);
+    try testing.expectEqual(Effect.deny, (try engine.decide(.{ .capability = .@"credentials.read" }, context)).effect);
+    // And it is not a blank cheque: nothing said it could push to a remote.
+    try testing.expectEqual(Effect.deny, (try engine.decide(.{ .capability = .@"git.push" }, context)).effect);
+}
+
+fn starterContext() policy_mod.Context {
+    const idmod = @import("../core/id.zig");
+    var gen: idmod.Generator = .init(9, 1_788_000_000_000);
+    return .{
+        .actor = gen.next(idmod.ActorId),
+        .session = gen.next(idmod.SessionId),
+        .agent = gen.next(idmod.AgentId),
+        .now = @import("../core/time.zig").Timestamp.parseIso("2026-09-07T12:00:00Z") catch unreachable,
+    };
+}
+
+test "the starter policy scopes the network to the host it names" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try writeStarter(&out.writer, "api.anthropic.com");
+    var engine = policy_mod.Engine.init(arena, (try parse(arena, out.written())).policy.?, 8);
+    const context = starterContext();
+
+    try testing.expectEqual(Effect.allow, (try engine.decide(.{
+        .capability = .@"network.connect",
+        .resource = .{ .host = "api.anthropic.com" },
+    }, context)).effect);
+    // Somewhere else is refused, which is the part that makes writing the host
+    // down worth doing at all.
+    try testing.expectEqual(Effect.deny, (try engine.decide(.{
+        .capability = .@"network.connect",
+        .resource = .{ .host = "example.invalid" },
+    }, context)).effect);
+}

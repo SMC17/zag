@@ -56,7 +56,7 @@ jobs:
 
       - name: Check the product's own text
         run: |
-          ./zig-out/bin/zag lint README.md AGENTS.md docs/architecture.md \
+          ./zig-out/bin/zag-audit lint README.md AGENTS.md docs/architecture.md \
             docs/standards-conformance.md docs/plain-language.md \
             docs/competitive-position.md docs/roadmap.md
 
@@ -70,7 +70,7 @@ jobs:
 
       - name: Write the conformance statement, and check it matches what is committed
         run: |
-          ./zig-out/bin/zag evidence
+          ./zig-out/bin/zag-audit evidence
           # The statement records when it was produced, so that field differs on
           # every run. Everything else must not: the results, the subjects and
           # the hashes of the artefacts they are about are what the committed
@@ -80,15 +80,15 @@ jobs:
           strip_time < evidence/conformance.jsonl > /tmp/produced.jsonl
           git show HEAD:evidence/conformance.jsonl | strip_time > /tmp/committed.jsonl
           if ! diff -u /tmp/committed.jsonl /tmp/produced.jsonl; then
-            echo "The conformance statement has changed. Run './zig-out/bin/zag evidence' and commit the result."
+            echo "The conformance statement has changed. Run './zig-out/bin/zag-audit evidence' and commit the result."
             exit 1
           fi
 
       - name: Show the accessibility statement
-        run: ./zig-out/bin/zag accessibility
+        run: ./zig-out/bin/zag-audit accessibility
 
       - name: Show the lifecycle record
-        run: ./zig-out/bin/zag lifecycle
+        run: ./zig-out/bin/zag-audit lifecycle
 
   cross-compile:
     name: compile ${{ matrix.target }}
