@@ -190,8 +190,14 @@ editing Zig.
   branch, and whether the shell is marking its boundaries.
 - Hold more than one shell in one recorded session, with each block naming the
   pane it came from.
-- Index the blocks, so a query does not walk them. State the size the index is
-  built for and measure a query at that size.
+- Give the index somewhere to live. `workspace/index.zig` answers a query 4.8
+  times faster over twenty thousand blocks — 344 µs scanned, 72 µs indexed —
+  and takes 1.8 ms to build, which means it never pays for a single query.
+  `zag history` runs one query and exits, so it still scans, and says so. The
+  index needs either a surface that holds a workspace open and asks repeatedly,
+  or to be persisted beside the log and kept current as events are appended.
+  The second brings a stale index as a new failure mode and needs its own
+  design.
 
 ## Priority 3: finish the large surfaces
 
@@ -239,7 +245,7 @@ editing Zig.
 | Durable record | Fault-injection tests, object audit, recovery exercise and signed checkpoint verification |
 | Configurable terminal | A settings file read at start, a named report for each unreadable setting, and tests for the defaults |
 | Many shells in one session | Two shells recorded in one log, each block naming its pane, and the log verifying afterwards |
-| Fast recall | A stated index size, a measured query at that size, and the measurement repeated by the benchmark harness |
+| Fast recall | A stated index size, a measured query at that size, the measurement repeated by the benchmark harness, and a surface where the index is cheaper than the scan it replaces |
 | Enforced agent boundary | Executor integration tests, path and network escape tests, and an independent security review |
 | Accessible desktop | Automated checks plus task completion with keyboard and screen-reader users |
 | Remote workspace | Authentication review, reconnect tests, conflict tests and load results with declared units |

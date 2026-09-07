@@ -81,6 +81,7 @@ pub const workspace = struct {
     pub const model = @import("workspace/model.zig");
     pub const workflow = @import("workspace/workflow.zig");
     pub const history = @import("workspace/history.zig");
+    pub const index = @import("workspace/index.zig");
     pub const service = @import("workspace/service.zig");
 };
 
