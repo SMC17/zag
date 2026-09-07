@@ -220,7 +220,7 @@ knowledge that is approved and is not overdue.
 
 An entry links to concepts rather than to words, so a search finds the entries
 about a concept, not the ones that happen to use the term. This repository keeps
-its own rules there, and `zag check` audits them like anything else.
+its own rules there, and `zag-audit check` audits them like anything else.
 
 ### The standards control plane
 
