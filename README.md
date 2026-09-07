@@ -23,7 +23,9 @@ Here the workspace event stream owns the truth:
 
 - The interface does not own truth. It is a fold over the log.
 - Agents do not own truth. They propose typed requests; the log records what
-  happened.
+  happened. `zag ask` writes its whole run into the same log a command goes
+  into, refusals included. An agent run and a shell command read the same way
+  afterwards.
 - The pseudoterminal does not own truth. It produces bytes, which become events.
 
 Everything else follows from that. A block list, a session tab, an execution

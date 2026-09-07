@@ -326,7 +326,16 @@ pub fn writeEvent(envelope: Envelope, w: *std.Io.Writer) std.Io.Writer.Error!voi
         .agent_message => |e| try w.print("The agent said ({s}): {s}", .{ @tagName(e.role), e.text }),
         .agent_started => |e| try w.print("An agent started, for: {s}", .{e.request}),
         .tool_requested => |e| try w.print("A tool was asked for: {s} ({s})", .{ e.tool, e.capability }),
-        .tool_finished => |e| try w.print("That tool {s}. {s}", .{ @tagName(e.outcome), e.summary }),
+        .tool_finished => |e| {
+            try w.print("That tool {s}.", .{switch (e.outcome) {
+                .completed => "finished",
+                .failed => "did not work",
+                .denied => "was refused by the policy",
+                .cancelled => "was stopped",
+                .timed_out => "ran out of time",
+            }});
+            if (e.summary.len > 0) try w.print(" {s}", .{e.summary});
+        },
         .approval_requested => |e| try w.print("You were asked: {s}", .{e.promptText}),
         .approval_resolved => |e| try w.print("You answered: {s}.", .{@tagName(e.outcome)}),
         .git_changed => |e| {

@@ -269,12 +269,76 @@ pub const stopped_clock: Clock = .{
     }.now,
 };
 
+/// Something that happened, offered to whoever is keeping the record.
+///
+/// The loop reports each of these as it reaches it, rather than handing over a
+/// transcript at the end. A run that is interrupted has still written what it
+/// did up to that point, and each moment is recorded at the time it happened
+/// rather than all of them at the time the run stopped.
+pub const Moment = union(enum) {
+    started: struct {
+        request: []const u8,
+        provider: []const u8,
+        model: []const u8,
+        policy: []const u8,
+    },
+    /// The model said something.
+    said: struct {
+        role: enum { plan, progress, result, question, refusal },
+        text: []const u8,
+    },
+    /// A tool call became a typed request and a decision was reached.
+    asked: struct {
+        tool: []const u8,
+        capability: []const u8,
+        resource: []const u8,
+        argumentsJson: []const u8,
+        decision: ?Decision,
+    },
+    /// The call is over, whether it ran or was refused.
+    settled: struct {
+        tool: []const u8,
+        outcome: tools.Outcome,
+        summary: []const u8,
+        resultHash: hashing.Hash,
+    },
+    finished: struct { ending: Ending },
+};
+
+/// Where the record of a run goes.
+///
+/// Passed in rather than reached for, so the loop has no opinion about where a
+/// workspace lives and a test can run the whole thing without one. A run with
+/// no journal writes nothing, which is what the tests here do and what nothing
+/// a person invokes should do: `zag ask` used to talk to a provider, run tools
+/// and print to standard output without a single event, so the only model path
+/// in a product built around an event log did not enter it.
+pub const Journal = struct {
+    context: *anyopaque,
+    recordFn: *const fn (context: *anyopaque, moment: Moment) anyerror!void,
+
+    pub fn record(self: Journal, moment: Moment) void {
+        // A record that could not be written must not stop the work, and must
+        // not be silently equivalent to one that was. The caller owns the
+        // journal and is the one that can tell a person; here the run carries
+        // on, because losing a tool result to a full disk is worse than losing
+        // a line of the log.
+        self.recordFn(self.context, moment) catch {};
+    }
+};
+
 pub const Runner = struct {
     arena: std.mem.Allocator,
     transport: transport_mod.Transport,
     executor: executor_mod.Runner,
     engine: *policy_mod.Engine,
     clock: Clock = stopped_clock,
+    /// Where this run is written down. None means nothing is written.
+    journal: ?Journal = null,
+
+    fn note(self: Runner, moment: Moment) void {
+        if (self.journal) |journal| journal.record(moment);
+    }
 
     /// Run the loop until it ends, for one reason or another.
     pub fn run(
@@ -284,6 +348,13 @@ pub const Runner = struct {
         context: policy_mod.Context,
     ) Error!Transcript {
         const started = self.clock.now();
+
+        self.note(.{ .started = .{
+            .request = question,
+            .provider = options.connector.id,
+            .model = options.model,
+            .policy = self.engine.policy.id,
+        } });
 
         var messages: std.ArrayList(provider.Message) = .empty;
         try messages.append(self.arena, .{
@@ -329,7 +400,13 @@ pub const Runner = struct {
             usage.cacheWriteTokens += completion.usage.cacheWriteTokens;
 
             const said = try completion.text(self.arena);
-            if (said.len > 0) answer = said;
+            if (said.len > 0) {
+                answer = said;
+                self.note(.{ .said = .{
+                    .role = if (completion.stopReason == .refusal) .refusal else .progress,
+                    .text = said,
+                } });
+            }
 
             // The model's own turn goes into the conversation exactly as it
             // came, so that a tool result has a call to belong to.
@@ -362,6 +439,7 @@ pub const Runner = struct {
 
                 const step = try self.performOne(call, context, &seen, options.budget.repeats);
                 try steps.append(self.arena, step);
+                self.recordStep(step);
                 try results.append(self.arena, .{ .tool_result = .{
                     .toolUseId = call.id,
                     .content = step.reply,
@@ -408,6 +486,8 @@ pub const Runner = struct {
             }
         }
 
+        self.note(.{ .finished = .{ .ending = ending } });
+
         return .{
             .ending = ending,
             .turns = turns.items,
@@ -417,6 +497,41 @@ pub const Runner = struct {
             .pending = pending,
             .pendingDecision = pending_decision,
         };
+    }
+
+    /// Write down one call, whether or not it ran.
+    ///
+    /// Both halves are recorded. A refused call is the interesting one: the
+    /// record has to show what was asked for and what the policy said, or a
+    /// person reading it later cannot tell a refusal from a call that was never
+    /// made.
+    fn recordStep(self: Runner, step: Step) void {
+        const request = step.request orelse {
+            // The name was not a tool. Nothing was decided and nothing ran, and
+            // saying so is more useful than silence.
+            self.note(.{ .settled = .{
+                .tool = step.toolName,
+                .outcome = .denied,
+                .summary = step.reply,
+                .resultHash = hashing.Hash.zero,
+            } });
+            return;
+        };
+        const resource = request.resource(self.arena) catch capability_mod.Resource{ .none = {} };
+        self.note(.{ .asked = .{
+            .tool = step.toolName,
+            .capability = request.capability().text(),
+            .resource = resource.text(),
+            .argumentsJson = "",
+            .decision = step.decision,
+        } });
+        const result = step.result orelse return;
+        self.note(.{ .settled = .{
+            .tool = step.toolName,
+            .outcome = result.outcome,
+            .summary = if (result.summary.len > 0) result.summary else step.reply,
+            .resultHash = result.contentHash,
+        } });
     }
 
     /// One tool call, all the way through.
