@@ -979,6 +979,11 @@ fn historySearch(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, option
         try w.writeAll("The log is incomplete or damaged, so these results cover only its verified prefix.\n\n");
     }
     const index = try opened.service.blocks();
+    // No lookup here, deliberately. Building one costs about five times what a
+    // single scan of the same blocks costs, so for a command that runs one
+    // query and exits it would make `zag history` slower. The index is for a
+    // surface that holds a workspace open and asks repeatedly; the numbers are
+    // in `zig build bench` and the reasoning is in `workspace/index.zig`.
     const results = try zag.workspace.history.run(arena, index, parsed.query, .{
         .now = wallClock(io),
         .limit = 20,
