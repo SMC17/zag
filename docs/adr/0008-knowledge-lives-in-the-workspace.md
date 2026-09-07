@@ -28,7 +28,7 @@ than the entries that use a word.
 ## What follows
 
 - An agent is offered only knowledge that is approved and is not overdue.
-- `zag check` audits `.workspace/` like anything else, and `zag evidence`
+- `zag-audit check` audits `.workspace/` like anything else, and `zag-audit evidence`
   records what that audit established.
 - This repository keeps its own rules there, so the product is its own first
   user.

@@ -106,7 +106,7 @@ directories. An agent run had no finish at all, so a workspace of completed runs
 displayed every one of them as still going.
 
 Two more were claims rather than records. The daemon said it held a workspace
-open for clients, and it has no socket. `zag check` never loaded the requirements
+open for clients, and it has no socket. `zag-audit check` never loaded the requirements
 register. Every profile naming a requirement was therefore checked against an
 empty set, and eleven dangling identifiers went unnoticed.
 

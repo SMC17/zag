@@ -72,26 +72,34 @@ zag ask --stream "..."         # the same, printed as the answer arrives
 zag secrets .env               # what would be taken out before anything is recorded
 zag why .workspace/events.jsonl # what a failure depended on, and what it affected
 zag run -- zig build test      # run a command and record it as a block
-zag lint README.md             # check text against the plain-language rules
-zag terms workspace            # what a word means here
-zag standards                  # the standards in force, and their editions
-zag check                      # audit this repository
-zag card model                 # the model card, generated from the system
-zag accessibility              # the accessibility statement and the themes
+
 zag shell-hook bash            # the shell integration to add to your shell
 zag workflow                   # this repository's own workflow, as a task graph
-zag lifecycle                  # the lifecycle record, and what has not started
-zag evidence                   # the conformance statement, from recorded evidence
 zag history "status:failed zig" # search recorded work, not a text file
 zag knowledge                  # the knowledge under .workspace/, and what is overdue
 zag objects --root .           # audit stored command output without changing it
 zag recover --root .           # inspect a damaged log and print a recovery plan
 ```
 
-Settings live in `.workspace/settings.toml`. `zag emit` writes an example with
+Settings live in `.workspace/settings.toml`. `zag-audit emit` writes an example with
 every value at its default. A setting this build cannot read is reported by
 name, with what was found and what is being used instead, and the terminal
 opens anyway — a mistake in that file never costs you a shell.
+
+`zag-audit` is the second binary. It checks a repository against the standards
+it claims to meet, and nothing it does is needed to record work:
+
+```
+zag-audit check                # audit this repository; the release gate
+zag-audit lint README.md       # check text against the plain-language rules
+zag-audit terms workspace      # what a word means here
+zag-audit standards            # the standards in force, and their editions
+zag-audit emit                 # regenerate the schemas, vocabularies and docs
+zag-audit evidence             # the conformance statement, from recorded evidence
+zag-audit card model           # the model card, generated from the system
+zag-audit accessibility        # the accessibility statement and the themes
+zag-audit lifecycle            # the lifecycle record, and what has not started
+```
 
 `zagd` holds a workspace open for clients, remote people and background agents:
 
