@@ -98,6 +98,22 @@ rule scoped to hosts also allowed requests on any other kind of resource. And
 `::1` never matched a rule that named it, because the host matcher split on the
 first colon. Each now has a test that fails if the fix is removed.
 
+Several things the record used to say were untrue, and are worth naming. A block
+whose output arrived in pieces kept the last piece's hash beside the summed byte
+count. It claimed a hash covering bytes the hash had never seen. A change of
+directory was written as a repository moving, so a search by repository returned
+directories. An agent run had no finish at all, so a workspace of completed runs
+displayed every one of them as still going.
+
+Two more were claims rather than records. The daemon said it held a workspace
+open for clients, and it has no socket. `zag check` never loaded the requirements
+register. Every profile naming a requirement was therefore checked against an
+empty set, and eleven dangling identifiers went unnoticed.
+
+Deleting and pushing were refused as typed requests and reachable by running
+the program, so the typed refusal was the one that could not run. An agent now
+has to use the typed request, and may not run a shell at all.
+
 These statements are covered by automated tests. They do not establish
 power-loss survival on every filesystem, hostile tamper resistance, a safe
 garbage collector, a complete terminal, a graphical product or organisational

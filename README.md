@@ -167,6 +167,12 @@ request -> plan -> typed tool request -> policy decision
 - A repository instruction file shapes behaviour. It can never grant a
   capability, and the checker reports any line that tries.
 
+## If something here is wrong
+
+`docs/if-something-is-wrong.md` is for anyone affected by work done with zag,
+whether or not they use it. It says how to read the record, how to raise a
+problem, and what this project can and cannot do about it.
+
 ## Reading further
 
 - `docs/architecture.md` — the event graph, the block model and the control plane

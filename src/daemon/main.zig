@@ -20,7 +20,7 @@ const Command = enum {
     verify,
     plan,
     history,
-    serve,
+    watch,
 
     fn parse(text: []const u8) ?Command {
         const table = [_]struct { name: []const u8, command: Command }{
@@ -31,7 +31,10 @@ const Command = enum {
             .{ .name = "verify", .command = .verify },
             .{ .name = "plan", .command = .plan },
             .{ .name = "history", .command = .history },
-            .{ .name = "serve", .command = .serve },
+            .{ .name = "watch", .command = .watch },
+            // The old name said the daemon held a workspace open for clients.
+            // It never has: there is no socket and nothing connects to it.
+            .{ .name = "serve", .command = .watch },
         };
         for (table) |entry| {
             if (std.mem.eql(u8, entry.name, text)) return entry.command;
@@ -52,11 +55,11 @@ pub const help_text =
     \\  verify              Check the event log and command-output objects.
     \\  plan <workflow>     Say what each step of a workflow would need.
     \\  history <query>     Search what happened, using the history filters.
-    \\  serve               Hold the workspace open and report each check.
+    \\  watch               Re-open the workspace and report, a set number of times.
     \\
     \\Options
     \\  --root <directory>  The workspace to open. The default is this directory.
-    \\  --checks <number>   How many checks `serve` runs before it stops.
+    \\  --checks <number>   How many times `watch` re-opens the workspace.
     \\
     \\The daemon never runs a workflow step on its own. It reports which steps a
     \\person still has to decide on, and stops there.
@@ -138,7 +141,7 @@ pub fn main(init: std.process.Init) !u8 {
         .verify => try verify(arena, io, w, options),
         .plan => try plan(arena, io, w, options),
         .history => try history(arena, io, w, options),
-        .serve => try serve(arena, io, w, options),
+        .watch => try watch(arena, io, w, options),
     };
     try w.flush();
     return status_code;
@@ -247,7 +250,14 @@ fn history(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Opt
 /// Hold the workspace open and re-check it. Each check re-reads the log from
 /// disk, so a change another process wrote is picked up, and a log that was
 /// damaged while the daemon was running is reported rather than extended.
-fn serve(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
+/// Re-open the workspace and report, a set number of times.
+///
+/// This was called `serve`, and the help said it held the workspace open for
+/// clients. It does not: there is no socket, nothing connects, and each pass
+/// opens the workspace from scratch and prints. The name and the sentence now
+/// say what it does. `serve` still works as a name so nobody's script breaks,
+/// and the roadmap says what a real daemon would need.
+fn watch(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
     var checks: usize = 0;
     var worst: u8 = 0;
     while (checks < options.checks) : (checks += 1) {

@@ -224,6 +224,18 @@
             "hashed"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "chunked": {
+              "$ref": "#/$defs/ContentRef__struct_b8951747"
+            }
+          },
+          "required": [
+            "chunked"
+          ],
+          "additionalProperties": false
         }
       ]
     },
@@ -241,6 +253,49 @@
       "required": [
         "hash",
         "byteCount"
+      ],
+      "additionalProperties": false
+    },
+    "ContentRef__struct_b8951747": {
+      "type": "object",
+      "properties": {
+        "chunks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Chunk"
+          }
+        },
+        "byteCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "chunks",
+        "byteCount"
+      ],
+      "additionalProperties": false
+    },
+    "Chunk": {
+      "type": "object",
+      "properties": {
+        "hash": {
+          "type": "string"
+        },
+        "byteCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      },
+      "required": [
+        "hash",
+        "byteCount",
+        "index"
       ],
       "additionalProperties": false
     },

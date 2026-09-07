@@ -496,7 +496,7 @@ fn standards(arena: std.mem.Allocator, w: *std.Io.Writer, options: Options) !u8 
             });
             try w.print("  Standards in force: {d}\n", .{profile.standards.len});
             for (profile.exclusions) |exclusion| {
-                try w.print("  Does not apply {s}: {s}\n", .{ exclusion.requirement_id, exclusion.reason });
+                try w.print("  Does not apply {s}: {s}\n", .{ exclusion.subject.text(), exclusion.reason });
             }
             try w.writeAll("\n");
         }
@@ -779,7 +779,7 @@ fn events(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Opti
         return 2;
     }
     const path = options.positional[0];
-    const source = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(256 << 20)) catch {
+    const source = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(zag.events.log.max_file_bytes)) catch {
         try w.print("zag could not read {s}.\n", .{path});
         return 1;
     };
@@ -1333,7 +1333,7 @@ fn whyDidThatHappen(
         return 2;
     }
     const path = options.positional[0];
-    const source = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(256 << 20)) catch {
+    const source = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(zag.events.log.max_file_bytes)) catch {
         try w.print("zag could not read {s}.\n", .{path});
         return 1;
     };
@@ -1546,9 +1546,14 @@ fn interactiveTerminal(
         return 1;
     };
     var service = opened.service;
-    if (opened.report.chainBreak) |broken| {
-        try w.print("The event log is broken at event {d}, so this session would not be recorded.\n", .{broken.sequence});
-        try w.writeAll("Keep the file as it is. A broken log is evidence, not a fault to repair.\n");
+    // A torn tail and a malformed record are as disqualifying as a broken
+    // chain: in all three the workspace is sealed and nothing this session did
+    // would be written. Checking only the chain meant `zag term` started
+    // happily on a log that `zag run` refuses, and recorded a session that went
+    // nowhere.
+    if (!opened.report.logIsHealthy()) {
+        try opened.report.writeSummary(w);
+        try w.writeAll("This session would not be recorded. Keep the file as it is: a damaged log is evidence, not a fault to repair.\n");
         return 1;
     }
 
@@ -2399,13 +2404,53 @@ fn check(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Optio
     var problems: usize = 0;
     const dir = std.Io.Dir.cwd();
 
-    // 1. The standards registry itself.
-    const registry = try loadStandards(arena);
+    // 1. The standards registry itself, and the requirements taken from it.
+    //
+    // The requirements were not loaded here at all, so anything checking a
+    // requirement identifier was checking against an empty set: every lookup
+    // failed, and nothing looked one up, so nothing noticed.
+    var registry = try loadStandards(arena);
+    const requirement_count = try registry.loadRequirements(@embedFile("registry_requirements"));
     const issues = try registry.validate();
-    try w.print("Standards registry: {d} standards recorded, {d} problem(s).\n", .{ registry.count(), issues.items.len });
+    try w.print("Standards registry: {d} standards and {d} requirements recorded, {d} problem(s).\n", .{
+        registry.count(),
+        requirement_count,
+        issues.items.len,
+    });
     for (issues.items) |issue| {
         try w.print("  {s} {s}\n", .{ issue.code.text(), issue.message });
         problems += 1;
+    }
+
+    // 1a. Every requirement a profile names has to exist.
+    //
+    // `extra_requirements` and `exclusions` are lists of identifiers, and until
+    // now nothing read either one. A profile could switch on a requirement that
+    // did not exist, or exclude one with a typo in it, and the build would
+    // report nothing: the exclusion silently applied to nothing, so a
+    // requirement the author meant to skip was enforced, or one they meant to
+    // add was not.
+    for (zag.standards.profile.registry) |candidate| {
+        for (candidate.extra_requirements) |id| {
+            if (registry.requirements.get(id) == null) {
+                try w.print("  PROFILE {s} switches on {s}, which is not a requirement.\n", .{ candidate.id, id });
+                problems += 1;
+            }
+        }
+        for (candidate.exclusions) |exclusion| {
+            const known = switch (exclusion.subject) {
+                .requirement => |id| registry.requirements.get(id) != null,
+                .language_rule => |code| zag.language.plain.Rule.byCode(code) != null,
+            };
+            if (!known) {
+                try w.print("  PROFILE {s} excludes {s}, which is not a {s}.\n", .{
+                    candidate.id,
+                    exclusion.subject.text(),
+                    @tagName(exclusion.subject),
+                });
+                problems += 1;
+            }
+        }
     }
 
     // 1b. Any file a standard points at has to be there. One entry named a
@@ -2472,10 +2517,15 @@ fn check(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Optio
     for (impact_findings.items) |finding| try w.print("  IMPACT {s}\n", .{finding});
     problems += risk_findings.items.len + impact_findings.items.len;
 
+    // An obligation nobody has met is a problem, and printing it as OPEN while
+    // leaving the count at zero meant the build stayed green with a list of
+    // things it had just said were not done. A check that reports and does not
+    // fail is a check that stops being read.
     const unmet = try zag.ai.transparency.unmetObligations(arena);
     try w.print("Transparency: {d} obligation(s) not yet met.\n", .{unmet.items.len});
     for (unmet.items) |obligation| {
         try w.print("  OPEN {s} {s}\n", .{ obligation.topic.question(), obligation.gap });
+        problems += 1;
     }
 
     // 6. The product's own text, including this tool's help.
@@ -2490,6 +2540,7 @@ fn check(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Optio
         .{ .path = "docs/roadmap.md", .kind = .body },
         .{ .path = "docs/threat-model.md", .kind = .body },
         .{ .path = "docs/platform-support.md", .kind = .body },
+        .{ .path = "docs/if-something-is-wrong.md", .kind = .body },
         .{ .path = "CONTRIBUTING.md", .kind = .body },
         .{ .path = "SECURITY.md", .kind = .body },
     };
