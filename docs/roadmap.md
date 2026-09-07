@@ -55,12 +55,30 @@ The policy is read from `.workspace/policy.toml`, written by the person whose
 computer it is. A file that does not parse allows nothing; nothing more
 permissive is put in its place.
 
+The loop runs. A model is asked. Its tool calls become typed requests. Each one
+is decided on its own and spent by an executor, and the results go back for the
+next turn. A model is never offered a tool that would widen its own reach. It cannot
+name a capability either, because the capability comes from the request kind.
+Four separate bounds stop a run: turns, tokens, wall clock, and a model asking
+for the same refused thing over and over. Each ending says which.
+
+Two graphs are derived from the log rather than declared. The causal forest
+answers "what led to this". A dependency graph adds the edges the log does not
+write down, such as a file written here and read there. It answers "which of the
+things I did could this be about", across sessions that caused nothing in each
+other. Reachability over it is bitsets filled in one backwards pass. The
+critical path is the chain that decided how long work took, rather than the sum
+of everything in it.
+
+What a model pays attention to is chosen by walking that graph from the event
+being asked about, nearest first. Recency is only a tie-break.
+
 These statements are covered by automated tests. They do not establish
 power-loss survival on every filesystem, hostile tamper resistance, a safe
 garbage collector, a complete terminal, a graphical product or organisational
-certification. The wire formats are tested against recorded answers and the
-Anthropic connector has been called; the other addresses are each provider's
-documented one and `zag providers` says which is which.
+certification. The wire formats are tested against recorded answers, and the
+Anthropic connector has been called. The other addresses are each provider's
+documented one, and `zag providers` says which is which.
 
 ## Priority 0: protect the record
 
@@ -122,11 +140,10 @@ editing Zig.
   document and diagnostic models.
 - Implement the daemon interface described by the generated OpenAPI document,
   with authentication, authorisation, version negotiation and backpressure.
-- Loop a model's tool calls through the executors. The provider connectors and
-  the executors both exist; nothing yet runs the cycle of asking, executing
-  under a decision, and asking again.
 - Read a model's answer as it arrives. Every connector waits for the whole
   reply, which is fine for a question and wrong for a long one.
+- Run more than one tool call at a time. A turn that asks for four independent
+  reads runs them one after another.
 - Add macOS pseudoterminal and Windows ConPTY implementations, and the terminal
   settings each one needs, with the same behavioural test suite used on Linux.
 - Define remote replay, reconnect and conflict semantics before allowing more

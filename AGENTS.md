@@ -58,6 +58,12 @@ so.
   approvals, the typed executors, the model connectors and governance.
 - `src/ai/wire` holds one file per model provider shape. A new provider that
   speaks an existing shape is an entry in `src/ai/catalog.zig`, not a new file.
+- `src/ai/loop.zig` runs the agent loop, and `src/ai/toolschema.zig` decides
+  what a model may ask for. A tool added there is a tool a model can reach, so
+  read the file's opening comment before adding one.
+- `src/events/lineage.zig` derives the dependency graph. Anything that answers
+  "what did this affect" belongs there rather than in `graph.zig`, which is the
+  causal forest and a different question.
 - `src/language` holds the plain-language rules.
 - `src/knowledge` and `src/metadata` hold the vocabulary, the workspace
   knowledge base and the registry.

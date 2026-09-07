@@ -7,6 +7,7 @@
 //! things in two checkers is worse than no rule.
 
 const std = @import("std");
+const scan = @import("../core/scan.zig");
 
 pub const Span = struct {
     start: usize,
@@ -37,13 +38,17 @@ pub const Position = struct {
 pub const LineIndex = struct {
     starts: []const usize,
 
+    /// Count the line breaks, then allocate once and fill.
+    ///
+    /// Both passes are vectorised, and together they beat one growing list:
+    /// counting reads the bytes without touching memory, and the fill lands in
+    /// an array that is already exactly the right size, so nothing is ever
+    /// copied to make room.
     pub fn build(arena: std.mem.Allocator, source: []const u8) !LineIndex {
-        var starts: std.ArrayList(usize) = .empty;
-        try starts.append(arena, 0);
-        for (source, 0..) |c, i| {
-            if (c == '\n') try starts.append(arena, i + 1);
-        }
-        return .{ .starts = starts.items };
+        const breaks = scan.countScalarBytes(source, '\n');
+        const starts = try arena.alloc(usize, breaks + 1);
+        const written = scan.fillStarts(source, '\n', starts);
+        return .{ .starts = starts[0..written] };
     }
 
     pub fn positionOf(self: LineIndex, offset: usize) Position {

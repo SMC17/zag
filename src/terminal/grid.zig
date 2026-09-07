@@ -6,6 +6,7 @@
 //! machine, replayed, or searched long after the process has gone.
 
 const std = @import("std");
+const scan = @import("../core/scan.zig");
 const vt = @import("vt.zig");
 
 pub const Color = union(enum) {
@@ -174,9 +175,33 @@ pub const Screen = struct {
     }
 
     /// Feed bytes from the pseudoterminal.
+    /// Write a whole buffer, taking the fast road through ordinary text.
+    ///
+    /// Almost every byte a terminal receives is printable ASCII arriving while
+    /// the parser is in its ground state, and for those the parser does nothing
+    /// but hand the byte straight back to be printed. A vectorised scan finds
+    /// where that run ends, and the run is printed without going through the
+    /// state machine, the action union, or the switch that dispatches it, once
+    /// per byte.
+    ///
+    /// The state machine is still the definition. Every byte the scan stops at
+    /// goes through it, and a test feeds the same bytes both ways and asserts
+    /// the screen ends up identical, so the shortcut cannot start disagreeing
+    /// with the thing it is a shortcut for.
     pub fn write(self: *Screen, bytes: []const u8) !void {
-        for (bytes) |byte| {
-            _ = try self.writeByte(byte);
+        var index: usize = 0;
+        while (index < bytes.len) {
+            if (self.parser.inPlainGround()) {
+                const rest = bytes[index..];
+                const run = scan.indexOfNonPrintable(rest) orelse rest.len;
+                if (run > 0) {
+                    for (rest[0..run]) |byte| try self.putChar(byte);
+                    index += run;
+                    continue;
+                }
+            }
+            _ = try self.writeByte(bytes[index]);
+            index += 1;
         }
     }
 
@@ -794,4 +819,81 @@ test "line wrapping does not lose characters" {
     try screen.write("abcdefg");
     try testing.expectEqualStrings("abcd", try screen.rowText(arena, 0));
     try testing.expectEqualStrings("efg", try screen.rowText(arena, 1));
+}
+
+test "the fast road leaves the screen exactly as the byte-at-a-time road does" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A stream that mixes long printable runs with everything that ends one:
+    // colours, cursor moves, line breaks, multi-byte characters, an operating
+    // system command, and a device control string.
+    var stream: std.ArrayList(u8) = .empty;
+    var random = std.Random.DefaultPrng.init(20260907);
+    const r = random.random();
+    var pieces: usize = 0;
+    while (pieces < 600) : (pieces += 1) {
+        switch (r.uintLessThan(u8, 7)) {
+            0 => try stream.appendSlice(arena, "\x1b[31;1m"),
+            1 => try stream.appendSlice(arena, "\x1b]0;a title\x07"),
+            2 => try stream.appendSlice(arena, "\r\n"),
+            3 => try stream.appendSlice(arena, "wörld — ✓ 日本"),
+            4 => try stream.appendSlice(arena, "\x1b[2J\x1b[H"),
+            5 => try stream.appendSlice(arena, "\tcolumn\tstops\t"),
+            else => {
+                const run = r.uintLessThan(usize, 300) + 1;
+                var i: usize = 0;
+                while (i < run) : (i += 1) {
+                    try stream.append(arena, 0x20 + r.uintLessThan(u8, 0x5f));
+                }
+            },
+        }
+    }
+
+    var fast = try Screen.init(arena, 80, 24, 500);
+    try fast.write(stream.items);
+
+    var slow = try Screen.init(arena, 80, 24, 500);
+    for (stream.items) |byte| _ = try slow.writeByte(byte);
+
+    // Every visible row, and the cursor, must match. A shortcut that got the
+    // wrapping or the scrolling wrong would show up here and nowhere else.
+    try testing.expectEqual(slow.cursor.row, fast.cursor.row);
+    try testing.expectEqual(slow.cursor.column, fast.cursor.column);
+    var row: u16 = 0;
+    while (row < 24) : (row += 1) {
+        try testing.expectEqualStrings(
+            try slow.rowText(arena, row),
+            try fast.rowText(arena, row),
+        );
+    }
+    try testing.expectEqual(slow.scrollbackCount(), fast.scrollbackCount());
+}
+
+test "a buffer split anywhere writes the same screen" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A read from a pseudoterminal lands wherever it lands, so a character or a
+    // sequence can arrive in two pieces. The fast path must not care.
+    const stream = "plain \x1b[1;32mgreen\x1b[0m text wörld\r\nsecond line \x1b]0;t\x07 end";
+
+    var whole = try Screen.init(arena, 40, 6, 20);
+    try whole.write(stream);
+
+    var split: usize = 0;
+    while (split <= stream.len) : (split += 1) {
+        var pieces = try Screen.init(arena, 40, 6, 20);
+        try pieces.write(stream[0..split]);
+        try pieces.write(stream[split..]);
+        var row: u16 = 0;
+        while (row < 6) : (row += 1) {
+            try testing.expectEqualStrings(
+                try whole.rowText(arena, row),
+                try pieces.rowText(arena, row),
+            );
+        }
+    }
 }

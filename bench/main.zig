@@ -354,6 +354,60 @@ fn benchmarkPlainLanguage(arena: std.mem.Allocator, io: std.Io, runs: usize) any
     return measure.into("prose through the language rules", "bytes", text.items.len, text.items.len);
 }
 
+fn benchmarkLineIndex(arena: std.mem.Allocator, io: std.Io, runs: usize) anyerror!Result {
+    // A large document, the size a checker or an editor really opens.
+    var text: std.ArrayList(u8) = .empty;
+    while (text.items.len < (4 << 20)) {
+        try text.appendSlice(arena, "a line of ordinary prose, about sixty characters long here\n");
+    }
+
+    var measure: Measure = .{};
+    for (0..runs) |_| {
+        var scratch = std.heap.ArenaAllocator.init(arena);
+        defer scratch.deinit();
+        const clock = Clock.start(io);
+        const index = try zag.language.text.LineIndex.build(scratch.allocator(), text.items);
+        measure.record(clock.elapsed());
+        std.mem.doNotOptimizeAway(index.starts.len);
+    }
+    return measure.into("line breaks found in a document", "bytes", text.items.len, text.items.len);
+}
+
+fn benchmarkLineage(arena: std.mem.Allocator, io: std.Io, runs: usize) anyerror!Result {
+    // A day of recorded work: commands, their output, and the files they
+    // touched, with the files shared between them so the graph has real edges.
+    const commands: usize = 20_000;
+    var log = try buildCommandLog(arena, commands);
+    var gen: zag.core.id.Generator = .init(9, 1_788_000_000_000);
+    const actor: zag.events.event.Actor = .{
+        .id = gen.next(zag.core.id.ActorId),
+        .kind = .agent,
+        .label = "agent",
+    };
+    const session = gen.next(zag.core.id.SessionId);
+    var index: usize = 0;
+    while (index < commands) : (index += 1) {
+        _ = try log.append(.{ .file_changed = .{
+            .session = session,
+            .path = try std.fmt.allocPrint(arena, "src/file-{d}.zig", .{index % 500}),
+            .changeKind = .modified,
+        } }, .{ .at = .{ .ns = 1_788_000_000_000_000_000 + @as(i64, @intCast(index)) }, .actor = actor });
+    }
+
+    var measure: Measure = .{};
+    for (0..runs) |_| {
+        var scratch = std.heap.ArenaAllocator.init(arena);
+        defer scratch.deinit();
+        const clock = Clock.start(io);
+        const dag = try zag.events.lineage.Dag.build(scratch.allocator(), log);
+        const path = try dag.criticalPath();
+        measure.record(clock.elapsed());
+        std.mem.doNotOptimizeAway(path.items.len);
+    }
+    const events = log.entries.items.len;
+    return measure.into("dependency graph built and its critical path", "events", events, 0);
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
     const io = init.io;
@@ -392,6 +446,8 @@ pub fn main(init: std.process.Init) !u8 {
         .{ .run = benchmarkHistoryQuery, .times = 20 },
         .{ .run = benchmarkEditor, .times = runs },
         .{ .run = benchmarkPlainLanguage, .times = runs },
+        .{ .run = benchmarkLineIndex, .times = runs },
+        .{ .run = benchmarkLineage, .times = runs },
     };
     for (benchmarks) |benchmark| {
         var scratch = std.heap.ArenaAllocator.init(gpa);

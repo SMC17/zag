@@ -7,10 +7,10 @@ zag is a terminal, a block model, an agent runtime and a standards control plane
 in one Zig program. It fetches no package from the network: the whole thing
 builds from the Zig standard library.
 
-> Status: the substrate is built and tested, and a model can be asked through
-> the policy. The graphical renderer, the editor surfaces and the agent loop are
-> not written yet. `zag doctor` prints what this build can and cannot do, so the
-> claim never runs ahead of the code.
+> Status: the substrate is built and tested, and an agent loop runs against it
+> with every tool call decided separately. The graphical renderer and the editor
+> surfaces are not written yet, and answers do not stream. `zag doctor` prints
+> what this build can and cannot do, so the claim never runs ahead of the code.
 
 ## Why it is built this way
 
@@ -33,11 +33,11 @@ graph, an audit trail and an agent's context are all views of the same events.
 
 | Part | What it does |
 | --- | --- |
-| `src/events` | The typed event union, append-only hash chain and immutable content-addressed output store |
+| `src/events` | The typed event union, append-only hash chain, immutable content-addressed output store, the causal graph and the derived dependency graph |
 | `src/workspace` | Blocks, sessions, workflows, structured history, and the workspace service |
 | `src/editor` | The command line as an editing document, with undo that groups by intent |
 | `src/terminal` | Escape-sequence parser, screen with scrollback, shell integration, real pseudoterminal, and the recording terminal |
-| `src/ai` | Capabilities, the policy engine, the workspace policy file, approvals, typed tools and their executors, kernel-enforced path containment, the model connectors and the gate they pass through, risk, impact, transparency, generated cards |
+| `src/ai` | Capabilities, the policy engine, the workspace policy file, approvals, typed tools and their executors, kernel-enforced path containment, the model connectors and the gate they pass through, the agent loop, attention selection, risk, impact, transparency, generated cards |
 | `src/language` | The plain-language pass, with controlled-English and easy-to-read profiles |
 | `src/knowledge` | The concept system, the thesaurus view, the published vocabulary and the workspace knowledge base |
 | `src/metadata` | The registry that stops one field having four names |
@@ -65,7 +65,8 @@ zag term                       # a shell in a terminal that records what you do
 zag doctor                     # what this build can and cannot do
 zag policy                     # the policy in force, and where it was read from
 zag providers                  # the model connectors, and which credentials are set
-zag ask "why did that fail?"   # ask a model, through the policy
+zag ask "why did that fail?"   # ask a model; it can use tools, one decision each
+zag why .workspace/events.jsonl # what a failure depended on, and what it affected
 zag run -- zig build test      # run a command and record it as a block
 zag lint README.md             # check text against the plain-language rules
 zag terms workspace            # what a word means here
@@ -149,6 +150,12 @@ request -> plan -> typed tool request -> policy decision
   host, and spending that credential. All three are decided before the request
   is encoded, so a refused request is never built and a refused credential is
   never read.
+- A model cannot name a capability. Its tool call becomes a typed request or
+  nothing at all, and the capability comes from the request kind. Text can make
+  a model ask for anything; asking is all it can do.
+- Two tools are never offered to a model: asking another model, which would
+  spend a credential on a request nobody read, and starting an agent, which
+  would let it widen its own reach.
 - The policy is a file the person writes, in `.workspace/policy.toml`. It is
   never shown to a model and never consulted by one. Run `zag policy` to read it
   in words. A file that does not parse allows nothing; nothing more permissive
