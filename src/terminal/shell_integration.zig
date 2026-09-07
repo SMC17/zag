@@ -220,6 +220,15 @@ pub const hooks = struct {
         \\# is not used: it fires before every simple command, including the
         \\# ones inside the prompt's own functions, which produces marks for
         \\# commands nobody typed.
+        \\#
+        \\# The marker token arrives in the environment and is moved into a shell
+        \\# variable here, then removed from the environment. Two reasons. A shell
+        \\# variable is not exported, so nothing the person runs inherits it and no
+        \\# program can forge a boundary mark. And it has to be moved *somewhere*:
+        \\# the hooks below read `__zag_token`, and nothing used to set it, so every
+        \\# mark went out unauthenticated and the workbench rejected all of them.
+        \\__zag_token="${ZAG_MARKER_TOKEN:-}"
+        \\unset ZAG_MARKER_TOKEN
         \\__zag_prompt_start() { printf '\033]133;A\007'; }
         \\__zag_command_start() { printf '\033]133;B\007'; }
         \\__zag_report_cwd() { printf '\033]7;file://%s%s\007' "${HOSTNAME:-}" "$PWD"; }
@@ -249,6 +258,11 @@ pub const hooks = struct {
 
     pub const zsh =
         \\# zag shell integration for zsh.
+        \\#
+        \\# The token moves out of the environment into a shell variable, so nothing
+        \\# the person runs inherits it. See the bash hook for why.
+        \\__zag_token="${ZAG_MARKER_TOKEN:-}"
+        \\unset ZAG_MARKER_TOKEN
         \\__zag_precmd() {
         \\  local status=$?
         \\  if [ -n "${__zag_token:-}" ]; then
@@ -274,21 +288,45 @@ pub const hooks = struct {
 
     pub const fish =
         \\# zag shell integration for fish.
+        \\#
+        \\# The token moves out of the environment into a shell variable, so nothing
+        \\# the person runs inherits it. This hook used to emit no token at all,
+        \\# which meant a fish session recorded no authenticated boundaries.
+        \\set -g __zag_token $ZAG_MARKER_TOKEN
+        \\set -e ZAG_MARKER_TOKEN
         \\function __zag_prompt --on-event fish_prompt
-        \\    printf '\033]133;D;%s\007' $status
+        \\    set -l code $status
+        \\    if test -n "$__zag_token"
+        \\        printf '\033]133;D;%s;token=%s\007' $code $__zag_token
+        \\    else
+        \\        printf '\033]133;D;%s\007' $code
+        \\    end
         \\    printf '\033]7;file://%s%s\007' (hostname) $PWD
         \\    printf '\033]133;A\007'
         \\end
         \\function __zag_preexec --on-event fish_preexec
-        \\    printf '\033]133;C;cmdline=%s\007' $argv[1]
+        \\    if test -n "$__zag_token"
+        \\        printf '\033]133;C;token=%s;cmdline=%s\007' $__zag_token $argv[1]
+        \\    else
+        \\        printf '\033]133;C;cmdline=%s\007' $argv[1]
+        \\    end
         \\end
     ;
 
     pub const powershell =
         \\# zag shell integration for PowerShell.
+        \\#
+        \\# The token moves out of the environment into a script variable, so nothing
+        \\# the person runs inherits it.
+        \\$Global:__ZagToken = $env:ZAG_MARKER_TOKEN
+        \\Remove-Item Env:ZAG_MARKER_TOKEN -ErrorAction SilentlyContinue
         \\function Global:__Zag-Prompt {
         \\  $status = if ($?) { 0 } else { 1 }
-        \\  Write-Host -NoNewline "$([char]27)]133;D;$status$([char]7)"
+        \\  if ($Global:__ZagToken) {
+        \\    Write-Host -NoNewline "$([char]27)]133;D;$status;token=$Global:__ZagToken$([char]7)"
+        \\  } else {
+        \\    Write-Host -NoNewline "$([char]27)]133;D;$status$([char]7)"
+        \\  }
         \\  Write-Host -NoNewline "$([char]27)]7;file://$env:COMPUTERNAME$($PWD.Path)$([char]7)"
         \\  Write-Host -NoNewline "$([char]27)]133;A$([char]7)"
         \\}
@@ -413,4 +451,60 @@ test "the 633 family is treated as an alias" {
     var tracker = Tracker.init(arena);
     const boundary = (try tracker.consume("633;C;cmdline=ls")).?;
     try testing.expectEqualStrings("ls", boundary.output_start.command.?);
+}
+
+test "every hook takes the token out of the environment and uses it" {
+    // Three properties, and the first is the one that was missing. The hooks
+    // read `__zag_token` in four places and nothing assigned it, so every mark
+    // went out unauthenticated and an authenticated tracker rejected all of
+    // them: `zag term` recorded no command boundaries at all. The environment
+    // variable also stayed set, so every program the person ran inherited the
+    // secret that exists to stop programs forging boundaries.
+    const Hook = struct {
+        name: []const u8,
+        text: []const u8,
+        /// How this shell reads the variable it was given.
+        takes: []const u8,
+        /// How it removes it from the environment.
+        removes: []const u8,
+    };
+    const each = [_]Hook{
+        .{ .name = "bash", .text = hooks.bash, .takes = "__zag_token=\"${ZAG_MARKER_TOKEN:-}\"", .removes = "unset ZAG_MARKER_TOKEN" },
+        .{ .name = "zsh", .text = hooks.zsh, .takes = "__zag_token=\"${ZAG_MARKER_TOKEN:-}\"", .removes = "unset ZAG_MARKER_TOKEN" },
+        .{ .name = "fish", .text = hooks.fish, .takes = "set -g __zag_token $ZAG_MARKER_TOKEN", .removes = "set -e ZAG_MARKER_TOKEN" },
+        .{ .name = "pwsh", .text = hooks.powershell, .takes = "$Global:__ZagToken = $env:ZAG_MARKER_TOKEN", .removes = "Remove-Item Env:ZAG_MARKER_TOKEN" },
+    };
+
+    for (each) |hook| {
+        // It takes the token somewhere the shell can read it.
+        try testing.expect(std.mem.indexOf(u8, hook.text, hook.takes) != null);
+        // It removes it from the environment, so nothing the person runs
+        // inherits it.
+        try testing.expect(std.mem.indexOf(u8, hook.text, hook.removes) != null);
+        // And it puts it on the marks, so the workbench can tell a boundary the
+        // shell wrote from one a program printed.
+        try testing.expect(std.mem.indexOf(u8, hook.text, "token=") != null);
+    }
+}
+
+test "a boundary a program printed is refused, and the shell's is accepted" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The marks the fixed bash hook produces, with the token the session gave
+    // it. These are the exact strings the shell prints.
+    var tracker = Tracker.initAuthenticated(arena, "SECRET123");
+
+    const started = (try tracker.consume("133;C;token=SECRET123;cmdline=zig build test")).?;
+    try testing.expectEqualStrings("zig build test", started.output_start.command.?);
+    const finished = (try tracker.consume("133;D;3;token=SECRET123")).?;
+    try testing.expectEqual(@as(u8, 3), finished.command_finished.exit_status.?);
+
+    // A program that prints the same shape without the token, or with a guess,
+    // cannot close a block or open one. This is what the token is for, and it
+    // did nothing at all while no hook set one.
+    try testing.expect((try tracker.consume("133;D;0")) == null);
+    try testing.expect((try tracker.consume("133;D;0;token=guessed")) == null);
+    try testing.expect((try tracker.consume("133;C;token=guessed;cmdline=rm -rf /")) == null);
 }
