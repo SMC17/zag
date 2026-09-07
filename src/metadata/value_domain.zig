@@ -8,8 +8,6 @@
 const std = @import("std");
 const timeutil = @import("../core/time.zig");
 const units = @import("../interop/units.zig");
-const countries = @import("../interop/countries.zig");
-const currency = @import("../interop/currency.zig");
 const language = @import("../interop/language.zig");
 
 pub const Datatype = enum {
@@ -30,12 +28,6 @@ pub const Datatype = enum {
     code,
     /// Number with a unit.
     quantity,
-    /// Amount of money with a currency.
-    money,
-    /// ISO 3166-1 alpha-2.
-    country_code,
-    /// ISO 4217 alphabetic code.
-    currency_code,
     /// Language tag validated against ISO 639-1, ISO 15924 and ISO 3166-1.
     language_tag,
     /// Content hash in the workbench's canonical form.
@@ -131,15 +123,6 @@ pub const ValueDomain = struct {
                     if (!written.commensurableWith(expected)) return error.UnitMismatch;
                 }
             },
-            .money => {
-                _ = currency.Money.parse(value) catch return error.WrongDatatype;
-            },
-            .country_code => {
-                _ = countries.CountryCode.parse(value) catch return error.UnknownCode;
-            },
-            .currency_code => {
-                _ = currency.CurrencyCode.parse(value) catch return error.UnknownCode;
-            },
             .language_tag => {
                 _ = language.Tag.parse(value) catch return error.UnknownCode;
             },
@@ -184,20 +167,6 @@ test "quantities must use a commensurable unit" {
     try domain.validate("0.5 s");
     try std.testing.expectError(error.UnitMismatch, domain.validate("8.5 m"));
     try std.testing.expectError(error.WrongDatatype, domain.validate("8.5"));
-}
-
-test "coded value domains reuse the iso registries" {
-    const country: ValueDomain = .{ .id = "country", .definition = "country of the operator", .datatype = .country_code };
-    try country.validate("DE");
-    try std.testing.expectError(error.UnknownCode, country.validate("XX"));
-
-    const money: ValueDomain = .{ .id = "cost", .definition = "cost of one agent run", .datatype = .money };
-    try money.validate("12.34 USD");
-    try std.testing.expectError(error.WrongDatatype, money.validate("$12.34"));
-
-    const tag: ValueDomain = .{ .id = "content-language", .definition = "language of the content", .datatype = .language_tag };
-    try tag.validate("en-GB");
-    try std.testing.expectError(error.UnknownCode, tag.validate("en-ZZ"));
 }
 
 test "ranges and lengths are enforced" {
