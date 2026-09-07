@@ -216,9 +216,19 @@ pub const Timestamp = struct {
 
     /// Instants cross interfaces as ISO 8601 strings, never as numbers, so
     /// that a stored value is readable without knowing our epoch or unit.
+    /// Written at nanosecond precision, because that is what is held.
+    ///
+    /// Memory carries nanoseconds; the record used to carry milliseconds, so a
+    /// timestamp did not survive being written and read back. An event recorded
+    /// at 22:13:20.123456789 came back as 22:13:20.123, and every duration
+    /// computed from two such times lost the difference. A record that rounds
+    /// what it was given is not a record of what happened.
+    ///
+    /// ISO 8601 allows nine fractional digits, so this is still an ordinary
+    /// timestamp that anything else can read.
     pub fn jsonStringify(self: Timestamp, jw: *std.json.Stringify) !void {
         var buf: [text_len_max]u8 = undefined;
-        try jw.write(self.toIso(&buf, .millisecond));
+        try jw.write(self.toIso(&buf, .nanosecond));
     }
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Timestamp {
@@ -588,10 +598,71 @@ test "instants and durations round trip through json" {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     try std.json.Stringify.value(original, .{}, &aw.writer);
-    try std.testing.expectEqualStrings("{\"at\":\"2026-09-04T20:41:31.500Z\",\"took\":\"PT1H30M\"}", aw.written());
+    // Nine fractional digits, always. A fixed width means one instant has one
+    // representation, which is what a record that is hashed needs: two writers
+    // of the same instant produce the same bytes.
+    try std.testing.expectEqualStrings(
+        "{\"at\":\"2026-09-04T20:41:31.500000000Z\",\"took\":\"PT1H30M\"}",
+        aw.written(),
+    );
 
     const parsed = try std.json.parseFromSlice(Holder, gpa, aw.written(), .{});
     defer parsed.deinit();
     try std.testing.expectEqual(original.at.ns, parsed.value.at.ns);
     try std.testing.expectEqual(original.took.ns, parsed.value.took.ns);
+}
+
+test "a timestamp survives being written and read back, to the nanosecond" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The times a real clock produces, not the round ones a test invents.
+    for ([_]i64{
+        1_700_000_000_123_456_789,
+        1_700_000_000_000_000_001,
+        1_788_000_000_999_999_999,
+        0,
+        -1_000_000_000,
+    }) |ns| {
+        const original: Timestamp = .{ .ns = ns };
+        var out: std.Io.Writer.Allocating = .init(arena);
+        try std.json.Stringify.value(original, .{}, &out.writer);
+        const parsed = try std.json.parseFromSlice(Timestamp, arena, out.written(), .{});
+        try std.testing.expectEqual(original.ns, parsed.value.ns);
+    }
+
+    // Two instants a fraction of a millisecond apart are two instants in the
+    // record, not one. They used to be the same text.
+    const a: Timestamp = .{ .ns = 1_700_000_000_123_000_000 };
+    const b: Timestamp = .{ .ns = 1_700_000_000_123_456_789 };
+    var first: std.Io.Writer.Allocating = .init(arena);
+    var second: std.Io.Writer.Allocating = .init(arena);
+    try std.json.Stringify.value(a, .{}, &first.writer);
+    try std.json.Stringify.value(b, .{}, &second.writer);
+    try std.testing.expect(!std.mem.eql(u8, first.written(), second.written()));
+}
+
+test "a duration survives the round trip at nanosecond precision" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Wall-clock durations, including ones whose fraction is not a dyadic
+    // rational. The parse goes through a float, so these are the values that
+    // would show it if that were lossy.
+    for ([_]i64{
+        1_005_000_123,
+        1,
+        999_999_999,
+        3_600_000_000_007,
+        0,
+        -250_000_001,
+    }) |ns| {
+        const original: Duration = .{ .ns = ns };
+        var out: std.Io.Writer.Allocating = .init(arena);
+        try std.json.Stringify.value(original, .{}, &out.writer);
+        const parsed = try std.json.parseFromSlice(Duration, arena, out.written(), .{});
+        try std.testing.expectEqual(original.ns, parsed.value.ns);
+    }
 }

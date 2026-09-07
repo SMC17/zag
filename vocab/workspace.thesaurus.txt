@@ -106,6 +106,9 @@ knowledge base
 machine learning
     RT  AI system
 
+masking
+    USE redaction
+
 metric
 
 model
@@ -117,6 +120,7 @@ plain language
 
 policy
     RT  capability
+    RT  redaction
     RT  authorisation decision
 
 project shell
@@ -143,6 +147,12 @@ record
     NT  authorisation decision
     NT  evidence
 
+redaction
+    UF  masking
+    UF  scrubbing
+    RT  workspace event
+    RT  policy
+
 requirement
     BT  standard
     RT  evidence
@@ -150,6 +160,10 @@ requirement
 
 risk
     RT  impact assessment
+
+scrubbing
+    USE redaction
+    SN  Says nothing about what replaced the value. Use redaction.
 
 session
     BT  workspace
@@ -193,6 +207,7 @@ workspace event
     UF  event
     BT  workspace
     RT  block
+    RT  redaction
     RT  execution graph
 
 worktree

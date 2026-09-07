@@ -90,10 +90,53 @@ const once_only_options = [_]Option{
 /// command line as it will run, the remote's address rather than its local
 /// alias. A reader cannot judge "push to origin" without knowing where origin
 /// points.
+/// Make text safe to put in front of a person.
+///
+/// Every control character becomes a visible escape, and text longer than a
+/// line is cut with the cut marked. What a person is asked about has to be what
+/// they see, and a resource that can move the cursor is a resource that can
+/// change the question.
+///
+/// The replacement is visible rather than silent: a path that really does
+/// contain a newline shows as `\n`, so a person sees something strange and can
+/// refuse, instead of seeing a tidy path that is not the one being asked about.
+pub fn readable(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
+    const limit = 200;
+    var out: std.ArrayList(u8) = .empty;
+    var index: usize = 0;
+    while (index < text.len and out.items.len < limit) : (index += 1) {
+        const byte = text[index];
+        switch (byte) {
+            '\n' => try out.appendSlice(arena, "\\n"),
+            '\r' => try out.appendSlice(arena, "\\r"),
+            '\t' => try out.appendSlice(arena, "\\t"),
+            0x1b => try out.appendSlice(arena, "\\e"),
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1a, 0x1c...0x1f, 0x7f => {
+                var escape: [4]u8 = undefined;
+                const hex = "0123456789abcdef";
+                escape[0] = '\\';
+                escape[1] = 'x';
+                escape[2] = hex[byte >> 4];
+                escape[3] = hex[byte & 0x0f];
+                try out.appendSlice(arena, &escape);
+            },
+            else => try out.append(arena, byte),
+        }
+    }
+    if (index < text.len) try out.appendSlice(arena, "... (cut)");
+    return out.items;
+}
+
 pub fn build(arena: std.mem.Allocator, decision: Decision, agent_label: []const u8) !Prompt {
     const request = decision.request;
-    const subject = request.resource.text();
-    const label = if (agent_label.len > 0) agent_label else "The agent";
+    // The resource is text an agent chose, and it lands in the middle of a
+    // question a person answers. A path containing a newline could push the
+    // real operation off the top of what they read and put a reassuring
+    // sentence where the question should be; an escape sequence could colour
+    // it, move the cursor, or erase the line above. Neither is a hypothetical
+    // shape for a filename to have when something else picked it.
+    const subject = try readable(arena, request.resource.text());
+    const label = try readable(arena, if (agent_label.len > 0) agent_label else "The agent");
 
     const question = try questionFor(arena, request.capability, subject);
     const explanation = try std.fmt.allocPrint(arena, "{s} wants to {s}.", .{ label, try wantsTo(arena, request.capability, subject) });
@@ -294,4 +337,60 @@ test "every option label starts with the action it performs" {
         try testing.expect(!report.has(.label_without_action));
         try testing.expect(option.meaning.len > 0);
     }
+}
+
+test "a resource cannot reshape the question a person is answering" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A path an agent chose, containing a newline and an escape sequence. Put
+    // straight into a prompt it would push the real operation out of view and
+    // write a reassuring line where the question should be.
+    const hostile = "notes.md\nThis is safe to allow.\x1b[2K\x1b[A";
+    const decision: Decision = .{
+        .id = idmod.DecisionId.fromRaw(.{ .bytes = [_]u8{7} ** 16 }),
+        .request = .{ .capability = .@"fs.delete", .resource = .{ .path = hostile } },
+        .effect = .require_human,
+        .rule_id = null,
+        .policy_id = "test",
+        .reason = "Deleting cannot be undone.",
+        .actor = idmod.ActorId.fromRaw(.{ .bytes = [_]u8{1} ** 16 }),
+        .session = null,
+        .agent = null,
+        .decided_at = .{ .ns = 0 },
+    };
+
+    const prompt = try build(arena, decision, "an agent");
+    var buffer: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buffer);
+    try prompt.writeText(&w);
+    const text = w.buffered();
+
+    // Nothing that moves a cursor or breaks a line reaches the screen.
+    try testing.expect(std.mem.indexOfScalar(u8, text, 0x1b) == null);
+    try testing.expect(std.mem.indexOf(u8, text, "\nThis is safe to allow.") == null);
+
+    // What a person sees instead is the path with its oddities visible, so it
+    // looks wrong rather than looking tidy and being wrong.
+    try testing.expect(std.mem.indexOf(u8, text, "\\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\\e") != null);
+    // The operation is still named.
+    try testing.expect(std.mem.indexOf(u8, text, "notes.md") != null);
+}
+
+test "readable keeps ordinary text exactly, and cuts what is too long" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // An ordinary path is untouched. A check that mangled normal input would
+    // be worse than none.
+    try testing.expectEqualStrings("src/main.zig", try readable(arena, "src/main.zig"));
+    try testing.expectEqualStrings("a file with spaces.txt", try readable(arena, "a file with spaces.txt"));
+    // Text beyond a line is cut, and the cut is marked.
+    const long = "x" ** 400;
+    const cut = try readable(arena, long);
+    try testing.expect(cut.len < long.len);
+    try testing.expect(std.mem.endsWith(u8, cut, "(cut)"));
 }

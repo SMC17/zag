@@ -140,6 +140,55 @@ pub const Table = struct {
     }
 };
 
+/// Write a length of time the way a person says one.
+///
+/// `core/time.zig` keeps the ISO 8601 form, which is right for storage and for
+/// anything another program reads. `PT0.00618854S` is not right for a line a
+/// person reads at the end of a run, so the plain form lives here, in the
+/// presentation layer, with the rest of the notation.
+///
+/// The unit is chosen by size and the figure is kept to one decimal at most,
+/// because a duration reported to nine digits invites a precision the
+/// measurement does not have.
+pub fn writeDuration(w: *std.Io.Writer, duration: timeutil.Duration) std.Io.Writer.Error!void {
+    var ns = duration.ns;
+    if (ns < 0) {
+        try w.writeAll("-");
+        ns = -ns;
+    }
+    if (ns == 0) return w.writeAll("no time at all");
+    if (ns < 1_000) return w.print("{d} nanoseconds", .{ns});
+    if (ns < 1_000_000) return writeScaled(w, ns, 1_000, "millisecond");
+    if (ns < timeutil.ns_per_s) return writeScaled(w, ns, 1_000_000, "millisecond");
+    if (ns < timeutil.ns_per_min) return writeScaled(w, ns, timeutil.ns_per_s, "second");
+    if (ns < timeutil.ns_per_hour) return writeScaled(w, ns, timeutil.ns_per_min, "minute");
+    if (ns < timeutil.ns_per_day) return writeScaled(w, ns, timeutil.ns_per_hour, "hour");
+    return writeScaled(w, ns, timeutil.ns_per_day, "day");
+}
+
+fn writeScaled(
+    w: *std.Io.Writer,
+    ns: i64,
+    per_unit: i64,
+    name: []const u8,
+) std.Io.Writer.Error!void {
+    const whole = @divTrunc(ns, per_unit);
+    const tenths = @divTrunc((ns - whole * per_unit) * 10, per_unit);
+    if (whole >= 10 or tenths == 0) {
+        try w.print("{d} {s}", .{ whole, name });
+        if (whole != 1) try w.writeAll("s");
+        return;
+    }
+    try w.print("{d}.{d} {s}s", .{ whole, tenths, name });
+}
+
+/// The same thing, into a buffer, for a caller that is building a sentence.
+pub fn durationText(buffer: []u8, duration: timeutil.Duration) []const u8 {
+    var w = std.Io.Writer.fixed(buffer);
+    writeDuration(&w, duration) catch return "";
+    return w.buffered();
+}
+
 pub const footnote =
     "How to read this: a plus sign means the figure moved in the better direction " ++
     "for that measure, a minus sign means it moved the worse way, and a tilde means " ++
@@ -338,4 +387,30 @@ test "a chart states its unit, its direction and its scale" {
     try testing.expect(std.mem.indexOf(u8, text, "Lower is better.") != null);
     try testing.expect(std.mem.indexOf(u8, text, "The longest bar is 18.2 ms.") != null);
     try testing.expect(std.mem.indexOf(u8, text, "####") != null);
+}
+
+test "a length of time reads the way a person says one" {
+    var buffer: [64]u8 = undefined;
+
+    // The case that prompted this: a run that took a few milliseconds, which
+    // ISO 8601 writes as PT0.00618854S.
+    try testing.expectEqualStrings("6.1 milliseconds", durationText(&buffer, .{ .ns = 6_188_540 }));
+
+    try testing.expectEqualStrings("no time at all", durationText(&buffer, .{ .ns = 0 }));
+    try testing.expectEqualStrings("400 nanoseconds", durationText(&buffer, .{ .ns = 400 }));
+    try testing.expectEqualStrings("1.5 seconds", durationText(&buffer, .{ .ns = 1_500_000_000 }));
+    try testing.expectEqualStrings("1 second", durationText(&buffer, .{ .ns = 1_000_000_000 }));
+    try testing.expectEqualStrings("2 minutes", durationText(&buffer, .{ .ns = 120 * timeutil.ns_per_s }));
+    try testing.expectEqualStrings("1.5 hours", durationText(&buffer, .{ .ns = 90 * timeutil.ns_per_min }));
+    try testing.expectEqualStrings("3 days", durationText(&buffer, .{ .ns = 3 * timeutil.ns_per_day }));
+
+    // Past ten of a unit the decimal is dropped: a precision nobody measured
+    // should not be printed.
+    try testing.expectEqualStrings("42 seconds", durationText(&buffer, .{ .ns = 42_400_000_000 }));
+
+    // The ISO form is still there, unchanged, for anything a program reads.
+    var iso: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&iso);
+    try (timeutil.Duration{ .ns = 6_188_540 }).writeIso(&w);
+    try testing.expectEqualStrings("PT0.00618854S", w.buffered());
 }
