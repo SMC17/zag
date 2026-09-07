@@ -19,9 +19,12 @@ pub const Resource = capability_mod.Resource;
 /// What of the caller's environment a process may see. The default gives a
 /// process nothing it was not explicitly given.
 pub const EnvironmentPolicy = enum {
-    /// Only the variables listed in the request.
+    /// Only the variables listed in the request. A command with no `PATH`
+    /// cannot start, so this is for a caller that supplies everything itself.
     none,
-    /// The listed variables, taken from the current environment.
+    /// A curated set taken from the person's environment — enough to find and
+    /// run a build tool, and nothing that carries a credential. The request may
+    /// name its own variables instead. See `executor.default_environment_allowlist`.
     allowlist,
     /// Everything the workbench itself has. Rarely correct.
     inherit_all,
@@ -50,8 +53,17 @@ pub const ExecuteRequest = struct {
     /// a string that gets word-split by a shell is how quoting bugs become
     /// security bugs.
     argv: []const []const u8,
-    workingDirectory: []const u8,
-    environmentPolicy: EnvironmentPolicy = .none,
+    /// Where to run, relative to the workspace.
+    ///
+    /// Defaulted, because a model is never told the workspace's absolute path
+    /// and cannot invent one. It was required, and the executor ignored it and
+    /// ran everything in the workspace root anyway — so the only thing the
+    /// field did was refuse tool calls that left it out.
+    workingDirectory: []const u8 = ".",
+    /// Defaulted to the allowlist rather than to nothing. `.none` means a
+    /// command runs with only what it names, and a command with no `PATH`
+    /// cannot find the program it is trying to be.
+    environmentPolicy: EnvironmentPolicy = .allowlist,
     environment: []const []const u8 = &.{},
     network: NetworkPolicy = .none,
     timeout: timeutil.Duration = .{ .ns = 120 * timeutil.ns_per_s },
@@ -76,8 +88,22 @@ pub const ReadFileRequest = struct {
 
 pub const WriteFileRequest = struct {
     path: []const u8,
-    contentHash: hashing.Hash,
-    byteCount: usize,
+    /// The bytes to write.
+    ///
+    /// A model has to be able to say what it wants written. Before this, the
+    /// only way to name content was `contentHash`, and nothing a model could
+    /// call put content into the store — so a model could read a file and run
+    /// a program, and never produce anything. An agent that cannot write a
+    /// file cannot build anything.
+    ///
+    /// When this is set the bytes are stored on the way past, so the record
+    /// still addresses what landed by hash and `zag objects` still verifies
+    /// it. Leave it empty to write content that is already stored, which is
+    /// the path a reviewed write takes: there the bytes that land are exactly
+    /// the bytes somebody looked at.
+    contents: []const u8 = "",
+    contentHash: hashing.Hash = hashing.Hash.zero,
+    byteCount: usize = 0,
     createIfMissing: bool = true,
 };
 
@@ -204,6 +230,19 @@ pub const ToolResult = struct {
     duration: timeutil.Duration = .{ .ns = 0 },
     /// One sentence for the person reading the block list later.
     summary: []const u8 = "",
+    /// What the tool actually produced, for the model to read.
+    ///
+    /// Separate from `summary` because they answer different questions. The
+    /// summary is for a person scanning a block list — "Read 41 bytes from
+    /// README.md" — and the content is the 41 bytes. Without this a model that
+    /// asks to read a file is told how big the file was, and an agent asked to
+    /// run the tests and fix what failed learns only that the tests exited 1.
+    ///
+    /// Held in the arena and never written to the log; the log keeps
+    /// `contentHash` and `byteCount`, and the bytes go to the content store.
+    /// Redacted before it reaches a provider, on the same path as everything
+    /// else in a request.
+    content: []const u8 = "",
 
     pub fn succeeded(self: ToolResult) bool {
         return self.outcome == .completed;
