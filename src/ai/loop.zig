@@ -302,7 +302,13 @@ pub const Moment = union(enum) {
         summary: []const u8,
         resultHash: hashing.Hash,
     },
-    finished: struct { ending: Ending },
+    finished: struct {
+        ending: Ending,
+        elapsed: timeutil.Duration,
+        toolCalls: usize,
+        refusedCalls: usize,
+        usage: provider.Usage,
+    },
 };
 
 /// Where the record of a run goes.
@@ -486,7 +492,21 @@ pub const Runner = struct {
             }
         }
 
-        self.note(.{ .finished = .{ .ending = ending } });
+        var calls: usize = 0;
+        var refusals: usize = 0;
+        for (turns.items) |turn| {
+            calls += turn.steps.len;
+            for (turn.steps) |step| {
+                if (step.refused) refusals += 1;
+            }
+        }
+        self.note(.{ .finished = .{
+            .ending = ending,
+            .elapsed = .{ .ns = self.clock.now() - started },
+            .toolCalls = calls,
+            .refusedCalls = refusals,
+            .usage = usage,
+        } });
 
         return .{
             .ending = ending,
@@ -612,12 +632,38 @@ pub const Runner = struct {
 
         // 5. The executor spends the decision. It checks the match again, on
         //    its own terms, because this loop is not what makes that safe.
-        step.executed = true;
         const result = self.executor.run(decision, request) catch |err| {
-            step.result = .{ .outcome = .failed, .summary = executor_mod.refusalText(err) };
-            step.reply = try toolschema.resultText(self.arena, step.result.?);
+            // Some of these are refusals reached before anything happened, and
+            // some are failures during the work. A person reading the record
+            // needs the difference: "it did not run" and "it ran and did not
+            // work" lead to different next moves, and so does the message the
+            // model gets back.
+            const refused_before_acting = switch (err) {
+                error.NotAllowed,
+                error.DecisionDoesNotMatchRequest,
+                error.NoExecutor,
+                error.UseTheTypedRequest,
+                error.NoShellForAgents,
+                => true,
+                else => false,
+            };
+            step.refused = refused_before_acting;
+            step.executed = !refused_before_acting;
+            step.result = .{
+                .outcome = if (refused_before_acting) .denied else .failed,
+                .summary = executor_mod.refusalText(err),
+            };
+            // The executor's own words, not the policy's. The policy may well
+            // have allowed this: what refused it was the request model, and
+            // telling a model "the policy did not allow this" when the policy
+            // did would send it to ask a person about the wrong thing.
+            step.reply = if (refused_before_acting)
+                executor_mod.refusalText(err)
+            else
+                try toolschema.resultText(self.arena, step.result.?);
             return step;
         };
+        step.executed = true;
         step.result = result;
         step.reply = try toolschema.resultText(self.arena, result);
         return step;
@@ -1166,4 +1212,57 @@ test "a summary reads as sentences and counts what happened" {
     try testing.expect(std.mem.indexOf(u8, text, "2 tool calls") != null);
     try testing.expect(std.mem.indexOf(u8, text, "1 of them refused") != null);
     try testing.expect(std.mem.indexOf(u8, text, "tokens") != null);
+}
+
+test "a refusal from the executor is not reported as the policy refusing" {
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+
+    // The policy allows running programs. What refuses these is the request
+    // model itself, and the two must not be confused: a model told the policy
+    // refused will go and ask a person about a permission they already gave.
+    const rules = [_]policy_mod.Rule{.{
+        .id = "allow-everything",
+        .capabilities = &.{ .@"model.infer", .@"network.connect", .@"process.execute" },
+        .effect = .allow,
+        .reason = "This workspace allows running programs.",
+    }};
+    const fixture = try Fixture.init(&rules, &.{});
+    defer fixture.deinit();
+    const arena = fixture.arena();
+
+    fixture.recorded.responses = try arena.dupe(transport_mod.Response, &.{
+        try callResponse(arena, "run_command",
+            \\{"argv":["sh","-c","rm -rf notes.txt"],"workingDirectory":"."}
+        ),
+        try callResponse(arena, "run_command",
+            \\{"argv":["rm","notes.txt"],"workingDirectory":"."}
+        ),
+        try textResponse(arena, "I could not remove it."),
+    });
+
+    const transcript = try fixture.runner(stopped_clock).run(
+        fixture.options(),
+        "delete notes.txt",
+        fixture.context(),
+    );
+
+    const shell = transcript.turns[0].steps[0];
+    const program = transcript.turns[1].steps[0];
+
+    // Neither ran, and the record says refused rather than ran-and-failed.
+    try testing.expect(!shell.ran());
+    try testing.expect(!program.ran());
+    try testing.expect(shell.refused);
+    try testing.expect(program.refused);
+    try testing.expect(!transcript.ranAnything());
+
+    // The decision was an allow. The refusal came from somewhere else, and the
+    // words the model gets back say which.
+    try testing.expect(shell.decision.?.isAllowed());
+    try testing.expect(program.decision.?.isAllowed());
+    try testing.expect(std.mem.indexOf(u8, shell.reply, "may not run a shell") != null);
+    try testing.expect(std.mem.indexOf(u8, program.reply, "request of its own") != null);
+    try testing.expect(std.mem.indexOf(u8, shell.reply, "policy did not allow") == null);
+    try testing.expect(std.mem.indexOf(u8, program.reply, "policy did not allow") == null);
 }

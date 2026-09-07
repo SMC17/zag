@@ -66,12 +66,67 @@ pub const GitContext = struct {
     dirtyFileCount: u32 = 0,
 };
 
+/// One piece of a command's output, as it arrived.
+///
+/// A program's output reaches the workbench in whatever pieces the operating
+/// system hands over, and each piece is stored and hashed on its own. The
+/// index number is the event's, so pieces can be put back in order however
+/// they were delivered.
+pub const Chunk = struct {
+    hash: Hash,
+    byteCount: usize,
+    index: u32,
+};
+
+/// Order pieces the way the program produced them.
+///
+/// The event carries the index for exactly this: reads can be delivered out of
+/// order, and putting them back by arrival time would reassemble the output
+/// wrongly and silently.
+fn earlierChunk(_: void, a: Chunk, b: Chunk) bool {
+    return a.index < b.index;
+}
+
 /// Where the block's output lives. Small output is kept inline; anything
 /// larger is content-addressed so the log stays small and replay stays fast.
+///
+/// Output that arrived in more than one piece is `chunked`, and that variant
+/// exists because the alternative was a lie: the fold used to keep the *last*
+/// piece's hash beside the *summed* byte count, so a block with three chunks
+/// claimed a hash covering twenty bytes next to a count of six thousand. Every
+/// consumer that checked the hash against the count would have found the record
+/// wrong, and every consumer that trusted it would have been reading twenty
+/// bytes and calling them the output.
 pub const ContentRef = union(enum) {
     none,
     inline_text: []const u8,
     hashed: struct { hash: Hash, byteCount: usize },
+    chunked: struct { chunks: []const Chunk, byteCount: usize },
+
+    /// How many bytes the output is, all pieces together.
+    pub fn totalBytes(self: ContentRef) usize {
+        return switch (self) {
+            .none => 0,
+            .inline_text => |text| text.len,
+            .hashed => |h| h.byteCount,
+            .chunked => |c| c.byteCount,
+        };
+    }
+
+    /// The pieces, in the order they were produced.
+    ///
+    /// One piece for a single hash, so a caller reassembling output does not
+    /// need to know which shape it got.
+    pub fn pieces(self: ContentRef, one: *[1]Chunk) []const Chunk {
+        return switch (self) {
+            .chunked => |c| c.chunks,
+            .hashed => |h| blk: {
+                one[0] = .{ .hash = h.hash, .byteCount = h.byteCount, .index = 0 };
+                break :blk one[0..1];
+            },
+            else => &.{},
+        };
+    }
 };
 
 pub const Block = struct {
@@ -136,6 +191,10 @@ pub const Index = struct {
         // Positions of blocks that have not finished yet, so a git change can
         // reach them without walking the whole list.
         var open_blocks: std.ArrayList(usize) = .empty;
+        // Output pieces, per block, kept until the fold is finished so that a
+        // block with one piece and a block with several are recorded as the
+        // different things they are.
+        var chunks_by_block: std.AutoArrayHashMapUnmanaged([16]u8, std.ArrayList(Chunk)) = .empty;
 
         for (log.entries.items) |entry| {
             switch (entry.payload) {
@@ -160,7 +219,13 @@ pub const Index = struct {
                     const at = position.get(e.block.raw.bytes) orelse continue;
                     const block = &index.blocks.items[at];
                     block.outputBytes += e.byteCount;
-                    block.content = .{ .hashed = .{ .hash = e.contentHash, .byteCount = block.outputBytes } };
+                    const found = try chunks_by_block.getOrPut(arena, e.block.raw.bytes);
+                    if (!found.found_existing) found.value_ptr.* = .empty;
+                    try found.value_ptr.append(arena, .{
+                        .hash = e.contentHash,
+                        .byteCount = e.byteCount,
+                        .index = e.chunkIndex,
+                    });
                 },
                 .command_finished => |e| {
                     const at = position.get(e.block.raw.bytes) orelse continue;
@@ -210,6 +275,18 @@ pub const Index = struct {
                         .actor = entry.actor,
                         .parent = BlockId.fromRaw(e.agent.raw),
                     });
+                },
+                .agent_finished => |e| {
+                    const at = position.get(e.agent.raw.bytes) orelse continue;
+                    const block = &index.blocks.items[at];
+                    block.finishedAt = entry.at;
+                    block.status = switch (e.outcome) {
+                        .answered => .succeeded,
+                        .refused, .stopped_by_policy => .denied,
+                        .waiting_for_a_person => .running,
+                        .out_of_budget, .unavailable => .failed,
+                    };
+                    if (e.summary.len > 0) block.commandText = e.summary;
                 },
                 .file_changed => |e| {
                     try index.blocks.append(arena, .{
@@ -272,6 +349,24 @@ pub const Index = struct {
                 },
                 else => {},
             }
+        }
+
+        // Now that every piece is in, say what the output is. One piece is one
+        // hash of that many bytes. Several pieces are several hashes, each
+        // covering its own bytes, in the order the program produced them.
+        var chunk_entries = chunks_by_block.iterator();
+        while (chunk_entries.next()) |entry| {
+            const at = position.get(entry.key_ptr.*) orelse continue;
+            const block = &index.blocks.items[at];
+            const list = entry.value_ptr.*;
+            if (list.items.len == 0) continue;
+            std.mem.sort(Chunk, list.items, {}, earlierChunk);
+            var total: usize = 0;
+            for (list.items) |chunk| total += chunk.byteCount;
+            block.content = if (list.items.len == 1)
+                .{ .hashed = .{ .hash = list.items[0].hash, .byteCount = list.items[0].byteCount } }
+            else
+                .{ .chunked = .{ .chunks = list.items, .byteCount = total } };
         }
 
         // Fill in children from the parent links. Every block is looked up by
@@ -471,4 +566,148 @@ test "an approval becomes a block with an outcome" {
     try testing.expectEqual(Kind.approval, block.kind);
     try testing.expectEqual(Status.succeeded, block.status);
     try testing.expect(block.isFinished());
+}
+
+test "output that arrived in pieces is recorded as pieces, not as the last one" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var log = log_mod.Log.init(arena, 61);
+    var gen: idmod.Generator = .init(62, 1_788_000_000_000);
+    const actor: event_mod.Actor = .{ .id = gen.next(idmod.ActorId), .kind = .person, .label = "you" };
+    const session = gen.next(idmod.SessionId);
+    const block = gen.next(idmod.BlockId);
+
+    _ = try log.append(.{ .command_submitted = .{
+        .block = block,
+        .session = session,
+        .commandText = "zig build test",
+        .workingDirectory = "/repo",
+    } }, .{ .at = .{ .ns = 1 }, .actor = actor });
+
+    // Three reads, as a pseudoterminal really delivers them, and deliberately
+    // out of order to prove the index is what puts them back.
+    const first = Hash.of("first piece, five thousand bytes of it");
+    const second = Hash.of("second piece");
+    const third = Hash.of("third");
+    _ = try log.append(.{ .process_output = .{
+        .block = block,
+        .session = session,
+        .contentHash = third,
+        .byteCount = 5,
+        .chunkIndex = 2,
+    } }, .{ .at = .{ .ns = 2 }, .actor = actor });
+    _ = try log.append(.{ .process_output = .{
+        .block = block,
+        .session = session,
+        .contentHash = first,
+        .byteCount = 5000,
+        .chunkIndex = 0,
+    } }, .{ .at = .{ .ns = 3 }, .actor = actor });
+    _ = try log.append(.{ .process_output = .{
+        .block = block,
+        .session = session,
+        .contentHash = second,
+        .byteCount = 12,
+        .chunkIndex = 1,
+    } }, .{ .at = .{ .ns = 4 }, .actor = actor });
+
+    const index = try Index.build(arena, log);
+    const folded = index.blocks.items[0];
+
+    // Three pieces, each with the hash of its own bytes. The old fold kept the
+    // last piece's hash beside the summed count, so the record said a hash of
+    // five bytes covered five thousand and seventeen.
+    try testing.expect(folded.content == .chunked);
+    const chunks = folded.content.chunked.chunks;
+    try testing.expectEqual(@as(usize, 3), chunks.len);
+    try testing.expectEqual(@as(usize, 5017), folded.content.totalBytes());
+    try testing.expectEqual(folded.outputBytes, folded.content.totalBytes());
+
+    // In the order the program produced them, not the order they arrived.
+    try testing.expect(chunks[0].hash.eql(first));
+    try testing.expect(chunks[1].hash.eql(second));
+    try testing.expect(chunks[2].hash.eql(third));
+
+    // Every piece's hash covers exactly the bytes beside it, which is the
+    // property that was false before and is the only one worth having.
+    try testing.expectEqual(@as(usize, 5000), chunks[0].byteCount);
+    try testing.expectEqual(@as(usize, 12), chunks[1].byteCount);
+    try testing.expectEqual(@as(usize, 5), chunks[2].byteCount);
+
+    var one: [1]Chunk = undefined;
+    try testing.expectEqual(@as(usize, 3), folded.content.pieces(&one).len);
+}
+
+test "output that arrived in one piece stays one hash" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var log = log_mod.Log.init(arena, 71);
+    var gen: idmod.Generator = .init(72, 1_788_000_000_000);
+    const actor: event_mod.Actor = .{ .id = gen.next(idmod.ActorId), .kind = .person, .label = "you" };
+    const session = gen.next(idmod.SessionId);
+    const block = gen.next(idmod.BlockId);
+
+    _ = try log.append(.{ .command_submitted = .{
+        .block = block,
+        .session = session,
+        .commandText = "echo hello",
+        .workingDirectory = "/repo",
+    } }, .{ .at = .{ .ns = 1 }, .actor = actor });
+    const only = Hash.of("hello\n");
+    _ = try log.append(.{ .process_output = .{
+        .block = block,
+        .session = session,
+        .contentHash = only,
+        .byteCount = 6,
+    } }, .{ .at = .{ .ns = 2 }, .actor = actor });
+
+    const index = try Index.build(arena, log);
+    const folded = index.blocks.items[0];
+    try testing.expect(folded.content == .hashed);
+    try testing.expect(folded.content.hashed.hash.eql(only));
+    try testing.expectEqual(@as(usize, 6), folded.content.hashed.byteCount);
+
+    // And a caller that just wants the pieces gets one, so it need not know
+    // which shape it was handed.
+    var one: [1]Chunk = undefined;
+    const pieces = folded.content.pieces(&one);
+    try testing.expectEqual(@as(usize, 1), pieces.len);
+    try testing.expect(pieces[0].hash.eql(only));
+}
+
+test "moving to a directory is not a repository changing" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var log = log_mod.Log.init(arena, 81);
+    var gen: idmod.Generator = .init(82, 1_788_000_000_000);
+    const actor: event_mod.Actor = .{ .id = gen.next(idmod.ActorId), .kind = .person, .label = "you" };
+    const session = gen.next(idmod.SessionId);
+    const block = gen.next(idmod.BlockId);
+
+    // A `cd /tmp`, as a shell integration mark reports it.
+    _ = try log.append(.{ .directory_changed = .{
+        .session = session,
+        .path = "/tmp",
+    } }, .{ .at = .{ .ns = 1 }, .actor = actor });
+    _ = try log.append(.{ .command_submitted = .{
+        .block = block,
+        .session = session,
+        .commandText = "ls",
+        .workingDirectory = "/tmp",
+    } }, .{ .at = .{ .ns = 2 }, .actor = actor });
+
+    const index = try Index.build(arena, log);
+    const folded = index.blocks.items[0];
+
+    // The block knows where it ran, and claims no repository. It used to be
+    // recorded as `git_changed{ .repository = "/tmp" }`, so a search for work
+    // in a repository came back with directories that were never repositories.
+    try testing.expectEqualStrings("/tmp", folded.workingDirectory.?);
+    try testing.expect(folded.git == null);
 }

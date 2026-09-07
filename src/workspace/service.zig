@@ -712,6 +712,31 @@ pub const Service = struct {
                     self.pending_id = null;
                 },
                 .finished => |e| {
+                    // The run itself gets a finish, so the block folded from it
+                    // stops being one that is still going.
+                    _ = try service.record(.{ .agent_finished = .{
+                        .agent = self.agent,
+                        .session = self.session,
+                        .outcome = switch (e.ending) {
+                            .answered => .answered,
+                            .refused_by_model => .refused,
+                            .stopped_by_policy => .stopped_by_policy,
+                            .waiting_for_a_person => .waiting_for_a_person,
+                            .out_of_turns, .out_of_tokens, .out_of_time, .going_in_circles => .out_of_budget,
+                            .provider_unavailable => .unavailable,
+                        },
+                        .duration = e.elapsed,
+                        .toolCalls = @intCast(e.toolCalls),
+                        .refusedCalls = @intCast(e.refusedCalls),
+                        .inputTokens = e.usage.inputTokens,
+                        .outputTokens = e.usage.outputTokens,
+                        .summary = try service.arena.dupe(u8, e.ending.text()),
+                    } }, .{
+                        .at = at,
+                        .actor = actor,
+                        .causedBy = self.started,
+                        .correlation = self.correlation,
+                    });
                     _ = try service.record(.{ .session_closed = .{
                         .session = self.session,
                         .exitStatus = if (e.ending.succeeded()) 0 else 1,
@@ -1544,7 +1569,13 @@ test "an agent run is recorded as one causal tree, refusals included" {
         .summary = "No rule in this policy allows it.",
         .resultHash = hashing.Hash.zero,
     } });
-    journal.record(.{ .finished = .{ .ending = .answered } });
+    journal.record(.{ .finished = .{
+        .ending = .answered,
+        .elapsed = .{ .ns = 250 * timeutil.ns_per_ms },
+        .toolCalls = 2,
+        .refusedCalls = 1,
+        .usage = .{ .inputTokens = 60, .outputTokens = 18 },
+    } });
 
     try testing.expect(recorder.failure == null);
     try testing.expect(recorder.recorded > 0);
@@ -1588,6 +1619,36 @@ test "an agent run is recorded as one causal tree, refusals included" {
     // The refusal is on the record. A run that only wrote down what it managed
     // to do would be the least useful half of the story.
     try testing.expectEqual(@as(usize, 1), refused);
+
+    // The run itself has a finish, so the block folded from it is not one that
+    // is still going. Without it a workspace with a hundred completed runs
+    // shows a hundred that never ended.
+    const blocks = try block_mod.Index.build(arena, loaded.log);
+    var agent_runs: usize = 0;
+    for (blocks.blocks.items) |b| {
+        if (b.kind != .agent_run) continue;
+        agent_runs += 1;
+        try testing.expectEqual(block_mod.Status.succeeded, b.status);
+        try testing.expect(b.finishedAt != null);
+    }
+    try testing.expectEqual(@as(usize, 1), agent_runs);
+
+    // And the run's own cost and shape are on the record, not only its
+    // individual calls.
+    var saw_finish = false;
+    for (loaded.log.entries.items) |entry| {
+        switch (entry.payload) {
+            .agent_finished => |e| {
+                saw_finish = true;
+                try testing.expectEqual(@as(u32, 2), e.toolCalls);
+                try testing.expectEqual(@as(u32, 1), e.refusedCalls);
+                try testing.expectEqual(@as(u64, 60), e.inputTokens);
+                try testing.expectEqual(@as(i64, 250 * timeutil.ns_per_ms), e.duration.ns);
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_finish);
 
     // The whole run comes back from one correlation.
     const run = try graph.run(loaded.log.entries.items[roots.items[0]].id);

@@ -49,6 +49,12 @@ pub const Error = error{
     NotAllowed,
     /// This build has no executor for that request.
     NoExecutor,
+    /// The program asked for has a typed request of its own, and must be asked
+    /// for that way so the right capability is decided.
+    UseTheTypedRequest,
+    /// An agent asked to run a shell, which would put back the thing this
+    /// design removed.
+    NoShellForAgents,
     /// The kernel cannot enforce containment on this machine.
     ContainmentUnavailable,
 } || std.mem.Allocator.Error;
@@ -59,6 +65,8 @@ pub fn refusalText(err: Error) []const u8 {
         error.DecisionDoesNotMatchRequest => "The permission that was granted does not cover what was asked for.",
         error.NotAllowed => "The policy did not allow this.",
         error.NoExecutor => "This build cannot perform that kind of request.",
+        error.UseTheTypedRequest => "That program has a request of its own. Ask for that instead, so the right permission is decided.",
+        error.NoShellForAgents => "An agent may not run a shell here. Ask for the program itself, with its arguments already separated.",
         error.ContainmentUnavailable => "This computer cannot keep file access inside the workspace, so the request was refused.",
         error.OutOfMemory => "There was not enough memory to run this.",
     };
@@ -79,6 +87,63 @@ pub fn refusalText(err: Error) []const u8 {
 /// caller said when the decision was made.
 pub fn resourceOf(arena: std.mem.Allocator, request: ToolRequest) !Resource {
     return request.resource(arena);
+}
+
+/// The program a request runs, without its directory.
+pub fn programOf(request: tools.ExecuteRequest) []const u8 {
+    if (request.argv.len == 0) return "";
+    const first = request.argv[0];
+    return if (std.mem.lastIndexOfScalar(u8, first, '/')) |slash| first[slash + 1 ..] else first;
+}
+
+/// The typed request that should have been used instead of running a program.
+///
+/// This is the hole it closes. Deleting a file is `fs.delete`, and a workspace
+/// that refuses `fs.delete` is saying something a person means. But an agent
+/// could reach the same outcome by running `rm`, which is `process.execute` and
+/// a completely different decision — so the typed refusal was the one that
+/// could not run, and the way around it was the one that could.
+///
+/// Refusing here rather than in the policy is deliberate: a policy is written
+/// by a person and can be written badly, and this is a property of the request
+/// model itself. It only affects agents. A person running `zag run -- rm x` is
+/// running a command they typed, which never passes through this file.
+pub fn typedEquivalentOf(request: tools.ExecuteRequest) ?[]const u8 {
+    const program = programOf(request);
+    const pairs = [_]struct { program: []const u8, typed: []const u8 }{
+        .{ .program = "rm", .typed = "delete" },
+        .{ .program = "rmdir", .typed = "delete" },
+        .{ .program = "unlink", .typed = "delete" },
+        .{ .program = "git", .typed = "git" },
+    };
+    for (pairs) |pair| {
+        if (std.mem.eql(u8, pair.program, program)) return pair.typed;
+    }
+    return null;
+}
+
+/// Is this program a shell?
+///
+/// "There is no shell" is a property this design claims, and an agent running
+/// `sh -c` puts one back: everything the argument vector was protecting is then
+/// parsed by something else. So an agent may not run one.
+///
+/// This is a list of names, and a list of names is never complete — a program
+/// copied to another name, or an interpreter nobody thought of, is not here.
+/// What actually bounds this is the policy's own allowlist of commands, which
+/// is written by a person for their own workspace. This stops the obvious path
+/// and does not pretend to be a boundary on its own.
+pub fn isShell(program: []const u8) bool {
+    const shells = [_][]const u8{
+        "sh",   "bash",  "zsh",    "dash",    "fish",   "ksh",
+        "csh",  "tcsh",  "ash",    "busybox", "pwsh",   "powershell",
+        "env",  "xargs", "nice",   "sudo",    "doas",   "ssh",
+        "eval", "exec",  "script", "nohup",   "setsid", "stdbuf",
+    };
+    for (shells) |name| {
+        if (std.mem.eql(u8, name, program)) return true;
+    }
+    return false;
 }
 
 /// True when `decision` authorises exactly `request`.
@@ -133,7 +198,11 @@ pub const Runner = struct {
         return switch (request) {
             .read_file => |r| self.readFile(r),
             .write_file => |w| self.writeFile(w),
-            .execute => |e| self.execute(e),
+            .execute => |e| blk: {
+                if (typedEquivalentOf(e)) |_| break :blk error.UseTheTypedRequest;
+                if (isShell(programOf(e))) break :blk error.NoShellForAgents;
+                break :blk self.execute(e);
+            },
             // The remaining request kinds have no executor in this build. They
             // are named rather than silently treated as failures, because
             // "not built" and "did not work" are different things.
@@ -452,4 +521,65 @@ test "every refusal has a sentence a person can act on" {
         try testing.expect(text.len > 0);
         try testing.expect(text[text.len - 1] == '.');
     }
+}
+
+test "a program with a typed request of its own cannot be run instead" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const scratch = arena_state.allocator();
+    const runner = Runner.init(scratch, .{ .root = "." });
+
+    // This is the hole. A workspace that refuses `fs.delete` means it. Running
+    // `rm` reaches the same outcome under `process.execute`, which is a
+    // different decision, so the typed refusal was the one that could not run
+    // and the way around it was the one that could.
+    const by_program: ToolRequest = .{ .execute = .{
+        .argv = &.{ "rm", "-rf", "build" },
+        .workingDirectory = ".",
+    } };
+    const allowed = decisionFor(.@"process.execute", .{ .command = "rm -rf build" }, .allow);
+    try testing.expectError(error.UseTheTypedRequest, runner.run(allowed, by_program));
+
+    // Including by its full path, because the check is on the program and not
+    // on the text somebody wrote.
+    const by_path: ToolRequest = .{ .execute = .{
+        .argv = &.{ "/usr/bin/rm", "build" },
+        .workingDirectory = ".",
+    } };
+    const path_allowed = decisionFor(.@"process.execute", .{ .command = "/usr/bin/rm build" }, .allow);
+    try testing.expectError(error.UseTheTypedRequest, runner.run(path_allowed, by_path));
+
+    // Git the same way: pushing is `git.push`, and it is not reachable by
+    // running the program under a permission to run programs.
+    try testing.expect(typedEquivalentOf(.{ .argv = &.{ "git", "push" }, .workingDirectory = "." }) != null);
+    try testing.expectEqualStrings("delete", typedEquivalentOf(.{ .argv = &.{"rmdir"}, .workingDirectory = "." }).?);
+
+    // A program that has no typed equivalent is unaffected.
+    try testing.expect(typedEquivalentOf(.{ .argv = &.{ "zig", "build" }, .workingDirectory = "." }) == null);
+}
+
+test "an agent may not run a shell" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const scratch = arena_state.allocator();
+    const runner = Runner.init(scratch, .{ .root = "." });
+
+    // "There is no shell" is a property this design claims. An agent running
+    // `sh -c` puts one back, and everything the argument vector protects is
+    // then parsed by something else.
+    const request: ToolRequest = .{ .execute = .{
+        .argv = &.{ "sh", "-c", "rm -rf / ; echo done" },
+        .workingDirectory = ".",
+    } };
+    const allowed = decisionFor(.@"process.execute", .{ .command = "sh -c rm -rf / ; echo done" }, .allow);
+    try testing.expectError(error.NoShellForAgents, runner.run(allowed, request));
+
+    for ([_][]const u8{ "bash", "zsh", "fish", "env", "xargs", "sudo", "ssh" }) |name| {
+        try testing.expect(isShell(name));
+    }
+    // A person running a shell from the command line never reaches this file:
+    // `zag run` records a command a person typed and does not go through an
+    // executor.
+    try testing.expect(!isShell("zig"));
+    try testing.expect(!isShell("cargo"));
 }

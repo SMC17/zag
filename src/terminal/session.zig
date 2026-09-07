@@ -209,9 +209,11 @@ pub const Session = struct {
                 try self.finishOpenBlock(f.exit_status orelse 0, null);
             },
             .directory_changed => |path| {
-                _ = try self.log.append(.{ .git_changed = .{
+                // Where the shell is, not what repository it is in. The mark
+                // says one and knows nothing about the other.
+                _ = try self.log.append(.{ .directory_changed = .{
                     .session = self.id,
-                    .repository = path,
+                    .path = path,
                 } }, .{
                     .at = self.clock,
                     .actor = self.actor,
