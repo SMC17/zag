@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const block_mod = @import("block.zig");
+const index_mod = @import("index.zig");
 const timeutil = @import("../core/time.zig");
 const provenance = @import("../data/provenance.zig");
 
@@ -298,6 +299,12 @@ pub const Options = struct {
     /// The moment "recent" is measured from. Callers pass the clock; tests pass
     /// a fixed value, so ranking is deterministic.
     now: Timestamp,
+    /// Narrows the blocks worth asking about, when one has been built.
+    ///
+    /// It never decides a match — the same matcher answers either way, on
+    /// whatever survives. An index that changed an answer would tell a person
+    /// something false about their own history, which is worse than being slow.
+    lookup: ?*const index_mod.Lookup = null,
 };
 
 /// Run a query over a block index.
@@ -306,7 +313,26 @@ pub fn run(arena: std.mem.Allocator, index: block_mod.Index, query: Query, optio
     var by_command: std.StringArrayHashMapUnmanaged(usize) = .empty;
     var match_count: usize = 0;
 
-    for (index.blocks.items) |b| {
+    // Which blocks to ask. With no lookup, or one built over a different set of
+    // blocks, that is all of them — a mismatched lookup would answer about the
+    // wrong history, so it is ignored rather than trusted.
+    const usable = if (options.lookup) |lookup|
+        (if (lookup.blocks == index.blocks.items.len) lookup else null)
+    else
+        null;
+
+    var narrowed: ?index_mod.Set = null;
+    if (usable) |lookup| narrowed = try lookup.candidates(arena, query);
+
+    var walk: ?index_mod.Set.Iterator = if (narrowed) |set| set.iterate() else null;
+    var cursor: usize = 0;
+    while (true) {
+        const position = if (walk) |*iterator| (iterator.next() orelse break) else blk: {
+            if (cursor >= index.blocks.items.len) break;
+            defer cursor += 1;
+            break :blk cursor;
+        };
+        const b = index.blocks.items[position];
         if (!query.matches(b)) continue;
         match_count += 1;
         const command = b.commandText orelse "";
