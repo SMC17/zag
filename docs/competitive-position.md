@@ -70,14 +70,13 @@ Hermes Agent, cmux, Pi, term2 and Lacy. These run a model against a repository.
 They differ in model support, editor integration, sandboxing and how much of the
 loop they automate.
 
-Most of them are still ahead of zag on the thing they exist for. They loop:
-they ask a model, run what it asks for, and ask again, and they have spent years
-on how that loop behaves. zag asks a model once. The connectors, the typed
-executors and the policy engine are each built and tested; nothing yet runs the
-cycle between them.
+zag loops now. It asks a model, runs what it asks for under a decision each
+time, and asks again. Those tools have spent years on how that loop behaves. They
+are still ahead of it on breadth: no streaming here, one tool call at a time, no
+editor integration.
 
-What zag has instead is the boundary. Twenty-eight connectors across five wire
-formats reach hosted providers and models on this computer alike. Every one of
+What zag has that they do not is the boundary. Twenty-eight connectors across
+five wire formats reach hosted providers and models on this computer alike. Every one of
 them passes the policy engine three times before a byte is encoded. It asks to
 use a model at all, to reach that host, and to spend that credential.
 
@@ -111,6 +110,8 @@ changes named:
 | Blocks folded from the log | 11 times faster | Folding scanned every block for each parent link and each git change. Both are indexed now. |
 | Prose through the plain-language rules | 180 times faster at 128 KiB | Placing a finding walked the text from the start, so checking a document cost the square of its length. A line index makes it linear. |
 | Keystrokes into the editor buffer | No longer quadratic | Typing added a piece and copied the undo buffer for each keystroke. An append extends the last piece and grows the buffer in place. |
+| Bytes into the screen | 1.8 times faster | Every byte went through the escape-sequence state machine, including the printable ASCII that is almost all of them. A vectorised scan finds where a run of ordinary text ends, and the run is printed without the state machine. |
+| Line breaks found in a document | 2.7 times faster | The index grew a list a byte at a time. Counting the breaks first, with a vector compare, sizes the array exactly, so nothing is ever copied to make room. |
 
 Run the harness to see what your own machine does. It reports the build mode,
 the best of several runs, and the spread between them. A busy machine is then
@@ -131,6 +132,13 @@ Built, tested and audited by the build:
   spend the decision they were given rather than one they chose.
 - Twenty-eight model connectors across five wire formats, ten of them running on
   this computer, each gated by the policy engine before a byte is encoded.
+- An agent loop where every tool call is a separate decision, and four separate
+  bounds on a run that will not stop: turns, tokens, time, and repetition.
+- A dependency graph derived from the record, joining work through the files
+  that passed between it, and a critical path that says what decided how long
+  something took rather than adding everything up.
+- Model attention chosen by causal distance from the thing being asked about,
+  rather than by taking the newest events until the window is full.
 - A standards control plane over sixty-five standards, with evidence.
 - Plain-language, terminology, metadata, accessibility and knowledge rules
   enforced by `zig build check`.
@@ -145,9 +153,8 @@ the terminal you have for now.
 - **No tabs, splits or panes.** One shell to a session.
 - **No key bindings, no theme file.** The policy is written in a file; nothing
   else about the terminal is.
-- **No agent loop, and no streaming.** A model can be asked one question, and
-  the request waits for the whole answer. Nothing yet runs a model's tool calls
-  through the executors and asks it again.
+- **No streaming, and one tool call at a time.** A request waits for the whole
+  answer, and a turn that asks for four independent reads does them in order.
 - **Linux only.** The pseudoterminal uses Linux system calls directly. macOS and
   Windows are not built.
 - **No remote attachment.** The daemon opens, verifies, reports and plans. It

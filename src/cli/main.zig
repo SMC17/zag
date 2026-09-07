@@ -41,6 +41,7 @@ const Command = enum {
     providers,
     policy,
     ask,
+    why,
 
     fn parse(text: []const u8) ?Command {
         const table = [_]struct { name: []const u8, command: Command }{
@@ -76,6 +77,7 @@ const Command = enum {
             .{ .name = "providers", .command = .providers },
             .{ .name = "policy", .command = .policy },
             .{ .name = "ask", .command = .ask },
+            .{ .name = "why", .command = .why },
         };
         for (table) |entry| {
             if (std.mem.eql(u8, entry.name, text)) return entry.command;
@@ -117,7 +119,8 @@ pub const help_text =
     \\  term                Open a shell in a terminal that records what you do.
     \\  providers           List the model connectors and say which credentials are set.
     \\  policy              Show the policy in force, and where it was read from.
-    \\  ask <question>      Ask a model, through the policy. Use --provider to choose one.
+    \\  ask <question>      Ask a model, through the policy. It can use tools, one decision each.
+    \\  why <file> [n]      Show what an event depended on, and what it went on to affect.
     \\
     \\Options
     \\  --profile <name>    Use this conformance profile. The default is "default".
@@ -129,6 +132,7 @@ pub const help_text =
     \\  --root <directory>  Read the workspace in this directory.
     \\  --provider <name>   Which connector to use. Run "zag providers" to see them.
     \\  --model <name>      Which model to ask for.
+    \\  --turns <count>     How many times a model may be asked in one run.
     \\  --raw               Start the shell with no added prompt marks.
     \\  --approve-truncate  Apply the recovery plan after preserving the original log.
     \\
@@ -149,6 +153,7 @@ const Options = struct {
     approve_truncate: bool = false,
     provider: []const u8 = "",
     model: []const u8 = "",
+    turns: []const u8 = "",
     positional: []const []const u8 = &.{},
     /// Everything after `--`.
     passthrough: []const []const u8 = &.{},
@@ -196,6 +201,7 @@ fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
             .{ .flag = "--root", .field = &options.root },
             .{ .flag = "--provider", .field = &options.provider },
             .{ .flag = "--model", .field = &options.model },
+            .{ .flag = "--turns", .field = &options.turns },
         };
         var matched = false;
         for (named) |entry| {
@@ -322,6 +328,7 @@ fn run(
         .providers => try listProviders(arena, io, w, options, environment),
         .policy => try showPolicy(arena, io, w, options),
         .ask => try askAModel(arena, io, w, options, environment),
+        .why => try whyDidThatHappen(arena, io, w, options),
     };
 }
 
@@ -354,6 +361,10 @@ fn doctor(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Opti
         zag.ai.catalog.count(),
         zag.ai.catalog.localCount(),
     });
+    try w.print("  Agent loop, decided at each step:   yes, {d} tools offered to a model\n", .{
+        zag.ai.toolschema.offers.len,
+    });
+    try w.writeAll("  Explain a failure from the record:  yes, with zag why\n");
     try w.writeAll("  Plain-language checks:              yes\n");
     try w.writeAll("  Terminology and metadata registry:  yes\n");
     try w.writeAll("  Standards registry and evidence:    yes\n");
@@ -363,7 +374,7 @@ fn doctor(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Opti
     try w.writeAll("  Draw its own window. The renderer is not written; the accessibility tree it must publish is.\n");
     try w.writeAll("  Talk to a language server. The editor surfaces are not written.\n");
     try w.writeAll("  Read an answer as it arrives. A model request waits for the whole reply.\n");
-    try w.writeAll("  Run a model's tool calls on its own. The executors are written; nothing loops them yet.\n");
+    try w.writeAll("  Run more than one tool call at a time. A turn does them one after another.\n");
     try w.writeAll("  Run on Windows or macOS terminals. The pseudoterminal layer is Linux only so far.\n");
     try w.writeAll("  Split the screen. There are no tabs, panes or splits yet.\n");
     try w.writeAll("  Be configured beyond the policy file. There are no key bindings and no theme file yet.\n\n");
@@ -1186,30 +1197,241 @@ fn askAModel(
         .credentials = view.credentials(),
     };
 
-    var attempt: zag.ai.transport.Attempt = undefined;
-    const completion = transport.send(connector, .{
-        .model = if (options.model.len > 0) options.model else defaultModel(connector),
-        .messages = &.{.{ .role = .user, .blocks = &.{.{ .text = question.items }} }},
-    }, context, &attempt) catch |err| {
-        try w.print("{s}\n", .{zag.ai.transport.refusalText(err)});
-        if (attempt.sendProblem.len > 0) try w.print("{s}\n", .{attempt.sendProblem});
-        if (attempt.status) |status| {
-            try w.print("{s} answered {d}", .{ connector.name, status });
-            if (attempt.providerError.len > 0) {
-                try w.print(": {s}", .{attempt.providerError});
-            }
-            try w.writeAll("\n");
-        }
-        try w.writeAll("\n");
-        try writeDecisions(attempt, w);
-        return 1;
+    // The loop, not a single question. A model that can read the workspace and
+    // run the tests is worth more than one that can only answer, and every one
+    // of those actions is a separate decision the policy makes.
+    const executor: zag.ai.executor.Runner = .init(arena, .{
+        .root = options.root,
+        .io = io,
+    });
+    const runner: zag.ai.loop.Runner = .{
+        .arena = arena,
+        .transport = transport,
+        .executor = executor,
+        .engine = &engine,
+        .clock = monotonic(io),
     };
 
-    const answer = try completion.text(arena);
-    if (answer.len > 0) try w.print("{s}\n\n", .{answer});
-    try w.print("{s}\n\n", .{try attempt.summary(arena)});
-    try writeDecisions(attempt, w);
+    var budget: zag.ai.loop.Budget = .{};
+    if (options.turns.len > 0) {
+        budget.turns = std.fmt.parseInt(usize, options.turns, 10) catch {
+            try w.print("\"{s}\" is not a number of turns.\n", .{options.turns});
+            return 2;
+        };
+    }
+
+    const transcript = try runner.run(.{
+        .connector = connector,
+        .model = if (options.model.len > 0) options.model else defaultModel(connector),
+        .system = agent_instructions,
+        .budget = budget,
+    }, question.items, context);
+
+    if (transcript.answer.len > 0) try w.print("{s}\n\n", .{transcript.answer});
+
+    for (transcript.turns) |turn| {
+        for (turn.steps) |step| {
+            try w.print("  {s} {s}\n", .{
+                if (step.ran()) "ran" else "did not run:",
+                step.toolName,
+            });
+            if (!step.ran()) try w.print("    {s}\n", .{step.reply});
+        }
+    }
+    if (transcript.toolCallCount() > 0) try w.writeAll("\n");
+
+    try transcript.writeSummary(w);
+
+    if (transcript.pending) |request| {
+        try w.print("\nIt is waiting for you to allow: {s} on {s}.\n", .{
+            request.capability().explain(),
+            zag.ai.executor.resourceOf(request).text(),
+        });
+        try w.writeAll("Add a rule for it to the workspace policy, then run this again.\n");
+    }
+
+    // The decisions from the last model request, which is where a refusal that
+    // stopped the run will be.
+    if (transcript.turns.len > 0) {
+        const last = transcript.turns[transcript.turns.len - 1];
+        if (last.attempt.refusedAt != null or !transcript.ending.succeeded()) {
+            try w.writeAll("\n");
+            if (last.attempt.sendProblem.len > 0) try w.print("{s}\n", .{last.attempt.sendProblem});
+            if (last.attempt.providerError.len > 0) {
+                try w.print("{s} answered {d}: {s}\n", .{
+                    connector.name,
+                    last.attempt.status orelse 0,
+                    last.attempt.providerError,
+                });
+            }
+            try writeDecisions(last.attempt, w);
+        }
+    }
+
+    return if (transcript.ending.succeeded()) 0 else 1;
+}
+
+/// Show what one recorded event depended on, and what it went on to affect.
+///
+/// The causal chain answers "what led to this". The dependency graph answers
+/// the harder question: which earlier work this rests on through the files that
+/// passed between them, even when nothing caused anything and the two happened
+/// in different sessions hours apart.
+fn whyDidThatHappen(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+) !u8 {
+    if (options.positional.len == 0) {
+        try w.writeAll("Name the log file to read. For example: zag why .workspace/events.jsonl\n");
+        return 2;
+    }
+    const path = options.positional[0];
+    const source = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(256 << 20)) catch {
+        try w.print("zag could not read {s}.\n", .{path});
+        return 1;
+    };
+    const loaded = try zag.events.log.Log.loadJsonLines(arena, source, 1);
+    if (loaded.log.entries.items.len == 0) {
+        try w.writeAll("That log has no events in it.\n");
+        return 1;
+    }
+
+    // By default, the last thing that went wrong. Somebody running "why" has
+    // usually just watched something fail, and the last event in a log is
+    // almost always a session closing, which explains nothing. When nothing
+    // went wrong, the last event is the right answer.
+    var about: usize = lastFailure(loaded.log) orelse loaded.log.entries.items.len - 1;
+    if (options.positional.len > 1) {
+        about = std.fmt.parseInt(usize, options.positional[1], 10) catch {
+            try w.print("\"{s}\" is not an event number.\n", .{options.positional[1]});
+            return 2;
+        };
+        if (about >= loaded.log.entries.items.len) {
+            try w.print("There are {d} events, so {d} is not one of them.\n", .{
+                loaded.log.entries.items.len,
+                about,
+            });
+            return 2;
+        }
+    }
+
+    const dag = try zag.events.lineage.Dag.build(arena, loaded.log);
+    if (!dag.isTopological()) {
+        try w.writeAll("This log has an event that comes before its own cause, so the graph cannot be trusted.\n");
+        try w.writeAll("Run \"zag events\" on it: a log in that state has been changed since it was written.\n");
+        return 1;
+    }
+
+    try w.writeAll("What you asked about\n  ");
+    try zag.ai.attention.writeEvent(loaded.log.entries.items[about], w);
+    try w.writeAll("\n\n");
+
+    const selection = try zag.ai.attention.select(arena, dag, about, .{
+        .includeAffected = true,
+        .recent = 0,
+    });
+
+    var wrote_any = false;
+    inline for (.{
+        .{ zag.ai.attention.Reason.depended_on, "What it depended on" },
+        .{ zag.ai.attention.Reason.affected_by, "What it went on to affect" },
+    }) |section| {
+        var first = true;
+        for (selection.chosen) |item| {
+            if (item.reason != section[0]) continue;
+            if (first) {
+                try w.print("{s}\n", .{section[1]});
+                first = false;
+                wrote_any = true;
+            }
+            try w.print("  {d} step", .{item.distance});
+            if (item.distance != 1) try w.writeAll("s");
+            try w.print(" away, event {d}: ", .{item.index});
+            try zag.ai.attention.writeEvent(item.envelope, w);
+            try w.writeAll("\n");
+        }
+        if (!first) try w.writeAll("\n");
+    }
+    if (!wrote_any) {
+        try w.writeAll("Nothing in this log connects to it, forwards or backwards.\n\n");
+    }
+
+    const path_through = try dag.criticalPath();
+    const cost = dag.criticalPathCost(path_through.items);
+    if (cost.ns > 0) {
+        try w.print("The longest chain in this log runs through {d} events and takes ", .{
+            path_through.items.len,
+        });
+        try zag.reports.notation.writeDuration(w, cost);
+        try w.writeAll(".\n");
+        try w.writeAll("That is what decided how long the work took, not the sum of everything in it.\n");
+    }
     return 0;
+}
+
+/// The most recent event that reports something not working.
+fn lastFailure(log: zag.events.log.Log) ?usize {
+    var index = log.entries.items.len;
+    while (index > 0) {
+        index -= 1;
+        switch (log.entries.items[index].payload) {
+            .command_finished => |e| if (e.exitStatus != 0) return index,
+            .diagnostic => |e| if (e.severity == .@"error") return index,
+            .tool_finished => |e| if (e.outcome != .completed) return index,
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// What the model is told before it starts.
+///
+/// This is prompt text. It shapes behaviour and grants nothing: every sentence
+/// in it describes a boundary that is enforced elsewhere, so a model that
+/// ignores all of it can still do only what the policy allows. It is written
+/// anyway, because a model that knows the shape of the boundary wastes fewer
+/// turns discovering it.
+const agent_instructions =
+    \\You are working in a recorded workspace, through a policy that decides
+    \\every action separately.
+    \\
+    \\Each tool call is decided on its own. A refusal is final for that call:
+    \\if you are told the policy did not allow something, do not ask for it
+    \\again. Say what you needed and why, and let the person decide.
+    \\
+    \\Paths are inside the workspace. A path that leaves it is refused by the
+    \\operating system, not by a check you can talk your way around.
+    \\
+    \\Commands are argument vectors. There is no shell, so a pipe, a semicolon
+    \\or a redirect is an argument and not an instruction. Run one program at a
+    \\time.
+    \\
+    \\Work in small steps and say what you found. When you are finished, answer
+    \\in plain words.
+    \\
+;
+
+/// A monotonic clock for the run's time budget.
+///
+/// Monotonic rather than wall clock, so that the system time changing under a
+/// long run cannot cut it short or let it go on.
+fn monotonic(io: std.Io) zag.ai.loop.Clock {
+    const Reader = struct {
+        io: std.Io,
+        fn read(context: *anyopaque) i64 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const raw = std.Io.Timestamp.now(self.io, .awake);
+            return @intCast(raw.nanoseconds);
+        }
+    };
+    // The reader holds only the I/O handle, which outlives the run.
+    const holder = struct {
+        var state: Reader = undefined;
+    };
+    holder.state = .{ .io = io };
+    return .{ .context = &holder.state, .nowFn = Reader.read };
 }
 
 /// The model a connector answers with when the person did not name one.
@@ -1354,6 +1576,55 @@ fn agentsFile(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: 
     return 0;
 }
 
+/// Join an argument vector back into a command line, without losing it.
+///
+/// The workspace service runs a command through a shell, because that is what
+/// produces the boundary marks a block is built from. So the vector a person
+/// typed after `--` has to become one line. Joining it with spaces is what a
+/// person reaches for, and it is wrong: `zag run -- sh -c 'exit 3'` becomes
+/// `sh -c exit 3`, which runs `exit` with `3` as its name and reports success
+/// for a command that failed. A workbench whose record says a failed command
+/// worked is worse than no record.
+///
+/// So each argument that contains anything a shell would act on is wrapped in
+/// single quotes, and an embedded single quote is closed, escaped and reopened
+/// — the one form that survives every POSIX shell. An argument of plain word
+/// characters is left alone, so the recorded command line still reads the way
+/// the person typed it.
+pub fn quoteArgv(arena: std.mem.Allocator, argv: []const []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (argv, 0..) |argument, index| {
+        if (index > 0) try out.append(arena, ' ');
+        if (needsQuoting(argument)) {
+            try out.append(arena, '\'');
+            for (argument) |byte| {
+                if (byte == '\'') {
+                    try out.appendSlice(arena, "'\\''");
+                } else {
+                    try out.append(arena, byte);
+                }
+            }
+            try out.append(arena, '\'');
+        } else {
+            try out.appendSlice(arena, argument);
+        }
+    }
+    return out.items;
+}
+
+fn needsQuoting(argument: []const u8) bool {
+    if (argument.len == 0) return true;
+    for (argument) |byte| {
+        const safe = (byte >= 'a' and byte <= 'z') or
+            (byte >= 'A' and byte <= 'Z') or
+            (byte >= '0' and byte <= '9') or
+            byte == '_' or byte == '-' or byte == '.' or byte == '/' or
+            byte == ':' or byte == '=' or byte == '@' or byte == ',' or byte == '+';
+        if (!safe) return true;
+    }
+    return false;
+}
+
 fn runCommand(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
     if (options.passthrough.len == 0) {
         try w.writeAll("Put the command after two dashes. For example: zag run -- echo hello\n");
@@ -1383,7 +1654,7 @@ fn runCommand(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: 
         return 1;
     }
 
-    const command_text = try std.mem.join(arena, " ", options.passthrough);
+    const command_text = try quoteArgv(arena, options.passthrough);
     const result = service.runCommand(command_text, zag.core.time.Duration.fromSeconds(120)) catch |err| switch (err) {
         error.ContentTooLarge => {
             try w.writeAll("The command produced more than 64 MiB of captured output. Redirect large output to a file, then run the command again.\n");
@@ -2549,8 +2820,12 @@ test "asking a model refuses before it sends, and says what the policy decided" 
     try testing.expectEqual(@as(u8, 1), status);
 
     const text = w.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "policy does not allow") != null);
+    // The run ended because the policy refused, and the reason is the one the
+    // policy gave, not one this command invented.
+    try testing.expect(std.mem.indexOf(u8, text, "The policy refused something the model needed") != null);
     try testing.expect(std.mem.indexOf(u8, text, "What the policy decided") != null);
+    // Nothing ran, so there are no tool calls to report.
+    try testing.expect(std.mem.indexOf(u8, text, "0 tool calls") != null);
     // Using a model was allowed; reaching that host was not, and the two are
     // shown separately because they are separate answers.
     try testing.expect(std.mem.indexOf(u8, text, "Allowed to send this work to a model provider") != null);
@@ -2584,4 +2859,89 @@ test "every connector this build ships resolves and can be named on the command 
         try testing.expectEqualStrings(connector.baseUrl, found.baseUrl);
         try testing.expect(defaultModel(found).len > 0 or connector.locality == .hosted);
     }
+}
+
+test "an argument vector survives being turned back into a command line" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The case that was wrong: joining with spaces turned this into
+    // "sh -c exit 3", which runs `exit` with `3` as its name, exits zero, and
+    // was recorded as a command that succeeded.
+    try testing.expectEqualStrings(
+        "sh -c 'exit 3'",
+        try quoteArgv(arena, &.{ "sh", "-c", "exit 3" }),
+    );
+
+    // Plain words are left alone, so the recorded line still reads the way it
+    // was typed.
+    try testing.expectEqualStrings(
+        "zig build test",
+        try quoteArgv(arena, &.{ "zig", "build", "test" }),
+    );
+    try testing.expectEqualStrings(
+        "git commit -m 'a message with spaces'",
+        try quoteArgv(arena, &.{ "git", "commit", "-m", "a message with spaces" }),
+    );
+
+    // A single quote inside an argument is the case that breaks naive quoting.
+    try testing.expectEqualStrings(
+        "echo 'it'\\''s here'",
+        try quoteArgv(arena, &.{ "echo", "it's here" }),
+    );
+
+    // An empty argument is a real argument and must not vanish.
+    try testing.expectEqualStrings("echo '' x", try quoteArgv(arena, &.{ "echo", "", "x" }));
+
+    // Everything a shell would act on is quoted.
+    for ([_][]const u8{ ";", "|", "&", "$x", "`x`", ">out", "<in", "*", "(", ")", "\n", "\\" }) |dangerous| {
+        const line = try quoteArgv(arena, &.{ "echo", dangerous });
+        try testing.expect(std.mem.startsWith(u8, line, "echo '"));
+        try testing.expect(std.mem.endsWith(u8, line, "'"));
+    }
+}
+
+test "a command that fails is recorded as failed, with its status" {
+    if (!zag.terminal.pty.supported) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    // End to end, the way a person runs it: the vector after `--`, through the
+    // quoting, through the shell wrapper, into the record.
+    var buffer: [8192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buffer);
+    const status = try runCommand(arena, io, &w, .{
+        .root = root,
+        .passthrough = &.{ "sh", "-c", "exit 3" },
+    });
+
+    try testing.expectEqual(@as(u8, 3), status);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "[failed]") != null);
+    // The recorded line is the one that ran, quoting and all.
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "sh -c 'exit 3'") != null);
+
+    // And the record itself says three, not zero.
+    const path = try std.fmt.allocPrint(arena, "{s}/.workspace/events.jsonl", .{root});
+    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20));
+    const loaded = try zag.events.log.Log.loadJsonLines(arena, source, 1);
+    var saw_failure = false;
+    for (loaded.log.entries.items) |entry| {
+        switch (entry.payload) {
+            .command_finished => |e| {
+                try testing.expectEqual(@as(u8, 3), e.exitStatus);
+                saw_failure = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_failure);
 }
