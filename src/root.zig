@@ -81,6 +81,10 @@ pub const workspace = struct {
     pub const service = @import("workspace/service.zig");
 };
 
+pub const daemon = struct {
+    pub const interface = @import("daemon/interface.zig");
+};
+
 pub const editor = struct {
     pub const document = @import("editor/document.zig");
 };
