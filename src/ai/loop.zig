@@ -456,9 +456,13 @@ pub const Runner = struct {
         // 3. The policy decides. The resource comes from the request, through
         //    the executor, not from anything the model wrote.
         var engine = self.engine;
+        // The resource comes from the request, through the one definition the
+        // executor will re-derive it from. Deciding on anything else would make
+        // a decision the executor then refuses to honour.
+        const resource = request.resource(self.arena) catch return error.OutOfMemory;
         const decision = engine.decide(.{
             .capability = request.capability(),
-            .resource = executor_mod.resourceOf(request),
+            .resource = resource,
         }, context) catch return error.OutOfMemory;
         step.decision = decision;
 
@@ -480,7 +484,7 @@ pub const Runner = struct {
         if (request.additionalCapability()) |extra| {
             const also = engine.decide(.{
                 .capability = extra,
-                .resource = executor_mod.resourceOf(request),
+                .resource = resource,
             }, context) catch return error.OutOfMemory;
             if (!also.isAllowed()) {
                 step.decision = also;
@@ -541,7 +545,7 @@ fn noteRepeat(
 /// as different would let a model defeat the repetition bound by varying a
 /// field nobody decides on.
 pub fn fingerprintOf(arena: std.mem.Allocator, request: ToolRequest) !hashing.Hash {
-    const resource = executor_mod.resourceOf(request);
+    const resource = try request.resource(arena);
     var extra: []const u8 = "";
     switch (request) {
         .execute => |e| extra = try e.commandText(arena),

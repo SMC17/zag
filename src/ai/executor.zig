@@ -64,23 +64,21 @@ pub fn refusalText(err: Error) []const u8 {
     };
 }
 
-/// The resource a request acts on, derived from the request itself.
+/// The resource a request acts on.
+///
+/// There is one definition of this, in `tools.ToolRequest.resource`, and this
+/// file deliberately does not have a second one. It used to: a copy here
+/// narrowed an execute request to its program name and collapsed a git push to
+/// a path, so a decision made by the policy engine on `git push origin main`
+/// could never authorise the request it was made for. Two definitions of what a
+/// request touches is two security models, and the one that is easier to
+/// satisfy wins by accident.
 ///
 /// This is the function that makes a decision unforgeable in practice: the
 /// executor asks the request what it touches, rather than believing what the
 /// caller said when the decision was made.
-pub fn resourceOf(request: ToolRequest) Resource {
-    return switch (request) {
-        .execute => |e| .{ .command = if (e.argv.len > 0) e.argv[0] else "" },
-        .read_file => |r| .{ .path = r.path },
-        .write_file => |w| .{ .path = w.path },
-        .delete => |d| .{ .path = d.path },
-        .search => |s| .{ .path = s.root },
-        .git => |g| .{ .path = g.repository },
-        .mcp => |m| .{ .service = m.server },
-        .spawn_agent => |a| .{ .service = a.label },
-        .infer => |i| .{ .service = i.provider },
-    };
+pub fn resourceOf(arena: std.mem.Allocator, request: ToolRequest) !Resource {
+    return request.resource(arena);
 }
 
 /// True when `decision` authorises exactly `request`.
@@ -88,10 +86,10 @@ pub fn resourceOf(request: ToolRequest) Resource {
 /// Both halves are compared. A decision carrying the right capability for the
 /// wrong path is not a permission to act on that path, and the difference
 /// between those two is the whole of the security model.
-pub fn authorises(decision: Decision, request: ToolRequest) bool {
+pub fn authorises(arena: std.mem.Allocator, decision: Decision, request: ToolRequest) !bool {
     if (!decision.isAllowed()) return false;
     if (decision.request.capability != request.capability()) return false;
-    const wanted = resourceOf(request);
+    const wanted = try request.resource(arena);
     return sameResource(decision.request.resource, wanted);
 }
 
@@ -130,7 +128,7 @@ pub const Runner = struct {
     /// the request before anything is opened, started or sent.
     pub fn run(self: Runner, decision: Decision, request: ToolRequest) Error!ToolResult {
         if (!decision.isAllowed()) return error.NotAllowed;
-        if (!authorises(decision, request)) return error.DecisionDoesNotMatchRequest;
+        if (!try authorises(self.arena, decision, request)) return error.DecisionDoesNotMatchRequest;
 
         return switch (request) {
             .read_file => |r| self.readFile(r),
@@ -290,26 +288,56 @@ fn decisionFor(capability: Capability, resource: Resource, effect: policy_mod.Ef
 }
 
 test "a decision authorises the one request it names" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
     const request: ToolRequest = .{ .read_file = .{ .path = "notes.md", .maxBytes = 1 << 20 } };
     const good = decisionFor(.@"fs.read", .{ .path = "notes.md" }, .allow);
-    try testing.expect(authorises(good, request));
+    try testing.expect(try authorises(arena, good, request));
 
     // The right capability for a different file is not a permission for this
     // file. This is the case that turns a policy into a decoration.
     const other_path = decisionFor(.@"fs.read", .{ .path = "/etc/shadow" }, .allow);
-    try testing.expect(!authorises(other_path, request));
+    try testing.expect(!try authorises(arena, other_path, request));
 
     // The right file under a different capability is not a permission either.
     const other_capability = decisionFor(.@"fs.write", .{ .path = "notes.md" }, .allow);
-    try testing.expect(!authorises(other_capability, request));
+    try testing.expect(!try authorises(arena, other_capability, request));
 
     // A decision that refused authorises nothing.
     const denied = decisionFor(.@"fs.read", .{ .path = "notes.md" }, .deny);
-    try testing.expect(!authorises(denied, request));
+    try testing.expect(!try authorises(arena, denied, request));
 
     // So does one that is still waiting for a person.
     const waiting = decisionFor(.@"fs.read", .{ .path = "notes.md" }, .require_human);
-    try testing.expect(!authorises(waiting, request));
+    try testing.expect(!try authorises(arena, waiting, request));
+
+    // An execute request is identified by the whole command line, because that
+    // is what the policy engine decides on. A definition that used only the
+    // program name would let a decision about `git status` authorise
+    // `git push`.
+    const build: ToolRequest = .{ .execute = .{
+        .argv = &.{ "zig", "build", "test" },
+        .workingDirectory = "/repo",
+    } };
+    const for_build = decisionFor(.@"process.execute", .{ .command = "zig build test" }, .allow);
+    try testing.expect(try authorises(arena, for_build, build));
+
+    const for_zig_alone = decisionFor(.@"process.execute", .{ .command = "zig" }, .allow);
+    try testing.expect(!try authorises(arena, for_zig_alone, build));
+
+    // A push is decided on its remote, not on the repository it came from.
+    const push: ToolRequest = .{ .git = .{
+        .operation = .push,
+        .repository = "/repo",
+        .argument = "git@example.test:org/zag.git",
+    } };
+    const for_remote = decisionFor(.@"git.push", .{ .remote = "git@example.test:org/zag.git" }, .allow);
+    try testing.expect(try authorises(arena, for_remote, push));
+
+    const for_repository = decisionFor(.@"git.push", .{ .path = "/repo" }, .allow);
+    try testing.expect(!try authorises(arena, for_repository, push));
 }
 
 test "the resource comes from the request, not from the caller" {
@@ -319,7 +347,9 @@ test "the resource comes from the request, not from the caller" {
         .contentHash = hashing.Hash.of("hello"),
         .byteCount = 5,
     } };
-    const resource = resourceOf(request);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const resource = try resourceOf(arena_state.allocator(), request);
     try testing.expectEqualStrings("src/main.zig", resource.text());
     try testing.expectEqual(Capability.@"fs.write", request.capability());
 }
@@ -400,7 +430,11 @@ test "a command runs from its argument vector, with no shell in between" {
         .argv = &argv,
         .workingDirectory = ".",
     } };
-    const decision = decisionFor(.@"process.execute", .{ .command = "/bin/echo" }, .allow);
+    // The decision names the whole command line, because that is what the
+    // policy engine decides on and what the executor re-derives.
+    const decision = decisionFor(.@"process.execute", .{
+        .command = "/bin/echo one; rm -rf /; echo two > /tmp/zag-should-not-exist",
+    }, .allow);
     const result = try runner.run(decision, request);
     try testing.expect(result.succeeded());
 
