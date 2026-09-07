@@ -55,6 +55,7 @@ const provider = @import("provider.zig");
 const catalog = @import("catalog.zig");
 const transport_mod = @import("transport.zig");
 const stream_mod = @import("stream.zig");
+const schedule = @import("schedule.zig");
 const toolschema = @import("toolschema.zig");
 const executor_mod = @import("executor.zig");
 const policy_mod = @import("policy.zig");
@@ -360,6 +361,11 @@ pub const Runner = struct {
     clock: Clock = stopped_clock,
     /// Where this run is written down. None means nothing is written.
     journal: ?Journal = null,
+    /// Where concurrent tool calls run. None means every call runs in turn,
+    /// which produces the identical record — the scheduler is a plan, not a
+    /// thread pool, and running its waves one call at a time is a valid way to
+    /// honour it.
+    io: ?std.Io = null,
     /// Called with each piece of the answer as it arrives, when it is asked
     /// for and the transport can read one.
     ///
@@ -486,10 +492,29 @@ pub const Runner = struct {
             var results: std.ArrayList(provider.Block) = .empty;
             var stop: ?Ending = null;
 
-            for (calls, 0..) |call, index| {
-                if (index >= options.budget.callsPerTurn) break;
+            const wanted = @min(calls.len, options.budget.callsPerTurn);
 
-                const step = try self.performOne(call, context, &seen, options.budget.repeats);
+            // Every decision, serially, in the order the model asked. Parsing a
+            // call, counting repeats and asking the policy engine all read or
+            // write state that two threads must not touch at once — and, more
+            // than that, a decision taken concurrently would make the record
+            // depend on thread timing.
+            var prepared = try self.arena.alloc(Prepared, wanted);
+            var claims = try self.arena.alloc(?schedule.Claim, wanted);
+            for (calls[0..wanted], 0..) |call, index| {
+                prepared[index] = try self.prepare(call, context, &seen, options.budget.repeats);
+                claims[index] = prepared[index].claim;
+            }
+
+            // Then the work, in waves of calls that touch nothing in common.
+            // Results are written back by index, never in the order they
+            // finished, so the turn recorded from eight threads is the turn
+            // recorded from one.
+            const waves = try schedule.plan(self.arena, claims);
+            try self.performWaves(prepared, waves);
+
+            for (calls[0..wanted], prepared) |call, done| {
+                const step = done.step;
                 try steps.append(self.arena, step);
                 self.recordStep(step);
                 try results.append(self.arena, .{ .tool_result = .{
@@ -601,12 +626,41 @@ pub const Runner = struct {
     }
 
     /// One tool call, all the way through.
-    fn performOne(
+    /// A call that has been decided about and not yet run.
+    ///
+    /// The split exists so that everything which decides anything happens
+    /// serially, in the order the model asked, and only the executor's work is
+    /// allowed to overlap. A decision taken concurrently would make the record
+    /// depend on thread timing, which is the one thing an append-only log
+    /// cannot afford.
+    const Prepared = struct {
+        step: Step,
+        /// Set when there is still work to do. Null means the step is finished
+        /// — refused, or never a typed request in the first place.
+        pending: ?struct { decision: Decision, request: ToolRequest } = null,
+        claim: ?schedule.Claim = null,
+    };
+
+    /// Decide about one call. Never runs anything.
+    fn prepare(
         self: Runner,
         call: provider.ToolUse,
         context: policy_mod.Context,
         seen: *std.ArrayList(Repeat),
         repeat_limit: usize,
+    ) Error!Prepared {
+        var out: Prepared = .{ .step = undefined };
+        out.step = try self.decideOne(call, context, seen, repeat_limit, &out);
+        return out;
+    }
+
+    fn decideOne(
+        self: Runner,
+        call: provider.ToolUse,
+        context: policy_mod.Context,
+        seen: *std.ArrayList(Repeat),
+        repeat_limit: usize,
+        out: *Prepared,
     ) Error!Step {
         var step: Step = .{
             .callId = call.id,
@@ -676,8 +730,59 @@ pub const Runner = struct {
             }
         }
 
-        // 5. The executor spends the decision. It checks the match again, on
-        //    its own terms, because this loop is not what makes that safe.
+        // 5. Everything is decided. What is left is the work itself, which is
+        //    the only part allowed to overlap with another call's, and only
+        //    when nothing they touch is shared.
+        out.pending = .{ .decision = decision, .request = request };
+        out.claim = schedule.claimOf(self.arena, request) catch return error.OutOfMemory;
+        return step;
+    }
+
+    /// Run every prepared call, a wave at a time.
+    ///
+    /// With no `io` there is nothing to run things on, so the waves are walked
+    /// in order and each call runs where it stands. The result is identical —
+    /// that is the point of the scheduler being a plan rather than a thread
+    /// pool — and there is a test that asserts it.
+    fn performWaves(self: Runner, prepared: []Prepared, waves: []const schedule.Wave) Error!void {
+        const io = self.io orelse {
+            for (waves) |wave| {
+                for (wave.members) |index| try self.perform(&prepared[index]);
+            }
+            return;
+        };
+
+        for (waves) |wave| {
+            if (wave.len() == 1) {
+                // One call is not worth a unit of concurrency, and most waves
+                // hold one.
+                try self.perform(&prepared[wave.members[0]]);
+                continue;
+            }
+            var futures = try self.arena.alloc(std.Io.Future(Error!Step), wave.len());
+            for (wave.members, 0..) |index, at| {
+                const held = prepared[index].pending.?;
+                futures[at] = io.async(runOne, .{ self, prepared[index].step, held.decision, held.request });
+            }
+            // Awaited in wave order, and each result stored at its own index.
+            // Nothing here depends on which finished first.
+            for (wave.members, 0..) |index, at| {
+                prepared[index].step = try futures[at].await(io);
+                prepared[index].pending = null;
+            }
+        }
+    }
+
+    fn perform(self: Runner, item: *Prepared) Error!void {
+        const held = item.pending orelse return;
+        item.step = try runOne(self, item.step, held.decision, held.request);
+        item.pending = null;
+    }
+
+    /// Spend a decision. Safe to call from more than one thread at once, on
+    /// calls the scheduler has said touch nothing in common.
+    fn runOne(self: Runner, step: Step, decision: Decision, request: ToolRequest) Error!Step {
+        var out = step;
         const result = self.executor.run(decision, request) catch |err| {
             // Some of these are refusals reached before anything happened, and
             // some are failures during the work. A person reading the record
@@ -693,9 +798,9 @@ pub const Runner = struct {
                 => true,
                 else => false,
             };
-            step.refused = refused_before_acting;
-            step.executed = !refused_before_acting;
-            step.result = .{
+            out.refused = refused_before_acting;
+            out.executed = !refused_before_acting;
+            out.result = .{
                 .outcome = if (refused_before_acting) .denied else .failed,
                 .summary = executor_mod.refusalText(err),
             };
@@ -703,16 +808,16 @@ pub const Runner = struct {
             // have allowed this: what refused it was the request model, and
             // telling a model "the policy did not allow this" when the policy
             // did would send it to ask a person about the wrong thing.
-            step.reply = if (refused_before_acting)
+            out.reply = if (refused_before_acting)
                 executor_mod.refusalText(err)
             else
-                try toolschema.resultText(self.arena, step.result.?);
-            return step;
+                try toolschema.resultText(self.arena, out.result.?);
+            return out;
         };
-        step.executed = true;
-        step.result = result;
-        step.reply = try toolschema.resultText(self.arena, result);
-        return step;
+        out.executed = true;
+        out.result = result;
+        out.reply = try toolschema.resultText(self.arena, result);
+        return out;
     }
 
     fn repeatedTooOften(self: Runner, seen: []const Repeat, limit: usize) bool {
@@ -1375,3 +1480,100 @@ test "a run with no watcher never asks for a stream" {
     const body = fixture.recorded.seen.items[0].body;
     try testing.expect(std.mem.indexOf(u8, body, "\"stream\":false") != null);
 }
+
+test "independent reads overlap, and the record is the same as if they had not" {
+    // The property the whole scheduler exists to preserve. One turn asking for
+    // three independent reads, run once serially and once concurrently, and the
+    // two transcripts must be identical — same steps, same order, same replies.
+    // A log whose contents depend on which read finished first proves nothing
+    // anybody wants proved.
+    const three_reads =
+        \\{"model":"test-model","message":{"role":"assistant","content":"",
+        \\ "tool_calls":[
+        \\  {"function":{"name":"read_file","arguments":{"path":"one.txt"}}},
+        \\  {"function":{"name":"read_file","arguments":{"path":"two.txt"}}},
+        \\  {"function":{"name":"read_file","arguments":{"path":"three.txt"}}}]},
+        \\ "done":true,"done_reason":"stop","prompt_eval_count":10,"eval_count":5}
+    ;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    // Both fixtures stay alive to the end of the test: the transcripts point
+    // into their arenas.
+    var fixtures: [2]*Fixture = undefined;
+    var transcripts: [2]Transcript = undefined;
+    for (0..2) |run| {
+        fixtures[run] = try Fixture.init(&allow_models_and_reading, &.{});
+        const fixture = fixtures[run];
+        fixture.recorded.responses = &.{
+            .{ .status = 200, .body = three_reads },
+            try textResponse(fixture.arena(), "All three read."),
+        };
+        try fixture.place("one.txt", "first");
+        try fixture.place("two.txt", "second");
+        try fixture.place("three.txt", "third");
+
+        var runner = fixture.runner(stopped_clock);
+        // The only difference between the two runs.
+        if (run == 1) runner.io = threaded.io();
+        transcripts[run] = try runner.run(fixture.options(), "Read all three.", fixture.context());
+
+        const steps = transcripts[run].turns[0].steps;
+        try testing.expectEqual(@as(usize, 3), steps.len);
+        // Each read ran, and each landed on the path the model asked for at
+        // that position — not another call's, which is what a scheduler that
+        // mixed up its indices would produce.
+        try testing.expectEqualStrings("one.txt", steps[0].request.?.read_file.path);
+        try testing.expectEqualStrings("two.txt", steps[1].request.?.read_file.path);
+        try testing.expectEqualStrings("three.txt", steps[2].request.?.read_file.path);
+        for (steps) |step| try testing.expect(step.executed);
+    }
+    defer for (fixtures) |fixture| fixture.deinit();
+
+    // Identical, step for step.
+    try testing.expectEqualStrings(transcripts[0].answer, transcripts[1].answer);
+    try testing.expectEqual(transcripts[0].ending, transcripts[1].ending);
+    try testing.expectEqual(transcripts[0].turns.len, transcripts[1].turns.len);
+    for (transcripts[0].turns, transcripts[1].turns) |a, b| {
+        try testing.expectEqual(a.steps.len, b.steps.len);
+        for (a.steps, b.steps) |x, y| {
+            try testing.expectEqualStrings(x.toolName, y.toolName);
+            try testing.expectEqualStrings(x.reply, y.reply);
+            try testing.expectEqual(x.refused, y.refused);
+            try testing.expectEqual(x.executed, y.executed);
+        }
+    }
+}
+
+test "a write and the reads around it are never overlapped" {
+    // Reading a file while another call writes it is a race whose answer
+    // depends on timing. The scheduler is what stops that, and this is the
+    // shape it has to stop: the write is in its own wave, with a read on
+    // either side of it.
+    var fixture = try Fixture.init(&allow_everything_here, &.{});
+    defer fixture.deinit();
+    const arena = fixture.arena();
+
+    const claims = [_]?schedule.Claim{
+        try schedule.claimOf(arena, .{ .read_file = .{ .path = "notes.md" } }),
+        try schedule.claimOf(arena, .{ .write_file = .{ .path = "notes.md", .contentHash = hashing.Hash.of("x"), .byteCount = 1 } }),
+        try schedule.claimOf(arena, .{ .read_file = .{ .path = "notes.md" } }),
+        try schedule.claimOf(arena, .{ .read_file = .{ .path = "other.md" } }),
+    };
+    const waves = try schedule.plan(arena, &claims);
+
+    // Three waves: the reads of `notes.md` cannot sit beside the write, and the
+    // unrelated file rides along with the first of them.
+    try testing.expectEqual(@as(usize, 3), waves.len);
+    try testing.expectEqualSlices(usize, &.{ 0, 3 }, waves[0].members);
+    try testing.expectEqualSlices(usize, &.{1}, waves[1].members);
+    try testing.expectEqualSlices(usize, &.{2}, waves[2].members);
+}
+
+const allow_everything_here = [_]policy_mod.Rule{.{
+    .id = "everything",
+    .capabilities = &.{ .@"model.infer", .@"network.connect", .@"fs.read", .@"fs.write" },
+    .effect = .allow,
+    .reason = "This test workspace allows the tools it uses.",
+}};

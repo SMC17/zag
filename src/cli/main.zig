@@ -1270,6 +1270,10 @@ fn askAModel(
         .engine = &engine,
         .clock = monotonic(io),
         .journal = recorder.journal(),
+        // Independent tool calls overlap. Which ones are independent is worked
+        // out from the typed requests the policy engine already decided about,
+        // and the record comes out the same either way.
+        .io = io,
         .watch = if (options.stream)
             .{ .context = w, .textFn = Live.write }
         else
