@@ -97,6 +97,7 @@ pub const terminal = struct {
     pub const session = @import("terminal/session.zig");
     pub const tty = @import("terminal/tty.zig");
     pub const interactive = @import("terminal/interactive.zig");
+    pub const settings = @import("terminal/settings.zig");
 };
 
 pub const ai = struct {
