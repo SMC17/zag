@@ -76,6 +76,7 @@ zag run -- zig build test      # run a command and record it as a block
 zag shell-hook bash            # the shell integration to add to your shell
 zag workflow                   # this repository's own workflow, as a task graph
 zag history "status:failed zig" # search recorded work, not a text file
+zag show "kind:command zig build"  # what that command actually printed
 zag knowledge                  # the knowledge under .workspace/, and what is overdue
 zag objects --root .           # audit stored command output without changing it
 zag recover --root .           # inspect a damaged log and print a recovery plan

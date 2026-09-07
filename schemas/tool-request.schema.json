@@ -149,8 +149,7 @@
         }
       },
       "required": [
-        "argv",
-        "workingDirectory"
+        "argv"
       ],
       "additionalProperties": false
     },
@@ -200,6 +199,9 @@
         "path": {
           "type": "string"
         },
+        "contents": {
+          "type": "string"
+        },
         "contentHash": {
           "type": "string"
         },
@@ -212,9 +214,7 @@
         }
       },
       "required": [
-        "path",
-        "contentHash",
-        "byteCount"
+        "path"
       ],
       "additionalProperties": false
     },

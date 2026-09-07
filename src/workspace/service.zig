@@ -172,6 +172,15 @@ pub const Options = struct {
     seed: ?u64 = null,
     /// When false, the service holds the log in memory only. Tests use this.
     persist: bool = true,
+    /// The environment a recorded command runs with, as `KEY=VALUE` pairs.
+    ///
+    /// This is the person's own environment. A command recorded with a made-up
+    /// one is not the command they would have run: without `HOME` the Zig
+    /// compiler cannot find its cache, `git` reads no configuration, and every
+    /// tool that keeps state under a home directory fails for a reason that has
+    /// nothing to do with the code being built. Left empty, a minimal
+    /// environment is used, which is right for a test and wrong for a person.
+    environment: []const []const u8 = &.{},
 };
 
 pub const Service = struct {
@@ -186,6 +195,7 @@ pub const Service = struct {
     policy: policy_mod.Engine,
     ids: idmod.Generator,
     persist: bool,
+    environment: []const []const u8,
     /// Set when the log on disk failed verification. While it is set, `append`
     /// refuses, so a damaged log is never extended.
     sealed: bool = false,
@@ -270,6 +280,7 @@ pub const Service = struct {
             .policy = policy_mod.Engine.init(arena, policy, seed),
             .ids = idmod.Generator.init(seed, @divFloor(options.now.ns, timeutil.ns_per_ms)),
             .persist = options.persist,
+            .environment = options.environment,
             .sealed = chain_break != null or torn_bytes > 0 or malformed != null,
             .persisted_bytes = persisted_bytes,
             .persisted_fingerprint = persisted_fingerprint,
@@ -488,6 +499,52 @@ pub const Service = struct {
         exitStatus: ?u8,
     };
 
+    /// The three variables the boundary protocol uses. Anything arriving from
+    /// outside under one of these names is dropped rather than passed on.
+    const marker_variables = [_][]const u8{ "ZAG_MARKER_TOKEN", "ZAG_MARKER_COMMAND", "ZAG_EXEC_COMMAND" };
+
+    /// Build the environment a recorded command runs with.
+    ///
+    /// The person's own environment, plus the three variables the boundary
+    /// protocol needs. Those three are written first and filtered out of what
+    /// was inherited, so a variable already set under one of those names cannot
+    /// reach the shell: `execve` does not define which of two entries with the
+    /// same name wins, and the marker token is what stops a program forging a
+    /// command boundary in the record. Guessing it would be enough to break it.
+    ///
+    /// `TERM` and `PATH` are supplied only when the person has none, so a
+    /// command still runs somewhere with no environment at all.
+    fn commandEnvironment(
+        self: *Service,
+        marker_token: []const u8,
+        marker_command: []const u8,
+        command_text: []const u8,
+    ) ![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        try out.append(self.arena, try std.fmt.allocPrint(self.arena, "ZAG_MARKER_TOKEN={s}", .{marker_token}));
+        try out.append(self.arena, try std.fmt.allocPrint(self.arena, "ZAG_MARKER_COMMAND={s}", .{marker_command}));
+        try out.append(self.arena, try std.fmt.allocPrint(self.arena, "ZAG_EXEC_COMMAND={s}", .{command_text}));
+
+        var has_term = false;
+        var has_path = false;
+        for (self.environment) |entry| {
+            const equals = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
+            const name = entry[0..equals];
+            var reserved = false;
+            for (marker_variables) |taken| {
+                if (std.mem.eql(u8, name, taken)) reserved = true;
+            }
+            if (reserved) continue;
+            if (std.mem.eql(u8, name, "TERM")) has_term = true;
+            if (std.mem.eql(u8, name, "PATH")) has_path = true;
+            try out.append(self.arena, entry);
+        }
+
+        if (!has_term) try out.append(self.arena, "TERM=xterm-256color");
+        if (!has_path) try out.append(self.arena, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        return out.items;
+    }
+
     /// Run one command on a real pseudoterminal and record it in the log.
     ///
     /// The command runs under a shell that writes the semantic prompt marks, so
@@ -527,13 +584,7 @@ pub const Service = struct {
         try session.run(
             "/bin/sh",
             &.{ "/bin/sh", "-c", script },
-            &.{
-                try std.fmt.allocPrint(self.arena, "ZAG_MARKER_TOKEN={s}", .{marker_token}),
-                try std.fmt.allocPrint(self.arena, "ZAG_MARKER_COMMAND={s}", .{marker_command}),
-                try std.fmt.allocPrint(self.arena, "ZAG_EXEC_COMMAND={s}", .{command_text}),
-                "TERM=xterm-256color",
-                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            },
+            try self.commandEnvironment(marker_token, marker_command, command_text),
             self.root,
             timeout,
         );
