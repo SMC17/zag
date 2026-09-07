@@ -1232,6 +1232,9 @@ fn askAModel(
         // the policy allowed to leave. The two are separate questions and this
         // is the second one.
         .redactor = try zag.security.secrets.Redactor.init(io),
+        // And nothing connects to a host whose name does not resolve to where
+        // the connector said it lives.
+        .guard = .{ .io = io },
     };
 
     // The loop, not a single question. A model that can read the workspace and

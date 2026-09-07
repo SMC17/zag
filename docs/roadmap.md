@@ -163,11 +163,13 @@ three times before anything is encoded.
 
 Still open:
 
-- Enforce network host allowlists at the connection boundary rather than at the
-  request boundary. The host is decided before the request is built and a
-  redirect is refused outright, but name resolution and address changes are not
-  yet checked at the socket, so a host that resolves to an unexpected address is
-  not caught.
+- Connect to the address that was checked. Every address a provider's name
+  resolves to is now classified before anything connects, and a public name
+  answering with a loopback, link-local, private or reserved address refuses the
+  request. What remains is that `std.http.Client` resolves the name a second
+  time when it connects, so a name that answers correctly to the check and
+  incorrectly to the connection is not caught. Closing that means owning the
+  socket rather than handing a URL to a client.
 - Review `docs/threat-model.md` with local users, malicious repositories,
   compromised child processes, model providers and remote clients in scope.
 - Extend redaction to the remaining outputs. Command text, captured output and
