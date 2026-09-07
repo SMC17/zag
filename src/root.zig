@@ -130,6 +130,7 @@ pub const ai = struct {
 
 pub const security = struct {
     pub const secrets = @import("security/secrets.zig");
+    pub const netguard = @import("security/netguard.zig");
 };
 
 pub const records = struct {

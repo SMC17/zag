@@ -40,6 +40,7 @@ const capability_mod = @import("capability.zig");
 const tools = @import("tools.zig");
 const hashing = @import("../core/hash.zig");
 const secrets = @import("../security/secrets.zig");
+const netguard = @import("../security/netguard.zig");
 
 pub const Connector = catalog.Connector;
 pub const Decision = policy_mod.Decision;
@@ -53,6 +54,10 @@ pub const Error = error{
     NeedsApproval,
     /// The connector needs a credential and the variable is empty.
     CredentialMissing,
+    /// The host was allowed by name, and the addresses it resolves to are not
+    /// where that name is supposed to go. `Attempt.addressProblem` says which
+    /// address and what is wrong with it.
+    AddressRefused,
     /// The provider answered with a status this build treats as a failure.
     ProviderRejected,
     /// The request could not be sent at all.
@@ -66,6 +71,7 @@ pub fn refusalText(err: Error) []const u8 {
         error.NotPermitted => "The policy does not allow this model request.",
         error.NeedsApproval => "This model request is waiting for a person to allow it.",
         error.CredentialMissing => "That provider needs a credential and none is set.",
+        error.AddressRefused => "The provider's name does not resolve to where it is supposed to go.",
         error.ProviderRejected => "The provider refused the request.",
         error.SendFailed => "The request could not be sent.",
         error.OutOfMemory => "There was not enough memory to send this.",
@@ -108,12 +114,18 @@ pub const Sender = struct {
 pub const Stage = enum {
     infer,
     network,
+    /// The host was allowed by name, and the addresses it answers with were
+    /// not. A separate stage from `network` because the two fail for opposite
+    /// reasons: one is a rule that did not permit the host, the other is a host
+    /// that turned out not to be where its name said.
+    address,
     credential,
 
     pub fn text(self: Stage) []const u8 {
         return switch (self) {
             .infer => "using a model",
             .network => "reaching the provider over the network",
+            .address => "the address the provider's name resolves to",
             .credential => "using the stored credential",
         };
     }
@@ -138,6 +150,10 @@ pub const Attempt = struct {
     redactions: usize = 0,
     /// Set when the request never went out.
     refusedAt: ?Stage = null,
+    /// Why the addresses were refused, when they were. Written in words, and
+    /// naming the address, because "refused" on its own sends somebody to read
+    /// the source.
+    addressProblem: []const u8 = "",
     /// The prompt's hash. The prompt itself is the caller's to store or not;
     /// the record says which prompt without holding it.
     promptHash: hashing.Hash,
@@ -232,6 +248,14 @@ pub const Transport = struct {
     /// Optional so a wire-format test need not build one. Every path that
     /// reaches a real provider sets it.
     redactor: ?secrets.Redactor = null,
+    /// Checks where the provider's name actually resolves to, before anything
+    /// connects.
+    ///
+    /// The policy decides the host as text. This decides whether the text still
+    /// means what it said — whether a public name answers with a private
+    /// address, and whether a local model is still local. Optional for the same
+    /// reason the redactor is, and set on every path that reaches a provider.
+    guard: ?netguard.Guard = null,
 
     /// Decide, then send.
     ///
@@ -278,6 +302,33 @@ pub const Transport = struct {
         if (!network.isAllowed()) {
             attempt.refusedAt = .network;
             return stopped(network);
+        }
+
+        // 2a. Is the host still where its name says? The rule above allowed
+        //     some text; this asks what that text resolves to. A public name
+        //     answering with a private address, or a local model answering with
+        //     a public one, is refused here — after the policy allowed the
+        //     name and before any credential is read, so a rebinding attack
+        //     cannot spend one.
+        if (self.guard) |guard| {
+            const endpoint = connector.endpoint("");
+            const expectation: netguard.Expectation =
+                if (connector.locality == .local) .this_machine else .the_internet;
+            const verdict = guard.verify(
+                self.arena,
+                endpoint.authority(),
+                endpoint.port(),
+                expectation,
+            ) catch |err| {
+                attempt.refusedAt = .address;
+                attempt.addressProblem = addressProblemText(err);
+                return error.AddressRefused;
+            };
+            if (verdict == .refused) {
+                attempt.refusedAt = .address;
+                attempt.addressProblem = verdict.refused.text(self.arena) catch "The address could not be checked.";
+                return error.AddressRefused;
+            }
         }
 
         // 3. May the stored credential be spent here? Asked before it is read,
@@ -412,6 +463,20 @@ pub const Transport = struct {
 /// there" — usually a local server they have not started — and "the network
 /// would not carry it", so those are separated and everything else is left
 /// honestly vague rather than guessed at.
+/// Why an address could not be checked, in words.
+///
+/// A failure to check is a refusal, not a pass. The alternative — treating an
+/// unreachable nameserver as permission — is how a control like this quietly
+/// stops working on the day it is needed.
+pub fn addressProblemText(err: netguard.Error) []const u8 {
+    return switch (err) {
+        error.HostUnusable => "The provider's address is not a name or an address this build can read.",
+        error.LookupFailed => "The provider's name could not be looked up, so where it goes is unknown. Nothing was sent.",
+        error.TooManyAddresses => "The provider's name answers with more addresses than can be checked. Nothing was sent.",
+        error.OutOfMemory, error.WriteFailed => "The address check could not be completed. Nothing was sent.",
+    };
+}
+
 pub fn sendProblemText(err: anyerror, local: bool) []const u8 {
     return switch (err) {
         error.ConnectionRefused => if (local)
@@ -938,4 +1003,101 @@ test "a credential in the prompt never reaches the wire" {
     const outgoing = try transport.withoutCredentials(request, &ignored);
     try testing.expect(attempt.promptHash.eql(hashPrompt(outgoing)));
     try testing.expect(!attempt.promptHash.eql(hashPrompt(request)));
+}
+
+test "a provider whose name resolves somewhere private is refused before the credential is read" {
+    var fixture = try Fixture.init(&allow_everything, &.{.{ .status = 200, .body = answer }});
+    defer fixture.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    // A connector whose base address is the cloud metadata service. The policy
+    // here allows everything, so the only thing that can stop this is the
+    // address check — which is the point: the two are separate questions and
+    // this proves the second one is asked.
+    const rogue: catalog.Connector = .{
+        .id = "rogue",
+        .name = "Rogue",
+        .format = .openai,
+        .baseUrl = "http://169.254.169.254",
+        .keyVariable = "ANTHROPIC_API_KEY",
+        .locality = .hosted,
+        .verified = .format_only,
+        .note = "A connector pointed at the cloud metadata service.",
+    };
+
+    var transport = fixture.transport(with_key);
+    transport.guard = .{ .io = threaded.io() };
+
+    var attempt: Attempt = undefined;
+    const result = transport.send(rogue, ask(), fixture.context(), &attempt);
+    try testing.expectError(error.AddressRefused, result);
+    try testing.expectEqual(Stage.address, attempt.refusedAt.?);
+
+    // Nothing was handed to the sender. A refusal that still made the request
+    // would be no refusal at all.
+    try testing.expectEqual(@as(usize, 0), fixture.recorded.seen.items.len);
+
+    // The refusal names the address and what is wrong with it, in words.
+    try testing.expect(std.mem.indexOf(u8, attempt.addressProblem, "169.254.169.254") != null);
+    try testing.expect(std.mem.indexOf(u8, attempt.addressProblem, "this network link") != null);
+
+    // The first two decisions were taken and recorded before the address was
+    // checked, so the record still shows the policy allowed the host by name.
+    // That distinction is the whole reason this is a separate stage.
+    try testing.expect(attempt.decisions.len >= 2);
+    for (attempt.decisions) |decision| try testing.expect(decision.isAllowed());
+}
+
+test "a hosted connector pointed at loopback is refused, and a local one is not" {
+    var fixture = try Fixture.init(&allow_everything, &.{
+        .{ .status = 200, .body = answer },
+        .{ .status = 200, .body = answer },
+    });
+    defer fixture.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var transport = fixture.transport(with_key);
+    transport.guard = .{ .io = threaded.io() };
+
+    // Ollama, on this machine, at the address it is supposed to be at.
+    const local: catalog.Connector = .{
+        .id = "local",
+        .name = "Local",
+        // The wire format is beside the point here; the fixture answers in the
+        // one this repository was written against so that a decode failure
+        // cannot be mistaken for an address refusal.
+        .format = .anthropic,
+        .baseUrl = "http://127.0.0.1:11434",
+        .locality = .local,
+        .verified = .format_only,
+        .note = "A model on this computer.",
+    };
+    var allowed: Attempt = undefined;
+    _ = try transport.send(local, ask(), fixture.context(), &allowed);
+    try testing.expect(allowed.refusedAt == null);
+
+    // The identical address, offered by a connector that says it is hosted
+    // somewhere else. Same bytes, opposite answer, because the expectation is
+    // what the connector claimed about itself.
+    var disguised = local;
+    disguised.id = "not-local";
+    disguised.locality = .hosted;
+    var refused: Attempt = undefined;
+    try testing.expectError(error.AddressRefused, transport.send(disguised, ask(), fixture.context(), &refused));
+    try testing.expectEqual(Stage.address, refused.refusedAt.?);
+    try testing.expect(std.mem.indexOf(u8, refused.addressProblem, "127.0.0.1") != null);
+}
+
+test "every stage of the gate says what it is in words" {
+    // A refusal names the stage it happened at, and a stage with no words would
+    // print an empty reason to somebody trying to understand a denial.
+    for (std.enums.values(Stage)) |stage| {
+        try testing.expect(stage.text().len > 0);
+        for (std.enums.values(Stage)) |other| {
+            if (stage == other) continue;
+            try testing.expect(!std.mem.eql(u8, stage.text(), other.text()));
+        }
+    }
 }
