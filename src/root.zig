@@ -128,6 +128,10 @@ pub const ai = struct {
     };
 };
 
+pub const security = struct {
+    pub const secrets = @import("security/secrets.zig");
+};
+
 pub const records = struct {
     pub const ledger = @import("records/ledger.zig");
 };

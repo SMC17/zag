@@ -58,6 +58,14 @@ named permission to perform one class of operation, such as reading files or ope
 
 rule set that decides whether an actor may use a capability on a resource, and whether a person must approve first
 
+## redaction
+
+replacement of a credential in text by a placeholder that names its kind, done before the text becomes a record or leaves the machine
+
+Also called: masking
+
+Do not use: scrubbing
+
 ## authorisation decision
 
 record of one policy outcome, naming the actor, the capability, the resource, the result and the reason

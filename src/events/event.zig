@@ -72,6 +72,10 @@ pub const CommandSubmitted = struct {
     /// the boundary was inferred. The difference matters for every metric
     /// computed from blocks.
     boundaryFromShell: bool = false,
+    /// How many credentials were taken out of `commandText` before it was
+    /// written down. A key typed on a command line is the most common way one
+    /// reaches a log, and `export API_KEY=…` is in every shell history there is.
+    redactions: usize = 0,
 };
 
 pub const OutputStream = enum { stdout, stderr, merged };
@@ -86,6 +90,13 @@ pub const ProcessOutput = struct {
     byteCount: usize,
     /// Sequence within the block, so out-of-order delivery can be repaired.
     chunkIndex: u32 = 0,
+    /// How many credentials were taken out of the stored bytes.
+    ///
+    /// The placeholders are visible in the content object, but the count
+    /// belongs here as well, because the event is what the hash chain covers
+    /// and the content object is not. A reader who has the log and not the
+    /// objects can still tell a clean block from a redacted one.
+    redactions: usize = 0,
 };
 
 pub const CommandFinished = struct {

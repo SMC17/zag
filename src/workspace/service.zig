@@ -20,6 +20,7 @@ const log_mod = @import("../events/log.zig");
 const graph_mod = @import("../events/graph.zig");
 const content_store_mod = @import("../events/content_store.zig");
 const block_mod = @import("block.zig");
+const secrets = @import("../security/secrets.zig");
 const model_mod = @import("model.zig");
 const history_mod = @import("history.zig");
 const workflow_mod = @import("workflow.zig");
@@ -196,6 +197,12 @@ pub const Service = struct {
     /// one another.
     persisted_bytes: u64 = 0,
     persisted_fingerprint: hashing.Hash = hashing.Hash.zero,
+    /// Takes credentials out of anything on its way into the log.
+    ///
+    /// One per opened workspace, so a key that appears in ten commands reads as
+    /// one key across the whole record, and so the salt behind those
+    /// fingerprints is drawn once and never written down.
+    redactor: secrets.Redactor,
 
     /// Open a workspace: read the log, verify it, fold it, and read the
     /// knowledge base. Never repairs anything.
@@ -266,6 +273,7 @@ pub const Service = struct {
             .sealed = chain_break != null or torn_bytes > 0 or malformed != null,
             .persisted_bytes = persisted_bytes,
             .persisted_fingerprint = persisted_fingerprint,
+            .redactor = try secrets.Redactor.init(io),
         };
         const report: OpenReport = .{
             .root = options.root,
@@ -511,6 +519,7 @@ pub const Service = struct {
             .actor = self.actor,
             .content_store = &self.content,
             .marker_token = marker_token,
+            .redactor = self.redactor,
         }, self.clock);
 
         const marker_command = try encodeOscField(self.arena, command_text);
@@ -1653,4 +1662,68 @@ test "an agent run is recorded as one causal tree, refusals included" {
     // The whole run comes back from one correlation.
     const run = try graph.run(loaded.log.entries.items[roots.items[0]].id);
     try testing.expectEqual(loaded.log.entries.items.len, run.items.len);
+}
+
+test "a key a command prints never reaches the stored bytes or the log" {
+    if (comptime !@import("../terminal/pty.zig").supported) return error.SkipZigTest;
+
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const at = try Timestamp.parseIso("2026-09-05T09:00:00Z");
+    const opened = try Service.open(arena, io, .{ .root = root, .actor = testActor(), .now = at });
+    var service = opened.service;
+
+    // The whole point of the feature, exercised the way it actually happens: a
+    // command prints a credential, and the workspace keeps a record of the
+    // command. This is not a unit test of the detector — it is the wiring, and
+    // the wiring is the part that was missing.
+    const key = "sk-ant-api03-" ++ "w" ** 40;
+    const run = service.runCommand("printf 'key is " ++ key ++ "\\n'", .fromSeconds(5)) catch |err| switch (err) {
+        error.OpenFailed, error.ConfigureFailed, error.UnsupportedPlatform => return error.SkipZigTest,
+        else => return err,
+    };
+    try service.flush(io);
+
+    // Not in the command text the log kept, even though the person typed it.
+    try testing.expect(std.mem.indexOf(u8, run.blocks[0].commandText.?, "sk-ant") == null);
+    try testing.expect(std.mem.indexOf(u8, run.blocks[0].commandText.?, "[redacted anthropic-api-key ") != null);
+
+    var output_hash: ?hashing.Hash = null;
+    var output_redactions: usize = 0;
+    var command_redactions: usize = 0;
+    for (service.log.entries.items) |entry| switch (entry.payload) {
+        .process_output => |output| {
+            output_hash = output.contentHash;
+            output_redactions += output.redactions;
+        },
+        .command_submitted => |submitted| command_redactions += submitted.redactions,
+        else => {},
+    };
+
+    // Not in the stored bytes either.
+    const bytes = try service.readContent(io, output_hash.?, 4096);
+    try testing.expect(std.mem.indexOf(u8, bytes, "sk-ant") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "key is [redacted anthropic-api-key ") != null);
+
+    // And the counts are on the events, so a reader holding only the log can
+    // tell a clean block from a redacted one. This is the part that survives
+    // the content objects being lost.
+    try testing.expect(command_redactions >= 1);
+    try testing.expect(output_redactions >= 1);
+
+    // Nowhere in the log file on disk, which is the file that cannot be edited
+    // afterwards without breaking the chain.
+    const on_disk = try Service.readFileIfPresent(arena, io, try Service.logPath(arena, root));
+    try testing.expect(std.mem.indexOf(u8, on_disk.?, "sk-ant") == null);
+
+    const reopened = try Service.open(arena, io, .{ .root = root, .actor = testActor(), .now = at });
+    try testing.expect(reopened.report.isHealthy());
 }
