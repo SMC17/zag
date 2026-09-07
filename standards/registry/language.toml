@@ -12,7 +12,6 @@ status = "published"
 enforcement = "mandatory"
 valid_from = 2023-07-01T00:00:00Z
 purpose = "Product text must let the intended reader find, understand and use what they need."
-requirements_file = "standards/registry/requirements-language.toml"
 
 [[standard]]
 namespace = "iso"

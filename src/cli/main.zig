@@ -1245,7 +1245,7 @@ fn askAModel(
     if (transcript.pending) |request| {
         try w.print("\nIt is waiting for you to allow: {s} on {s}.\n", .{
             request.capability().explain(),
-            zag.ai.executor.resourceOf(request).text(),
+            (try request.resource(arena)).text(),
         });
         try w.writeAll("Add a rule for it to the workspace policy, then run this again.\n");
     }
@@ -1722,6 +1722,48 @@ fn lifecycleReport(arena: std.mem.Allocator, w: *std.Io.Writer) !u8 {
 
 /// `zag evidence` — run the checks that can be run, record what each one
 /// established, and write the conformance statement that follows from it.
+/// Hash the bytes of the artefact a piece of evidence is about.
+///
+/// Evidence used to carry `Hash.of("vocabulary")` — the hash of the word, not
+/// of the thing. That is worse than no hash: it looks like a fingerprint, it is
+/// stable across every change to the file, and it would let a record about one
+/// version of an artefact be presented as a record about another.
+///
+/// A file that cannot be read produces the zero hash, which is the honest
+/// answer: the artefact was not fingerprinted, and a reader can tell.
+fn artefactHash(arena: std.mem.Allocator, io: std.Io, path: []const u8) !zag.core.hash.Hash {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(16 << 20)) catch {
+        return zag.core.hash.Hash.zero;
+    };
+    return zag.core.hash.Hash.of(bytes);
+}
+
+/// Hash the themes that were actually checked.
+///
+/// The colours are compiled in, so there is no file to read; hashing their
+/// values is what makes the record specific to the palette that passed.
+fn themeHash(arena: std.mem.Allocator) !zag.core.hash.Hash {
+    var out: std.Io.Writer.Allocating = .init(arena);
+    inline for ([_]zag.accessibility.contrast.Theme{
+        zag.accessibility.contrast.default_dark,
+        zag.accessibility.contrast.default_light,
+    }) |theme| {
+        try out.writer.writeAll(theme.name);
+        for (theme.pairs) |pair| {
+            try out.writer.print("|{s}:{x:0>2}{x:0>2}{x:0>2}:{x:0>2}{x:0>2}{x:0>2}", .{
+                pair.name,
+                pair.foreground.r,
+                pair.foreground.g,
+                pair.foreground.b,
+                pair.background.r,
+                pair.background.g,
+                pair.background.b,
+            });
+        }
+    }
+    return zag.core.hash.Hash.of(out.written());
+}
+
 fn evidenceReport(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
     const profile = zag.standards.profile.byId(options.profile) orelse {
         try w.print("\"{s}\" is not a profile zag knows. Run \"zag standards profiles\" to see them.\n", .{options.profile});
@@ -1734,7 +1776,10 @@ fn evidenceReport(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, optio
     var ledger = zag.standards.evidence.Ledger.init(arena);
     var ids: zag.core.id.Generator = .init(0x2026_0904, 1_788_000_000_000);
     const tool: zag.standards.evidence.ToolIdentity = .{ .name = "zag check", .version = zag.version };
-    const now = zag.core.time.Timestamp.epoch;
+    // The time the evidence was produced, from the clock. It used to be the
+    // epoch, so every record claimed to have been made on the first of January
+    // 1970 and nothing could be ordered or expired.
+    const now = wallClock(io);
 
     // Terminology.
     const system = try zag.knowledge.vocabulary.build(arena);
@@ -1747,7 +1792,7 @@ fn evidenceReport(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, optio
         .result = if (term_findings.items.len == 0) .pass else .fail,
         .tool = tool,
         .created_at = now,
-        .content_hash = zag.core.hash.Hash.of("vocabulary"),
+        .content_hash = try artefactHash(arena, io, "src/knowledge/vocabulary.zig"),
         .note = "Every concept was checked for a definition that is present, not circular and not negative.",
     });
     try ledger.record(.{
@@ -1758,7 +1803,7 @@ fn evidenceReport(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, optio
         .result = if (term_findings.items.len == 0) .pass else .fail,
         .tool = tool,
         .created_at = now,
-        .content_hash = zag.core.hash.Hash.of("vocabulary"),
+        .content_hash = try artefactHash(arena, io, "src/knowledge/vocabulary.zig"),
         .note = "No preferred term designates two concepts.",
     });
 
@@ -1807,20 +1852,26 @@ fn evidenceReport(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, optio
         .result = if (contrast_failures == 0) .pass else .fail,
         .tool = tool,
         .created_at = now,
-        .content_hash = zag.core.hash.Hash.of("themes"),
+        .content_hash = try themeHash(arena),
     });
 
-    const tree_findings = try zag.accessibility.semantic_tree.check(arena, zag.accessibility.semantic_tree.exampleTree(), .{});
+    // Target size and name-role-value are properties of a user interface. This
+    // build has no renderer, so there is no interface to measure them on. The
+    // checker runs against an example tree, and a pass against a fixture is
+    // evidence about the fixture: recording it as a pass for the product would
+    // be the exact thing the conformance rules forbid. It is recorded as not
+    // tested, with the reason, until there is something to test.
     inline for (.{ "WCAG-2.2:R-TARGET-SIZE", "WCAG-2.2:R-NAME-ROLE-VALUE" }) |requirement_id| {
         try ledger.record(.{
             .id = ids.next(zag.core.id.EvidenceId),
             .requirement_id = requirement_id,
-            .subject = "the published accessibility tree",
+            .subject = "no user interface exists yet",
             .method = .automated_test,
-            .result = if (tree_findings.items.len == 0) .pass else .fail,
+            .result = .not_tested,
             .tool = tool,
             .created_at = now,
-            .content_hash = zag.core.hash.Hash.of("tree"),
+            .content_hash = zag.core.hash.Hash.zero,
+            .note = "This build draws no window. The checker runs against an example tree, which is evidence about the example and not about a product nobody can see.",
         });
     }
 
@@ -1834,7 +1885,7 @@ fn evidenceReport(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, optio
         .result = if ((try risk_register.review()).items.len == 0) .pass else .fail,
         .tool = tool,
         .created_at = now,
-        .content_hash = zag.core.hash.Hash.of("risks"),
+        .content_hash = try artefactHash(arena, io, "src/ai/risk.zig"),
     });
     const assessment = try zag.ai.impact.workbenchAssessment(arena);
     try ledger.record(.{
@@ -1854,17 +1905,53 @@ fn evidenceReport(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, optio
     for (help_report.findings) |finding| {
         if (finding.severity == .blocking) blocking += 1;
     }
-    inline for (.{ "ISO-24495-1:R-ERROR-NEXT-STEP", "ISO-24495-1:R-LABEL-ACTION", "ISO-24495-1:R-UNDERSTANDABLE", "ISO-24495-1:R-FINDABLE" }) |requirement_id| {
+    // Each requirement answers for its own rule, not for "nothing blocking".
+    //
+    // Only two rules in the whole checker can produce a blocking finding, so
+    // "no blocking problem" was a much weaker statement than the `pass` beside
+    // it implied: a document could break sentence length, leave abbreviations
+    // undefined and label a button "OK", and still be recorded as passing four
+    // requirements. A machine reading the record sees the result, not the note.
+    //
+    // Two of these have a rule that checks them, so they are answered by that
+    // rule. The other two are about whether a reader can find and understand
+    // the text, which no checker establishes, so they are recorded as partly
+    // established and say what is missing.
+    const NarrowRule = struct {
+        requirement: []const u8,
+        rule: zag.language.plain.Rule,
+    };
+    inline for ([_]NarrowRule{
+        .{ .requirement = "ISO-24495-1:R-ERROR-NEXT-STEP", .rule = .error_without_next_step },
+        .{ .requirement = "ISO-24495-1:R-LABEL-ACTION", .rule = .label_without_action },
+    }) |checked| {
+        var breaches: usize = 0;
+        for (help_report.findings) |finding| {
+            if (finding.rule == checked.rule) breaches += 1;
+        }
+        try ledger.record(.{
+            .id = ids.next(zag.core.id.EvidenceId),
+            .requirement_id = checked.requirement,
+            .subject = "the product's own text and the tool's help",
+            .method = .static_analysis,
+            .result = if (breaches == 0) .pass else .fail,
+            .tool = tool,
+            .created_at = now,
+            .content_hash = zag.core.hash.Hash.of(help_text),
+            .note = "A rule checks this one directly, and it is answered by that rule rather than by the absence of other problems.",
+        });
+    }
+    inline for (.{ "ISO-24495-1:R-UNDERSTANDABLE", "ISO-24495-1:R-FINDABLE" }) |requirement_id| {
         try ledger.record(.{
             .id = ids.next(zag.core.id.EvidenceId),
             .requirement_id = requirement_id,
             .subject = "the product's own text and the tool's help",
             .method = .static_analysis,
-            .result = if (blocking == 0) .pass else .fail,
+            .result = if (blocking == 0) .partial else .fail,
             .tool = tool,
             .created_at = now,
             .content_hash = zag.core.hash.Hash.of(help_text),
-            .note = "The plain-language checker found no blocking problem. It cannot establish that a reader can act on the text.",
+            .note = "A checker can see that nothing is obviously broken. Whether a reader can find and understand what they need is established by evaluating the text with readers, which has not been done.",
         });
     }
 
@@ -2276,6 +2363,18 @@ fn check(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Optio
     for (issues.items) |issue| {
         try w.print("  {s} {s}\n", .{ issue.code.text(), issue.message });
         problems += 1;
+    }
+
+    // 1b. Any file a standard points at has to be there. One entry named a
+    // requirements file that had never existed; the field was parsed, never
+    // read, and never checked, so nothing noticed.
+    for (registry.standards.values()) |standard| {
+        const named = standard.requirements_file orelse continue;
+        const full = try std.fs.path.join(arena, &.{ options.repo, named });
+        dir.access(io, full, .{}) catch {
+            try w.print("  REGISTRY {s} names {s}, which is not there.\n", .{ standard.identifier, named });
+            problems += 1;
+        };
     }
 
     // 2. The vocabulary.

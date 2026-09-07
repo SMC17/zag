@@ -73,6 +73,15 @@ of everything in it.
 What a model pays attention to is chosen by walking that graph from the event
 being asked about, nearest first. Recency is only a tie-break.
 
+Four things in this list were not true until recently, and are worth naming
+because the tests were green throughout. The agent runtime obtained a decision
+and discarded it, calling an executor that could not receive one. A second copy
+of "what resource does this request touch" disagreed with the first, so the two
+halves of the security model had never been tested against each other. A policy
+rule scoped to hosts also allowed requests on any other kind of resource. And
+`::1` never matched a rule that named it, because the host matcher split on the
+first colon. Each now has a test that fails if the fix is removed.
+
 These statements are covered by automated tests. They do not establish
 power-loss survival on every filesystem, hostile tamper resistance, a safe
 garbage collector, a complete terminal, a graphical product or organisational
