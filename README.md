@@ -86,6 +86,62 @@ every value at its default. A setting this build cannot read is reported by
 name, with what was found and what is being used instead, and the terminal
 opens anyway — a mistake in that file never costs you a shell.
 
+## Ask a model
+
+Two steps. Set a key, then write a policy:
+
+```
+export ANTHROPIC_API_KEY=...      # or any connector; run "zag providers"
+zag policy --init                 # writes .workspace/policy.toml
+zag ask "why did the build fail?"
+```
+
+`zag doctor` says which of the two is missing. If a key is set but no policy
+allows reaching the provider, it names the host and tells you what to run —
+that is the case where nothing is broken, nothing is misspelt, and the only
+symptom is a refusal at the moment of asking.
+
+With no policy file the built-in one is in force: it allows a model running on
+your own computer and nothing else. So if you use Ollama, none of this is
+needed.
+
+### The policy file
+
+`.workspace/policy.toml` is a list of rules. Each `[[rule]]` names **one**
+effect — `allow`, `ask` or `deny` — and lists the capabilities it applies to:
+
+```toml
+[[rule]]
+id = "ask-a-model"
+allow = ["model.infer"]
+because = "This workspace may ask a model questions."
+
+[[rule]]
+id = "reach-the-provider"
+allow = ["network.connect"]
+hosts = ["api.anthropic.com"]        # scoped: nowhere else may be reached
+because = "The model runs there."
+
+[[rule]]
+id = "run-commands"
+ask = ["process.execute"]            # stops for a person, each time
+because = "A person decides each command before it runs."
+```
+
+The effect is the key, not a value: it is `allow = [...]`, not
+`effect = "allow"`. `because` is required and is what a person is shown when a
+decision is made. A rule may be scoped by `hosts`, `paths` or `agents`; an
+unscoped rule applies to every resource of that capability.
+
+Anything no rule allows is refused. A file with a mistake anywhere in it is
+refused *whole* — nothing is granted by being written badly — and `zag policy`
+says which rule and why.
+
+Capabilities: `fs.read`, `fs.write`, `fs.delete`, `process.execute`,
+`process.signal`, `network.connect`, `network.listen`, `git.read`,
+`git.commit`, `git.push`, `credentials.use`, `credentials.read`, `mcp.invoke`,
+`container.start`, `remote.execute`, `model.infer`.
+
 `zag-audit` is the second binary. It checks a repository against the standards
 it claims to meet, and nothing it does is needed to record work:
 
