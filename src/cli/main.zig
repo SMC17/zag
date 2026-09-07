@@ -82,7 +82,7 @@ pub const help_text =
     \\  knowledge           Show the knowledge under .workspace/, and what is overdue.
     \\  term                Open a shell in a terminal that records what you do.
     \\  providers           List the model connectors and say which credentials are set.
-    \\  policy              Show the policy in force, and where it was read from.
+    \\  policy [--init]     Show the policy in force, or write one to start from.
     \\  ask <question>      Ask a model, through the policy. It can use tools, one decision each.
     \\  why <file> [n]      Show what an event depended on, and what it went on to affect.
     \\  secrets <files>     Show what would be taken out of these files before recording them.
@@ -96,6 +96,7 @@ pub const help_text =
     \\  --turns <count>     How many times a model may be asked in one run.
     \\  --raw               Start the shell with no added prompt marks.
     \\  --stream            Print a model's answer as it arrives, not when it finishes.
+    \\  --init              Write a starter policy file. Used with "zag policy".
     \\  --approve-truncate  Apply the recovery plan after preserving the original log.
     \\
     \\To audit a repository against the standards it claims to meet, use
@@ -114,6 +115,8 @@ const Options = struct {
     /// Print a model's answer as it arrives rather than when it is finished.
     stream: bool = false,
     approve_truncate: bool = false,
+    /// Write a starter policy file rather than showing the policy in force.
+    init: bool = false,
     provider: []const u8 = "",
     model: []const u8 = "",
     turns: []const u8 = "",
@@ -124,6 +127,10 @@ const Options = struct {
 
 fn approvalOptionIsValid(command: Command, options: Options) bool {
     return !options.approve_truncate or command == .recover;
+}
+
+fn initOptionIsValid(command: Command, options: Options) bool {
+    return !options.init or command == .policy;
 }
 
 fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
@@ -145,6 +152,10 @@ fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
         }
         if (std.mem.eql(u8, arg, "--json")) {
             options.json = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--init")) {
+            options.init = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--raw")) {
@@ -231,6 +242,11 @@ pub fn main(init: std.process.Init) !u8 {
         try w.flush();
         return 2;
     }
+    if (!initOptionIsValid(command, options)) {
+        try w.writeAll("--init applies only to \"zag policy\". Nothing was changed.\n");
+        try w.flush();
+        return 2;
+    }
 
     var environment: std.ArrayList([]const u8) = .empty;
     {
@@ -264,7 +280,7 @@ fn run(
             try w.print("zag {s}\n", .{zag.version});
             break :blk 0;
         },
-        .doctor => try doctor(arena, io, w, options),
+        .doctor => try doctor(arena, io, w, options, environment),
 
         .events => try events(arena, io, w, options),
         .objects => try contentObjects(arena, io, w, options),
@@ -288,7 +304,13 @@ fn run(
 // Commands
 // ---------------------------------------------------------------------------
 
-fn doctor(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
+fn doctor(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+    environment: []const []const u8,
+) !u8 {
     const builtin = @import("builtin");
     const loaded = try LoadedPolicy.fromWorkspace(arena, io, options.root);
     const written_policy = loaded.path != null and loaded.problems.len == 0;
@@ -317,19 +339,18 @@ fn doctor(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Opti
         zag.ai.toolschema.offers.len,
     });
     try w.writeAll("  Explain a failure from the record:  yes, with zag why\n");
-    try w.writeAll("  Plain-language checks:              yes\n");
-    try w.writeAll("  Terminology and metadata registry:  yes\n");
-    try w.writeAll("  Standards registry and evidence:    yes\n");
-    try w.writeAll("  Generated schemas and vocabulary:   yes\n\n");
+    try w.writeAll("  Read an answer as it arrives:       yes, with --stream\n");
+    try w.writeAll("  Run independent tool calls at once:  yes, in waves that share nothing\n");
+    try w.writeAll("  Audit this repository:              yes, in the zag-audit binary\n\n");
 
     try w.writeAll("What this build cannot do yet\n");
     try w.writeAll("  Draw its own window. The renderer is not written; the accessibility tree it must publish is.\n");
     try w.writeAll("  Talk to a language server. The editor surfaces are not written.\n");
-    try w.writeAll("  Read an answer as it arrives. A model request waits for the whole reply.\n");
-    try w.writeAll("  Run more than one tool call at a time. A turn does them one after another.\n");
     try w.writeAll("  Run on Windows or macOS terminals. The pseudoterminal layer is Linux only so far.\n");
     try w.writeAll("  Split the screen. There are no tabs, panes or splits yet.\n");
-    try w.writeAll("  Be configured beyond the policy file. There are no key bindings and no theme file yet.\n\n");
+    try w.writeAll("  Draw the colours or bind the keys a settings file asks for. It reads them and reports on them.\n\n");
+
+    try writeNextStep(arena, w, loaded, written_policy, environment);
 
     const system = try zag.knowledge.vocabulary.build(arena);
     try w.print("The vocabulary holds {d} concepts.\n", .{system.count()});
@@ -693,6 +714,8 @@ fn showPolicy(
     w: *std.Io.Writer,
     options: Options,
 ) !u8 {
+    if (options.init) return writeStarterPolicy(arena, io, w, options);
+
     const loaded = try LoadedPolicy.fromWorkspace(arena, io, options.root);
 
     if (loaded.path) |path| {
@@ -717,6 +740,149 @@ fn showPolicy(
     }
 
     try zag.ai.policy_file.describe(loaded.policy, w);
+    return 0;
+}
+
+/// Say what is standing between this workspace and asking a model.
+///
+/// `zag doctor` listed what the build could do and left the person to work out
+/// why their own machine would not do it. The interesting case is the one that
+/// costs an afternoon: a key is set, the connector exists, and the policy in
+/// force — usually the built-in one, which allows only a model on this
+/// computer — refuses the network. Nothing is broken, nothing is misspelt, and
+/// the only sign is a refusal at the moment of asking.
+///
+/// So this checks the two halves against each other and names the missing one.
+/// A credential's value is never read here, only whether the variable is set:
+/// the point is to say "the key is there", not to look at it.
+fn wallClockOrZero() zag.core.time.Timestamp {
+    // The decision here is only about a host, and no rule in a starter policy
+    // is time-scoped, so a fixed instant keeps `zag doctor` from needing a
+    // clock it does not otherwise use.
+    return .{ .ns = 0 };
+}
+
+fn writeNextStep(
+    arena: std.mem.Allocator,
+    w: *std.Io.Writer,
+    loaded: LoadedPolicy,
+    written_policy: bool,
+    environment: []const []const u8,
+) !void {
+    const env: Environment = .{ .entries = environment };
+
+    // Which connectors could actually be used: a hosted one needs its key set,
+    // a local one needs nothing.
+    var keyed: ?zag.ai.catalog.Connector = null;
+    var local: ?zag.ai.catalog.Connector = null;
+    for (zag.ai.catalog.connectors) |connector| {
+        if (connector.locality == .local) {
+            if (local == null) local = connector;
+            continue;
+        }
+        if (connector.keyVariable.len == 0) continue;
+        if (keyed == null and Environment.lookup(@constCast(&env), connector.keyVariable) != null) keyed = connector;
+    }
+
+    if (loaded.problems.len > 0) {
+        try w.writeAll("Next: this workspace has a policy file that cannot be used, so nothing in\n");
+        try w.writeAll("it is in force. Run \"zag policy\" to see what is wrong with it.\n\n");
+        return;
+    }
+
+    const connector = keyed orelse {
+        try w.writeAll("Next: no credential is set for any hosted connector, so a model on this\n");
+        if (local) |one| {
+            try w.print("computer is the one this build can reach. Start {s} and run \"zag ask\",\n", .{one.name});
+            try w.writeAll("or set a key and run \"zag providers\" to see which one it belongs to.\n\n");
+        } else {
+            try w.writeAll("computer would be the way in. Run \"zag providers\" to see the connectors.\n\n");
+        }
+        return;
+    };
+
+    // A key is set. Does the policy in force let it reach that host?
+    var engine = zag.ai.policy.Engine.init(arena, loaded.policy, 0);
+    const host = connector.endpoint("").host();
+    const reachable = engine.decide(.{
+        .capability = .@"network.connect",
+        .resource = .{ .host = host },
+    }, .{
+        .actor = .{ .raw = .{ .bytes = @splat(0) } },
+        .session = .{ .raw = .{ .bytes = @splat(0) } },
+        .agent = .{ .raw = .{ .bytes = @splat(0) } },
+        .now = wallClockOrZero(),
+    }) catch null;
+
+    if (reachable) |decision| {
+        if (decision.isAllowed()) {
+            try w.print("Next: {s} is set and the policy allows reaching {s}.\n", .{ connector.keyVariable, host });
+            try w.writeAll("Run \"zag ask\" to ask a question, or \"zag term\" to open a recorded shell.\n\n");
+            return;
+        }
+    }
+
+    // The interesting case, and the reason this function exists.
+    try w.print("Next: {s} is set, so this build can reach {s} — but the policy in force\n", .{ connector.keyVariable, connector.name });
+    try w.print("refuses to connect to {s}, so a question would be stopped before it was\n", .{host});
+    try w.writeAll("sent. That is the policy doing its job, not a fault.\n");
+    if (written_policy) {
+        try w.print("Add {s} to a network.connect rule in {s}.\n\n", .{ host, zag.ai.policy_file.default_path });
+    } else {
+        try w.writeAll("Run \"zag policy --init\" to write a starter file that allows it.\n\n");
+    }
+}
+
+/// Write a starter policy file for a person who has a key and no policy.
+///
+/// It never overwrites. A policy file is the thing standing between an agent
+/// and someone's machine, and a command that silently replaced one because a
+/// flag was typed twice would be the worst possible way to widen a policy.
+fn writeStarterPolicy(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+) !u8 {
+    const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ options.root, zag.ai.policy_file.default_path });
+
+    // Checked by reading, not by a flag on the open: a workspace where the
+    // policy exists but cannot be read is not one to write into either.
+    if (std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20))) |_| {
+        try w.print("{s} already exists, so nothing was written.\n", .{path});
+        try w.writeAll("Run \"zag policy\" to see what is in force, and edit that file to change it.\n");
+        return 1;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => {
+            try w.print("{s} exists but could not be read, so nothing was written.\n", .{path});
+            return 1;
+        },
+    }
+
+    // The host the starter file names comes from the connector the person
+    // asked for, so the file is right for the provider they actually use
+    // rather than right for the one this tool happened to list first.
+    const connector_name = if (options.provider.len > 0) options.provider else "anthropic";
+    const connector = zag.ai.catalog.find(connector_name) orelse {
+        try w.print("\"{s}\" is not a connector this build knows. Run \"zag providers\" to see them.\n", .{connector_name});
+        return 2;
+    };
+
+    var text: std.Io.Writer.Allocating = .init(arena);
+    try zag.ai.policy_file.writeStarter(&text.writer, connector.endpoint("").host());
+
+    const directory = try std.fmt.allocPrint(arena, "{s}/{s}", .{ options.root, zag.workspace.service.workspace_directory });
+    std.Io.Dir.cwd().createDirPath(io, directory) catch {};
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = text.written() }) catch {
+        try w.print("zag could not write {s}.\n", .{path});
+        return 1;
+    };
+
+    try w.print("Wrote {s} for {s}.\n\n", .{ path, connector.name });
+    try w.writeAll("It allows asking a model, reaching that one host, and spending a saved\n");
+    try w.writeAll("key without reading it. Everything else is refused. Read it before you\n");
+    try w.writeAll("widen it, and run \"zag policy\" to see what is in force.\n");
     return 0;
 }
 
@@ -1894,4 +2060,151 @@ test "the record says who wrote it, and tells a person from the workbench" {
     const workbench = workbenchActor();
     try testing.expect(!workbench.id.eql(expected.id));
     try testing.expectEqual(zag.data.provenance.ProducerKind.system, workbench.kind);
+}
+
+test "a starter policy is written once, and never over one that exists" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const root = ".zig-cache/tmp/policy-init-test";
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, root);
+
+    var out: std.Io.Writer.Allocating = .init(arena);
+    const wrote = try writeStarterPolicy(arena, io, &out.writer, .{ .root = root, .init = true });
+    try testing.expectEqual(@as(u8, 0), wrote);
+
+    // What it wrote has to be what this build reads, or the command has handed
+    // somebody a file that fails the moment they use it.
+    const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ root, zag.ai.policy_file.default_path });
+    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20));
+    const parsed = try zag.ai.policy_file.parse(arena, source);
+    try testing.expect(parsed.usable());
+
+    // A policy file is what stands between an agent and someone's machine. A
+    // second --init, whatever the reason for it, must not touch it.
+    var again: std.Io.Writer.Allocating = .init(arena);
+    const second = try writeStarterPolicy(arena, io, &again.writer, .{ .root = root, .init = true });
+    try testing.expectEqual(@as(u8, 1), second);
+    try testing.expect(std.mem.indexOf(u8, again.written(), "already exists") != null);
+
+    const after = try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20));
+    try testing.expectEqualStrings(source, after);
+}
+
+test "a starter policy for a connector nobody has heard of writes nothing at all" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const root = ".zig-cache/tmp/policy-init-unknown";
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, root);
+
+    var out: std.Io.Writer.Allocating = .init(arena);
+    const status = try writeStarterPolicy(arena, io, &out.writer, .{
+        .root = root,
+        .init = true,
+        .provider = "no-such-connector",
+    });
+    try testing.expectEqual(@as(u8, 2), status);
+
+    // Refused before anything was created, so a typo does not leave a
+    // half-made workspace behind.
+    const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ root, zag.ai.policy_file.default_path });
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20)));
+}
+
+test "the starter policy names the host of the connector that was asked for" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const root = ".zig-cache/tmp/policy-init-local";
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, root);
+
+    var out: std.Io.Writer.Allocating = .init(arena);
+    _ = try writeStarterPolicy(arena, io, &out.writer, .{ .root = root, .init = true, .provider = "ollama" });
+
+    const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ root, zag.ai.policy_file.default_path });
+    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20));
+    // A file for a model on this machine that allowed api.anthropic.com would
+    // be a file written for somebody else's setup.
+    try testing.expect(std.mem.indexOf(u8, source, "localhost") != null);
+    try testing.expect(std.mem.indexOf(u8, source, "api.anthropic.com") == null);
+}
+
+test "doctor names the policy as the blocker when a key is set and the host is refused" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The case worth catching: nothing is broken, nothing is misspelt, and the
+    // only symptom is a refusal at the moment of asking. The built-in policy
+    // allows a model on this computer and nothing else.
+    const loaded: LoadedPolicy = .{
+        .policy = (try zag.ai.policy_file.parse(arena, zag.ai.policy_file.local_models_only)).policy.?,
+        .path = null,
+        .problems = &.{},
+    };
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try writeNextStep(arena, &out.writer, loaded, false, &.{"ANTHROPIC_API_KEY=sk-ant-whatever"});
+
+    const text = out.written();
+    try testing.expect(std.mem.indexOf(u8, text, "ANTHROPIC_API_KEY is set") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "api.anthropic.com") != null);
+    // It says what to do, not just what is wrong.
+    try testing.expect(std.mem.indexOf(u8, text, "zag policy --init") != null);
+    // And it never prints the key.
+    try testing.expect(std.mem.indexOf(u8, text, "sk-ant-whatever") == null);
+}
+
+test "doctor says nothing is in the way when the policy allows the host" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var starter: std.Io.Writer.Allocating = .init(arena);
+    try zag.ai.policy_file.writeStarter(&starter.writer, "api.anthropic.com");
+    const loaded: LoadedPolicy = .{
+        .policy = (try zag.ai.policy_file.parse(arena, starter.written())).policy.?,
+        .path = ".workspace/policy.toml",
+        .problems = &.{},
+    };
+
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try writeNextStep(arena, &out.writer, loaded, true, &.{"ANTHROPIC_API_KEY=sk-ant-whatever"});
+    try testing.expect(std.mem.indexOf(u8, out.written(), "the policy allows reaching") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "sk-ant-whatever") == null);
+}
+
+test "doctor points at a broken policy file before anything else" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A file that cannot be used grants nothing, so saying "your key is fine"
+    // would send somebody looking in the wrong place.
+    const loaded: LoadedPolicy = .{
+        .policy = (try zag.ai.policy_file.parse(arena, zag.ai.policy_file.local_models_only)).policy.?,
+        .path = ".workspace/policy.toml",
+        .problems = &.{.{ .rule = 1, .message = "This rule does not say allow, ask or deny, so it would do nothing." }},
+    };
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try writeNextStep(arena, &out.writer, loaded, false, &.{"ANTHROPIC_API_KEY=sk-ant-whatever"});
+    try testing.expect(std.mem.indexOf(u8, out.written(), "cannot be used") != null);
 }
