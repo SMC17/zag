@@ -8,7 +8,6 @@
 const std = @import("std");
 const units = @import("../interop/units.zig");
 const timeutil = @import("../core/time.zig");
-const currency = @import("../interop/currency.zig");
 
 pub const Timestamp = timeutil.Timestamp;
 
@@ -69,14 +68,8 @@ pub const Metric = struct {
     /// The number of decimal places to show. More precision than the
     /// measurement supports is a lie told with a decimal point.
     decimals: u8 = 0,
-    /// A currency code when the metric is money.
-    currency_code: ?[]const u8 = null,
 
     pub fn validate(self: Metric) !void {
-        if (self.currency_code) |code| {
-            _ = currency.CurrencyCode.parse(code) catch return error.UnknownCurrency;
-            return;
-        }
         _ = units.Unit.parse(self.unit) catch return error.UnknownUnit;
     }
 };
@@ -185,7 +178,7 @@ pub const Registry = struct {
 
 const testing = std.testing;
 
-test "a metric must have a real unit or a real currency" {
+test "a metric must have a real unit" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     var registry = Registry.init(arena_state.allocator());
@@ -207,16 +200,6 @@ test "a metric must have a real unit or a real currency" {
         .unit = "furlongs",
         .direction = .neutral,
         .source = "nowhere",
-    }));
-    try testing.expectError(error.UnknownCurrency, registry.define(.{
-        .id = "cost",
-        .name = "Cost",
-        .definition = "What the runs cost.",
-        .kind = .flow,
-        .unit = "1",
-        .direction = .lower_is_better,
-        .source = "provider invoices",
-        .currency_code = "XYZ",
     }));
 }
 

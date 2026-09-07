@@ -5,7 +5,7 @@
 //! policy engine can decide it, the log can record it, and a person can read it
 //! back later and know what happened.
 //!
-//! The types are also the schema: `zag emit` publishes them as JSON Schema, so
+//! The types are also the schema: `zag-audit emit` publishes them as JSON Schema, so
 //! a provider, a plugin or another implementation sees the same contract.
 
 const std = @import("std");

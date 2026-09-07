@@ -11,7 +11,7 @@ model cards all describe the system. Where should they live?
 ## The decision
 
 They are generated from the code and the data that already exist, by
-`zag emit`. None of them is maintained by hand.
+`zag-audit emit`. None of them is maintained by hand.
 
 ## Why
 
