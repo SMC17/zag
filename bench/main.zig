@@ -373,6 +373,50 @@ fn benchmarkLineIndex(arena: std.mem.Allocator, io: std.Io, runs: usize) anyerro
     return measure.into("line breaks found in a document", "bytes", text.items.len, text.items.len);
 }
 
+/// Grouping a turn's tool calls into waves.
+///
+/// The scheduler runs once per turn, before any work is done, so it has to be
+/// cheap enough that a turn asking for sixteen calls does not pay for the
+/// planning. Measured on a turn of the widest shape the budget allows, mixing
+/// reads that overlap with writes and a barrier in the middle.
+fn benchmarkSchedule(arena: std.mem.Allocator, io: std.Io, runs: usize) anyerror!Result {
+    const turns: usize = 20_000;
+    const width: usize = 16;
+
+    // The same shape every turn: a barrier in the middle, some reads that share
+    // a directory with a write, and some that do not.
+    const claims = try arena.alloc(?zag.ai.schedule.Claim, width);
+    for (claims, 0..) |*slot, index| {
+        slot.* = switch (index % 8) {
+            0 => .everything,
+            1, 2 => .{ .on = .{
+                .resource = .{ .path = try std.fmt.allocPrint(arena, "src/shared-{d}", .{index % 3}) },
+                .access = .write,
+            } },
+            else => .{ .on = .{
+                .resource = .{ .path = try std.fmt.allocPrint(arena, "src/file-{d}.zig", .{index}) },
+                .access = .read,
+            } },
+        };
+    }
+
+    var measure: Measure = .{};
+    for (0..runs) |_| {
+        var scratch = std.heap.ArenaAllocator.init(arena);
+        defer scratch.deinit();
+        const scratch_arena = scratch.allocator();
+        const clock = Clock.start(io);
+        var planned: usize = 0;
+        for (0..turns) |_| {
+            const waves = try zag.ai.schedule.plan(scratch_arena, claims);
+            planned += waves.len;
+        }
+        measure.record(clock.elapsed());
+        std.mem.doNotOptimizeAway(planned);
+    }
+    return measure.into("tool-call scheduling", "turns", turns, 0);
+}
+
 fn benchmarkLineage(arena: std.mem.Allocator, io: std.Io, runs: usize) anyerror!Result {
     // A day of recorded work: commands, their output, and the files they
     // touched, with the files shared between them so the graph has real edges.
@@ -448,6 +492,7 @@ pub fn main(init: std.process.Init) !u8 {
         .{ .run = benchmarkPlainLanguage, .times = runs },
         .{ .run = benchmarkLineIndex, .times = runs },
         .{ .run = benchmarkLineage, .times = runs },
+        .{ .run = benchmarkSchedule, .times = runs },
     };
     for (benchmarks) |benchmark| {
         var scratch = std.heap.ArenaAllocator.init(gpa);
