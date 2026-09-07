@@ -1682,6 +1682,17 @@ fn interactiveTerminal(
         token_buffer[index * 2 + 1] = hex[byte & 0x0f];
     }
     const marker_token = try arena.dupe(u8, &token_buffer);
+
+    // Settings, if there are any. A setting that cannot be read is named here
+    // and the built-in value is used, rather than the terminal refusing to
+    // open — a person reading this is usually trying to fix something else.
+    const configured = try zag.terminal.settings.load(arena, io, options.root);
+    for (configured.reports) |report| {
+        try report.writeSentence(w);
+        try w.writeByte('\n');
+    }
+    if (!configured.ok()) try w.writeAll("\n");
+
     try w.writeAll("Recording this session. Leave the shell to stop.\n");
     try w.flush();
 
@@ -1689,7 +1700,11 @@ fn interactiveTerminal(
         .workingDirectory = options.root,
         .environment = environment,
         .hookDirectory = hook_directory,
-        .integrate = !options.raw,
+        .shell = configured.settings.shell,
+        .scrollback = configured.settings.scrollback,
+        // `--raw` is a decision made at the moment of running, so it wins over
+        // a file written earlier.
+        .integrate = !options.raw and configured.settings.integrate,
         .markerToken = marker_token,
     }) catch |err| {
         tty.restore();
@@ -2245,6 +2260,15 @@ fn emit(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Option
     });
     try writeGenerated(io, dir, arena, options.out, "schemas/openapi.json", openapi_body);
     try w.writeAll("wrote schemas/openapi.json\n");
+    written += 1;
+
+    // An example settings file, with every value at its default. Somebody
+    // starting one from nothing should not have to read Zig to find out what
+    // the settings are called.
+    var example_settings: std.Io.Writer.Allocating = .init(arena);
+    try zag.terminal.settings.writeExample(&example_settings.writer);
+    try writeGenerated(io, dir, arena, options.out, "docs/settings.example.toml", example_settings.written());
+    try w.writeAll("wrote docs/settings.example.toml\n");
     written += 1;
 
     // The metadata registry, so other languages can adopt the same names.

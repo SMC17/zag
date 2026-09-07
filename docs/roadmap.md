@@ -183,9 +183,12 @@ Everything here is small, and each item ends in something a person can use.
 `zag term` records a session today, but nothing about it can be changed without
 editing Zig.
 
-- Read a settings file for the shell, the scrollback size, the colours and the
-  key bindings. Report an unreadable setting by name and carry on with the
-  default rather than refusing to start.
+- Act on the settings the terminal now reads. `.workspace/settings.toml` is
+  read at start, an unreadable setting is reported by name and falls back on its
+  own, and the shell, the scrollback and whether prompts are marked are honoured
+  today. The colours and the key bindings are read and checked but not yet drawn
+  or bound, because the terminal renders through the host terminal's own colours
+  and has no key handling of its own.
 - Show the state of the session while it runs: the working directory, the
   branch, and whether the shell is marking its boundaries.
 - Hold more than one shell in one recorded session, with each block naming the
@@ -243,7 +246,7 @@ editing Zig.
 | Milestone | Required evidence |
 | --- | --- |
 | Durable record | Fault-injection tests, object audit, recovery exercise and signed checkpoint verification |
-| Configurable terminal | A settings file read at start, a named report for each unreadable setting, and tests for the defaults |
+| Configurable terminal | A settings file read at start, a named report for each unreadable setting, tests for the defaults, and every setting in the file acted on rather than only parsed |
 | Many shells in one session | Two shells recorded in one log, each block naming its pane, and the log verifying afterwards |
 | Fast recall | A stated index size, a measured query at that size, the measurement repeated by the benchmark harness, and a surface where the index is cheaper than the scan it replaces |
 | Enforced agent boundary | Executor integration tests, path and network escape tests, and an independent security review |

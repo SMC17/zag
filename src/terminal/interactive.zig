@@ -85,6 +85,8 @@ pub const Options = struct {
     /// Set false to run the shell exactly as it is, with no init file. The
     /// session then records inferred boundaries.
     integrate: bool = true,
+    /// Lines of scrollback the session keeps in memory.
+    scrollback: usize = 10_000,
     /// A secret the shell puts on every boundary mark it writes. Without it,
     /// any program that prints an escape sequence could forge a command
     /// boundary in the record. The shell reads it from the environment and
@@ -294,6 +296,7 @@ pub fn run(
         .content_store = &service.content,
         .marker_token = if (launch.marksPrompts) options.markerToken else null,
         .redactor = service.redactor,
+        .scrollback_limit = options.scrollback,
     }, wallClock(io));
 
     try tty.enterRaw();

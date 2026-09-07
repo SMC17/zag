@@ -68,6 +68,8 @@ zag doctor                     # what this build can and cannot do
 zag policy                     # the policy in force, and where it was read from
 zag providers                  # the model connectors, and which credentials are set
 zag ask "why did that fail?"   # ask a model; it can use tools, one decision each
+zag ask --stream "..."         # the same, printed as the answer arrives
+zag secrets .env               # what would be taken out before anything is recorded
 zag why .workspace/events.jsonl # what a failure depended on, and what it affected
 zag run -- zig build test      # run a command and record it as a block
 zag lint README.md             # check text against the plain-language rules
@@ -85,6 +87,11 @@ zag knowledge                  # the knowledge under .workspace/, and what is ov
 zag objects --root .           # audit stored command output without changing it
 zag recover --root .           # inspect a damaged log and print a recovery plan
 ```
+
+Settings live in `.workspace/settings.toml`. `zag emit` writes an example with
+every value at its default. A setting this build cannot read is reported by
+name, with what was found and what is being used instead, and the terminal
+opens anyway — a mistake in that file never costs you a shell.
 
 `zagd` holds a workspace open for clients, remote people and background agents:
 
