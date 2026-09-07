@@ -201,8 +201,10 @@ editing Zig.
   document and diagnostic models.
 - Implement the daemon interface described by the generated OpenAPI document,
   with authentication, authorisation, version negotiation and backpressure.
-- Read a model's answer as it arrives. Every connector waits for the whole
-  reply, which is fine for a question and wrong for a long one.
+- Show a streamed answer in the graphical and daemon surfaces. `zag ask
+  --stream` reads a model's answer as it arrives, for all five wire formats;
+  the desktop renderer and the daemon interface do not exist yet and will need
+  the same treatment.
 - Run more than one tool call at a time. A turn that asks for four independent
   reads runs them one after another.
 - Add macOS pseudoterminal and Windows ConPTY implementations, and the terminal

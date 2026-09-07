@@ -54,6 +54,7 @@ const std = @import("std");
 const provider = @import("provider.zig");
 const catalog = @import("catalog.zig");
 const transport_mod = @import("transport.zig");
+const stream_mod = @import("stream.zig");
 const toolschema = @import("toolschema.zig");
 const executor_mod = @import("executor.zig");
 const policy_mod = @import("policy.zig");
@@ -333,6 +334,24 @@ pub const Journal = struct {
     }
 };
 
+/// Somewhere to show an answer while it is still being written.
+pub const Watch = struct {
+    context: ?*anyopaque = null,
+    /// Text only. A caller that wants tool arguments and reasoning as they
+    /// arrive uses the transport directly; this is the shape a terminal needs.
+    textFn: *const fn (context: ?*anyopaque, chunk: []const u8) anyerror!void,
+
+    /// Bridges to the transport's delta callback, so that only text reaches
+    /// the caller and a failure to print never becomes a failure to answer.
+    fn onDelta(context: ?*anyopaque, delta: stream_mod.Delta) anyerror!void {
+        const self: *const Watch = @ptrCast(@alignCast(context orelse return));
+        switch (delta) {
+            .text => |t| self.textFn(self.context, t.chunk) catch {},
+            else => {},
+        }
+    }
+};
+
 pub const Runner = struct {
     arena: std.mem.Allocator,
     transport: transport_mod.Transport,
@@ -341,6 +360,15 @@ pub const Runner = struct {
     clock: Clock = stopped_clock,
     /// Where this run is written down. None means nothing is written.
     journal: ?Journal = null,
+    /// Called with each piece of the answer as it arrives, when it is asked
+    /// for and the transport can read one.
+    ///
+    /// This is the only reason streaming exists at this level: a run that takes
+    /// a minute should not look identical to a run that has hung. The
+    /// transcript and the record are unchanged either way — the deltas are
+    /// shown, not stored, because the completion they assemble into is what the
+    /// log already holds.
+    watch: ?Watch = null,
 
     fn note(self: Runner, moment: Moment) void {
         if (self.journal) |journal| journal.record(moment);
@@ -381,7 +409,7 @@ pub const Runner = struct {
         var number: usize = 1;
         while (number <= options.budget.turns) : (number += 1) {
             var attempt: transport_mod.Attempt = undefined;
-            const completion = self.transport.send(options.connector, .{
+            const asked: provider.Request = .{
                 .model = options.model,
                 .system = options.system,
                 .messages = messages.items,
@@ -389,7 +417,21 @@ pub const Runner = struct {
                 .maxOutputTokens = options.maxOutputTokens,
                 .effort = options.effort,
                 .showThinking = options.showThinking,
-            }, context, &attempt) catch |err| {
+            };
+            // Watched or not, the same gate and the same completion. Streaming
+            // changes when a person sees the answer, never what it is.
+            var watch = self.watch;
+            const completion = (if (watch != null and self.transport.streaming != null)
+                self.transport.sendStreaming(
+                    options.connector,
+                    asked,
+                    context,
+                    &attempt,
+                    Watch.onDelta,
+                    &watch.?,
+                )
+            else
+                self.transport.send(options.connector, asked, context, &attempt)) catch |err| {
                 try turns.append(self.arena, .{ .number = number, .attempt = attempt });
                 ending = switch (err) {
                     error.NeedsApproval => .waiting_for_a_person,
@@ -398,7 +440,7 @@ pub const Runner = struct {
                     // stops the run the same way a policy denial does, because
                     // that is what it is.
                     error.NotPermitted, error.CredentialMissing, error.AddressRefused => .stopped_by_policy,
-                    error.ProviderRejected, error.SendFailed => .provider_unavailable,
+                    error.ProviderRejected, error.SendFailed, error.StreamingUnavailable => .provider_unavailable,
                     error.OutOfMemory => return error.OutOfMemory,
                 };
                 break;
@@ -1269,4 +1311,67 @@ test "a refusal from the executor is not reported as the policy refusing" {
     try testing.expect(std.mem.indexOf(u8, program.reply, "request of its own") != null);
     try testing.expect(std.mem.indexOf(u8, shell.reply, "policy did not allow") == null);
     try testing.expect(std.mem.indexOf(u8, program.reply, "policy did not allow") == null);
+}
+
+test "watching a run changes when the answer is seen, never what it is" {
+    // The same answer, delivered two ways: as one object, and as the stream of
+    // objects Ollama actually sends. The transcripts must not differ. A
+    // streaming path that returns something slightly different from the
+    // blocking one surfaces months later as "the model behaves differently
+    // when you watch it".
+    var quiet = try Fixture.init(&allow_models_and_reading, &.{});
+    defer quiet.deinit();
+    quiet.recorded.responses = &.{try textResponse(quiet.arena(), "The tests pass.")};
+    const unwatched = try quiet.runner(stopped_clock).run(quiet.options(), "Do the tests pass?", quiet.context());
+    try testing.expectEqualStrings("The tests pass.", unwatched.answer);
+
+    const streamed_body =
+        "{\"model\":\"test-model\",\"message\":{\"role\":\"assistant\",\"content\":\"The tests \"},\"done\":false}\n" ++
+        "{\"model\":\"test-model\",\"message\":{\"role\":\"assistant\",\"content\":\"pass.\"},\"done\":false}\n" ++
+        "{\"model\":\"test-model\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":8,\"eval_count\":4}\n";
+
+    var loud = try Fixture.init(&allow_models_and_reading, &.{.{ .status = 200, .body = streamed_body }});
+    defer loud.deinit();
+
+    const Seen = struct {
+        var chunks: usize = 0;
+        var text: std.ArrayList(u8) = .empty;
+        var arena: std.mem.Allocator = undefined;
+        fn take(_: ?*anyopaque, chunk: []const u8) anyerror!void {
+            chunks += 1;
+            try text.appendSlice(arena, chunk);
+        }
+    };
+    Seen.chunks = 0;
+    Seen.text = .empty;
+    Seen.arena = loud.arena();
+
+    var watched_runner = loud.runner(stopped_clock);
+    watched_runner.transport.streaming = loud.recorded.streamingSender();
+    watched_runner.watch = .{ .textFn = Seen.take };
+    const watched = try watched_runner.run(loud.options(), "Do the tests pass?", loud.context());
+
+    // The answer was seen in more than one piece while it was being written,
+    // which is the whole feature.
+    try testing.expect(Seen.chunks >= 2);
+    try testing.expectEqualStrings("The tests pass.", Seen.text.items);
+
+    // And both runs produced the same transcript.
+    try testing.expectEqualStrings(unwatched.answer, watched.answer);
+    try testing.expectEqual(unwatched.ending, watched.ending);
+    try testing.expectEqual(unwatched.turns.len, watched.turns.len);
+    try testing.expectEqual(unwatched.usage.inputTokens, watched.usage.inputTokens);
+    try testing.expectEqual(unwatched.usage.outputTokens, watched.usage.outputTokens);
+}
+
+test "a run with no watcher never asks for a stream" {
+    // The flag is set by the runner, not by the caller, so a run nobody is
+    // watching must not ask for a framing it will not read.
+    var fixture = try Fixture.init(&allow_models_and_reading, &.{});
+    defer fixture.deinit();
+    fixture.recorded.responses = &.{try textResponse(fixture.arena(), "Yes.")};
+
+    _ = try fixture.runner(stopped_clock).run(fixture.options(), "Do they?", fixture.context());
+    const body = fixture.recorded.seen.items[0].body;
+    try testing.expect(std.mem.indexOf(u8, body, "\"stream\":false") != null);
 }
