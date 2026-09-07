@@ -172,15 +172,39 @@ pub const TaskId = TypedId("tsk");
 pub const ToolCallId = TypedId("tcl");
 pub const MetricId = TypedId("met");
 
-/// Deterministic identifier source. Tests and replays need reproducible
-/// identifiers; production uses a seeded cryptographic source.
+/// Where identifiers come from.
+///
+/// The random half of an identifier is what keeps two of them apart when they
+/// are minted in the same millisecond, so where the seed comes from decides
+/// whether that works. A fixed seed makes a run reproducible, which is what a
+/// test and a replay need. It is exactly wrong anywhere else: two workspaces
+/// opened at the same moment with the same seed mint the same first identifier,
+/// and a graph that looks events up by identifier then folds two different
+/// events into one.
+///
+/// So `init` is for tests, `secure` is for everything else, and the two are
+/// named rather than distinguished by a default nobody reads.
 pub const Generator = struct {
     prng: std.Random.DefaultPrng,
     clock_ms: i64,
     step_ms: i64,
 
+    /// A reproducible source, for tests and replays.
     pub fn init(seed: u64, start_ms: i64) Generator {
         return .{ .prng = std.Random.DefaultPrng.init(seed), .clock_ms = start_ms, .step_ms = 1 };
+    }
+
+    /// A source seeded from the operating system.
+    ///
+    /// The seed is drawn once, from the same place a cryptographic key would
+    /// come from. What follows is still a fast pseudo-random sequence — these
+    /// identifiers order records and tell them apart, they are not secrets —
+    /// but two processes starting at the same instant no longer produce the
+    /// same one.
+    pub fn secure(io: std.Io, start_ms: i64) !Generator {
+        var seed_bytes: [8]u8 = undefined;
+        try io.randomSecure(&seed_bytes);
+        return init(std.mem.readInt(u64, &seed_bytes, .little), start_ms);
     }
 
     pub fn next(self: *Generator, comptime T: type) T {

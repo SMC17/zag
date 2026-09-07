@@ -13,6 +13,7 @@ const std = @import("std");
 const tools = @import("tools.zig");
 const policy_mod = @import("policy.zig");
 const approval_mod = @import("approval.zig");
+const executor_mod = @import("executor.zig");
 const capability_mod = @import("capability.zig");
 const event_mod = @import("../events/event.zig");
 const log_mod = @import("../events/log.zig");
@@ -29,14 +30,53 @@ pub const Timestamp = timeutil.Timestamp;
 /// Something that can carry out a tool request. The runtime never executes
 /// anything itself, so a test, a sandbox and a remote daemon are all just
 /// different executors.
+///
+/// The decision is part of the call, and that is the whole point of this type's
+/// shape. An executor that is handed only a request cannot check that the
+/// request is the one that was decided, and a seam that cannot carry the
+/// decision is a seam where the security model quietly stops. It used to be
+/// shaped that way here, and the runtime discarded the decision it had just
+/// obtained; the parameter exists so that cannot happen again.
 pub const Executor = struct {
     ptr: *anyopaque,
-    executeFn: *const fn (ptr: *anyopaque, arena: std.mem.Allocator, request: ToolRequest) anyerror!ToolResult,
+    executeFn: *const fn (
+        ptr: *anyopaque,
+        arena: std.mem.Allocator,
+        decision: Decision,
+        request: ToolRequest,
+    ) anyerror!ToolResult,
 
-    pub fn execute(self: Executor, arena: std.mem.Allocator, request: ToolRequest) !ToolResult {
-        return self.executeFn(self.ptr, arena, request);
+    pub fn execute(
+        self: Executor,
+        arena: std.mem.Allocator,
+        decision: Decision,
+        request: ToolRequest,
+    ) !ToolResult {
+        return self.executeFn(self.ptr, arena, decision, request);
     }
 };
+
+/// The executor that really runs things: files opened beneath the workspace by
+/// the kernel, commands run from an argument vector with no shell, and the
+/// decision re-checked against the request before any of that.
+///
+/// This is what a deployment uses. `executor.Runner` refuses a decision whose
+/// capability or resource differs from the request, so the check happens in the
+/// component that performs the action rather than in the one that asked for it.
+pub fn sandboxed(runner: *executor_mod.Runner) Executor {
+    return .{ .ptr = runner, .executeFn = runSandboxed };
+}
+
+fn runSandboxed(
+    ptr: *anyopaque,
+    arena: std.mem.Allocator,
+    decision: Decision,
+    request: ToolRequest,
+) anyerror!ToolResult {
+    _ = arena;
+    const runner: *executor_mod.Runner = @ptrCast(@alignCast(ptr));
+    return runner.run(decision, request);
+}
 
 pub const Step = struct {
     /// What this step is for, in the words shown to the person.
@@ -253,7 +293,25 @@ pub const Agent = struct {
             self.steps_denied += 1;
             return .{ .denied = pending.decision };
         }
-        return .{ .completed = try self.run(pending.step, pending.decision) };
+
+        // The person's answer becomes its own decision. The pending one still
+        // says "ask a person", and an executor handed that would refuse it —
+        // correctly, because nobody had allowed anything at the moment it was
+        // made. What authorises the action is the answer, and the record says
+        // so, with the name of the person who gave it.
+        const allowed = try self.engine.allowedByPerson(
+            pending.decision.request,
+            .{
+                .actor = self.actor.id,
+                .session = self.session,
+                .agent = self.id,
+                .agent_name = self.options.label,
+                .now = self.clock,
+            },
+            given.decided_by,
+            given.outcome == .allow_always_here,
+        );
+        return .{ .completed = try self.run(pending.step, allowed) };
     }
 
     fn run(self: *Agent, step: Step, decision: Decision) !ToolResult {
@@ -280,7 +338,11 @@ pub const Agent = struct {
         });
 
         const before = self.clock;
-        const result = self.executor.execute(self.arena, request) catch |err| ToolResult{
+        // The decision is spent here, not merely consulted. The executor
+        // re-derives the resource from the request and refuses unless it
+        // matches what was decided, so a decision to read one file cannot be
+        // spent on another even by the code holding it.
+        const result = self.executor.execute(self.arena, decision, request) catch |err| ToolResult{
             .outcome = .failed,
             .summary = try std.fmt.allocPrint(self.arena, "The tool could not finish: {s}.", .{@errorName(err)}),
         };
@@ -335,7 +397,6 @@ pub const Agent = struct {
             else => {},
         }
 
-        _ = decision;
         self.steps_run += 1;
         return result;
     }
@@ -421,8 +482,18 @@ const RecordingExecutor = struct {
     calls: std.ArrayList([]const u8) = .empty,
     arena: std.mem.Allocator,
 
-    fn execute(ptr: *anyopaque, arena: std.mem.Allocator, request: ToolRequest) anyerror!ToolResult {
+    fn execute(
+        ptr: *anyopaque,
+        arena: std.mem.Allocator,
+        decision: Decision,
+        request: ToolRequest,
+    ) anyerror!ToolResult {
         const self: *RecordingExecutor = @ptrCast(@alignCast(ptr));
+        // Even the test executor refuses a decision that does not authorise
+        // the request. One that ran whatever it was handed would let a runtime
+        // that stopped passing the decision pass every test in this file, and
+        // that is exactly how the check went missing before.
+        if (!try executor_mod.authorises(arena, decision, request)) return error.DecisionDoesNotMatchRequest;
         try self.calls.append(self.arena, request.toolName());
         return .{
             .outcome = .completed,
@@ -608,4 +679,133 @@ test "the run produces provenance a reviewer can act on" {
     try testing.expectEqual(@as(i64, 31), record.duration().seconds());
     try testing.expect(record.completeness().has_model);
     try testing.expect(record.completeness().has_sources);
+}
+
+test "the runtime spends its decision, and the executor refuses one that does not match" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var gen: idmod.Generator = .init(701, 1_788_000_000_000);
+    var log = log_mod.Log.init(arena, 702);
+    const robot: event_mod.Actor = .{ .id = gen.next(idmod.ActorId), .kind = .agent, .label = "agent" };
+    const session = gen.next(idmod.SessionId);
+    const now = try Timestamp.parseIso("2026-09-07T09:00:00Z");
+    var engine = policy_mod.Engine.init(arena, try policy_mod.repositoryWriteNoNetwork("/repo", arena), 703);
+
+    // An executor that keeps the decision it was handed, so the test can assert
+    // on what actually crossed the seam rather than on what the runtime meant.
+    const Witness = struct {
+        seen: ?Decision = null,
+        request_matched: bool = false,
+
+        fn run(
+            ptr: *anyopaque,
+            scratch: std.mem.Allocator,
+            decision: Decision,
+            request: ToolRequest,
+        ) anyerror!ToolResult {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.seen = decision;
+            self.request_matched = try executor_mod.authorises(scratch, decision, request);
+            if (!self.request_matched) return error.DecisionDoesNotMatchRequest;
+            return .{ .outcome = .completed, .summary = "ran" };
+        }
+
+        fn executor(self: *@This()) Executor {
+            return .{ .ptr = self, .executeFn = run };
+        }
+    };
+
+    var witness: Witness = .{};
+    var agent = Agent.init(arena, &log, &engine, witness.executor(), session, robot, gen.next(idmod.AgentId), now, .{});
+    _ = try agent.start("read a file", null);
+
+    const step: Step = .{
+        .description = "Read the notes.",
+        .request = .{ .read_file = .{ .path = "/repo/notes.md" } },
+    };
+    const outcome = try agent.perform(step);
+    try testing.expect(outcome == .completed);
+
+    // A decision reached the executor at all. Before this was wired, the
+    // runtime obtained one and threw it away, and no test could tell.
+    const seen = witness.seen orelse return error.TestUnexpectedResult;
+    try testing.expect(seen.isAllowed());
+
+    // And it is the decision for this exact request: same capability, same
+    // resource, derived from the request rather than taken on trust.
+    try testing.expect(witness.request_matched);
+    try testing.expectEqual(capability_mod.Capability.@"fs.read", seen.request.capability);
+    try testing.expectEqualStrings("/repo/notes.md", seen.request.resource.text());
+
+    // The other half of the property: a decision for a different file does not
+    // authorise this request, whatever the code holding it intends.
+    const elsewhere: Decision = .{
+        .id = gen.next(idmod.DecisionId),
+        .request = .{ .capability = .@"fs.read", .resource = .{ .path = "/etc/shadow" } },
+        .effect = .allow,
+        .rule_id = null,
+        .policy_id = "test",
+        .reason = "forged",
+        .actor = robot.id,
+        .session = session,
+        .agent = null,
+        .decided_at = now,
+    };
+    try testing.expect(!try executor_mod.authorises(arena, elsewhere, step.request));
+}
+
+test "a person's approval becomes a decision of its own, which is what gets spent" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var gen: idmod.Generator = .init(801, 1_788_000_000_000);
+    var log = log_mod.Log.init(arena, 802);
+    const person = gen.next(idmod.ActorId);
+    const robot: event_mod.Actor = .{ .id = gen.next(idmod.ActorId), .kind = .agent, .label = "agent" };
+    const session = gen.next(idmod.SessionId);
+    const now = try Timestamp.parseIso("2026-09-07T09:00:00Z");
+    var engine = policy_mod.Engine.init(arena, try policy_mod.repositoryWriteNoNetwork("/repo", arena), 803);
+
+    var recording: RecordingExecutor = .{ .arena = arena };
+    var agent = Agent.init(arena, &log, &engine, recording.executor(), session, robot, gen.next(idmod.AgentId), now, .{});
+    _ = try agent.start("tidy up", null);
+
+    const step: Step = .{
+        .description = "Delete the build folder.",
+        .request = .{ .delete = .{ .path = "/repo/build", .recursive = true } },
+    };
+    const waiting = try agent.perform(step);
+    // The policy asked for a person, so nothing ran and the pending decision
+    // does not authorise anything.
+    try testing.expect(waiting == .waiting_for_person);
+    try testing.expectEqual(@as(usize, 0), recording.calls.items.len);
+    // The pending decision is the one the agent is holding while it waits.
+    const pending = agent.pending.?.decision;
+    try testing.expectEqual(policy_mod.Effect.require_human, pending.effect);
+    try testing.expect(!try executor_mod.authorises(arena, pending, step.request));
+
+    const before = engine.decisions.items.len;
+    const after = try agent.answer(.{
+        .outcome = .allow_once,
+        .decided_by = person,
+        .decided_at = now,
+        .note = "Fine.",
+    });
+    try testing.expect(after.completed.succeeded());
+    try testing.expectEqual(@as(usize, 1), recording.calls.items.len);
+
+    // The answer minted a new decision, and it is on the record with the name
+    // of the person who gave it. Reusing the pending one would have been an
+    // executor refusing to act, or worse, one that did not check.
+    try testing.expectEqual(before + 1, engine.decisions.items.len);
+    const approved = engine.decisions.items[engine.decisions.items.len - 1];
+    try testing.expectEqual(policy_mod.Effect.allow, approved.effect);
+    try testing.expect(approved.rule_id == null);
+    try testing.expect(approved.actor.eql(person));
+    try testing.expect(!approved.from_standing_grant);
+    try testing.expect(std.mem.indexOf(u8, approved.reason, "You allowed this") != null);
+    try testing.expect(try executor_mod.authorises(arena, approved, step.request));
 }

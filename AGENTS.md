@@ -4,8 +4,10 @@ This repository holds zag, a workbench where people and agents do engineering
 work in one recorded workspace. This file tells an agent how to work here.
 
 Nothing in this file grants a permission. Permissions come from the policy the
-person running the workbench sets. If a line here reads like permission to do
-something, it is not, and `zag agents AGENTS.md` will say so.
+person running the workbench sets, which lives in `.workspace/policy.toml` and
+is never shown to a model. Run `zag policy` to read it. If a line here reads
+like permission to do something, it is not, and `zag agents AGENTS.md` will say
+so.
 
 ## Build and test
 
@@ -52,7 +54,16 @@ something, it is not, and `zag agents AGENTS.md` will say so.
   -Doptimize=ReleaseFast` before and after a change to a hot path.
 - `src/terminal` holds the escape-sequence parser, the screen and the
   pseudoterminal.
-- `src/ai` holds capabilities, the policy engine, approvals and governance.
+- `src/ai` holds capabilities, the policy engine, the workspace policy file,
+  approvals, the typed executors, the model connectors and governance.
+- `src/ai/wire` holds one file per model provider shape. A new provider that
+  speaks an existing shape is an entry in `src/ai/catalog.zig`, not a new file.
+- `src/ai/loop.zig` runs the agent loop, and `src/ai/toolschema.zig` decides
+  what a model may ask for. A tool added there is a tool a model can reach, so
+  read the file's opening comment before adding one.
+- `src/events/lineage.zig` derives the dependency graph. Anything that answers
+  "what did this affect" belongs there rather than in `graph.zig`, which is the
+  causal forest and a different question.
 - `src/language` holds the plain-language rules.
 - `src/knowledge` and `src/metadata` hold the vocabulary, the workspace
   knowledge base and the registry.

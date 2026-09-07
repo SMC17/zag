@@ -284,6 +284,57 @@ fn benchmarkBlockFold(arena: std.mem.Allocator, io: std.Io, runs: usize) anyerro
     return measure.into("blocks folded from the log", "blocks", folded, 0);
 }
 
+/// The same query, with the index in front of it.
+///
+/// Both numbers are reported so the pair can be compared on one machine, which
+/// is the only comparison that means anything. The index is built once here
+/// because that is how a long-lived surface would hold it; the command-line
+/// tool builds one per query and pays for it, which is honest at these sizes
+/// and would not be at a hundred times them.
+fn benchmarkIndexedQuery(arena: std.mem.Allocator, io: std.Io, runs: usize) anyerror!Result {
+    const commands: usize = 20_000;
+    const log = try buildCommandLog(arena, commands);
+    const index = try zag.workspace.block.Index.build(arena, log);
+    const lookup = try zag.workspace.index.Lookup.build(arena, index);
+    const now = try zag.core.time.Timestamp.parseIso("2026-09-30T09:00:00Z");
+    const parsed = try zag.workspace.history.parse(arena, "status:failed zig build");
+
+    var measure: Measure = .{};
+    var matched: usize = 0;
+    for (0..runs) |_| {
+        const clock = Clock.start(io);
+        const results = try zag.workspace.history.run(arena, index, parsed.query, .{
+            .now = now,
+            .limit = 20,
+            .lookup = &lookup,
+        });
+        measure.record(clock.elapsed());
+        matched += results.matchCount;
+    }
+    if (matched == 0) return error.QueryMatchedNothing;
+    return measure.into("the same query, through the index", "queries", 1, 0);
+}
+
+/// Building the index itself, which the command-line tool pays for every run.
+fn benchmarkIndexBuild(arena: std.mem.Allocator, io: std.Io, runs: usize) anyerror!Result {
+    const commands: usize = 20_000;
+    const log = try buildCommandLog(arena, commands);
+    const index = try zag.workspace.block.Index.build(arena, log);
+
+    var measure: Measure = .{};
+    var tokens: usize = 0;
+    for (0..runs) |_| {
+        var scratch = std.heap.ArenaAllocator.init(arena);
+        defer scratch.deinit();
+        const clock = Clock.start(io);
+        const lookup = try zag.workspace.index.Lookup.build(scratch.allocator(), index);
+        measure.record(clock.elapsed());
+        tokens += lookup.tokenCount();
+    }
+    std.mem.doNotOptimizeAway(tokens);
+    return measure.into("block index built over 20k blocks", "blocks", commands, 0);
+}
+
 fn benchmarkHistoryQuery(arena: std.mem.Allocator, io: std.Io, runs: usize) anyerror!Result {
     const commands: usize = 20_000;
     const log = try buildCommandLog(arena, commands);
@@ -354,6 +405,104 @@ fn benchmarkPlainLanguage(arena: std.mem.Allocator, io: std.Io, runs: usize) any
     return measure.into("prose through the language rules", "bytes", text.items.len, text.items.len);
 }
 
+fn benchmarkLineIndex(arena: std.mem.Allocator, io: std.Io, runs: usize) anyerror!Result {
+    // A large document, the size a checker or an editor really opens.
+    var text: std.ArrayList(u8) = .empty;
+    while (text.items.len < (4 << 20)) {
+        try text.appendSlice(arena, "a line of ordinary prose, about sixty characters long here\n");
+    }
+
+    var measure: Measure = .{};
+    for (0..runs) |_| {
+        var scratch = std.heap.ArenaAllocator.init(arena);
+        defer scratch.deinit();
+        const clock = Clock.start(io);
+        const index = try zag.language.text.LineIndex.build(scratch.allocator(), text.items);
+        measure.record(clock.elapsed());
+        std.mem.doNotOptimizeAway(index.starts.len);
+    }
+    return measure.into("line breaks found in a document", "bytes", text.items.len, text.items.len);
+}
+
+/// Grouping a turn's tool calls into waves.
+///
+/// The scheduler runs once per turn, before any work is done, so it has to be
+/// cheap enough that a turn asking for sixteen calls does not pay for the
+/// planning. Measured on a turn of the widest shape the budget allows, mixing
+/// reads that overlap with writes and a barrier in the middle.
+fn benchmarkSchedule(arena: std.mem.Allocator, io: std.Io, runs: usize) anyerror!Result {
+    const turns: usize = 20_000;
+    const width: usize = 16;
+
+    // The same shape every turn: a barrier in the middle, some reads that share
+    // a directory with a write, and some that do not.
+    const claims = try arena.alloc(?zag.ai.schedule.Claim, width);
+    for (claims, 0..) |*slot, index| {
+        slot.* = switch (index % 8) {
+            0 => .everything,
+            1, 2 => .{ .on = .{
+                .resource = .{ .path = try std.fmt.allocPrint(arena, "src/shared-{d}", .{index % 3}) },
+                .access = .write,
+            } },
+            else => .{ .on = .{
+                .resource = .{ .path = try std.fmt.allocPrint(arena, "src/file-{d}.zig", .{index}) },
+                .access = .read,
+            } },
+        };
+    }
+
+    var measure: Measure = .{};
+    for (0..runs) |_| {
+        var scratch = std.heap.ArenaAllocator.init(arena);
+        defer scratch.deinit();
+        const scratch_arena = scratch.allocator();
+        const clock = Clock.start(io);
+        var planned: usize = 0;
+        for (0..turns) |_| {
+            const waves = try zag.ai.schedule.plan(scratch_arena, claims);
+            planned += waves.len;
+        }
+        measure.record(clock.elapsed());
+        std.mem.doNotOptimizeAway(planned);
+    }
+    return measure.into("tool-call scheduling", "turns", turns, 0);
+}
+
+fn benchmarkLineage(arena: std.mem.Allocator, io: std.Io, runs: usize) anyerror!Result {
+    // A day of recorded work: commands, their output, and the files they
+    // touched, with the files shared between them so the graph has real edges.
+    const commands: usize = 20_000;
+    var log = try buildCommandLog(arena, commands);
+    var gen: zag.core.id.Generator = .init(9, 1_788_000_000_000);
+    const actor: zag.events.event.Actor = .{
+        .id = gen.next(zag.core.id.ActorId),
+        .kind = .agent,
+        .label = "agent",
+    };
+    const session = gen.next(zag.core.id.SessionId);
+    var index: usize = 0;
+    while (index < commands) : (index += 1) {
+        _ = try log.append(.{ .file_changed = .{
+            .session = session,
+            .path = try std.fmt.allocPrint(arena, "src/file-{d}.zig", .{index % 500}),
+            .changeKind = .modified,
+        } }, .{ .at = .{ .ns = 1_788_000_000_000_000_000 + @as(i64, @intCast(index)) }, .actor = actor });
+    }
+
+    var measure: Measure = .{};
+    for (0..runs) |_| {
+        var scratch = std.heap.ArenaAllocator.init(arena);
+        defer scratch.deinit();
+        const clock = Clock.start(io);
+        const dag = try zag.events.lineage.Dag.build(scratch.allocator(), log);
+        const path = try dag.criticalPath();
+        measure.record(clock.elapsed());
+        std.mem.doNotOptimizeAway(path.items.len);
+    }
+    const events = log.entries.items.len;
+    return measure.into("dependency graph built and its critical path", "events", events, 0);
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
     const io = init.io;
@@ -392,6 +541,11 @@ pub fn main(init: std.process.Init) !u8 {
         .{ .run = benchmarkHistoryQuery, .times = 20 },
         .{ .run = benchmarkEditor, .times = runs },
         .{ .run = benchmarkPlainLanguage, .times = runs },
+        .{ .run = benchmarkLineIndex, .times = runs },
+        .{ .run = benchmarkLineage, .times = runs },
+        .{ .run = benchmarkSchedule, .times = runs },
+        .{ .run = benchmarkIndexBuild, .times = runs },
+        .{ .run = benchmarkIndexedQuery, .times = runs * 4 },
     };
     for (benchmarks) |benchmark| {
         var scratch = std.heap.ArenaAllocator.init(gpa);

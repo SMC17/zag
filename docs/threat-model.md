@@ -7,10 +7,10 @@ credential path is added.
 
 ## Scope and assets
 
-The current scope is one local workspace, its child processes and the files
-under `.workspace/`. The graphical client, remote daemon interface, model
-providers and concrete agent tool executors are not implemented and are not
-inside the evaluated boundary.
+The current scope is one local workspace, its child processes, the files under
+`.workspace/`, the typed tool executors, and the model connectors and the gate
+they pass through. The graphical client, the remote daemon interface and the
+agent loop are not implemented and are not inside the evaluated boundary.
 
 Assets that need protection are:
 
@@ -37,13 +37,26 @@ against that actor.
 | ID | Threat | Current control | Residual work |
 | --- | --- | --- | --- |
 | T1 | Repository text tells an agent that it has more permission | Permissions come only from typed policy; instruction files that try to grant permission are reported | Test every concrete executor against the decision it receives |
-| T2 | A path uses `..` or a symlink to escape the workspace | Policy rejects lexical traversal and mismatched path roots; final event-log, object and recovery-evidence entries reject symbolic links | Open every executor path through a workspace directory handle with beneath-only resolution; parent components are not yet a sandbox boundary |
-| T3 | A command string gains unintended shell meaning | Agent tool requests carry argument vectors; the interactive `zag run` command is explicitly a person-requested shell command | Concrete executors must never rebuild an argument vector as a shell string |
+| T14 | The decision is obtained and then not spent | The executor takes the decision as a parameter and refuses one that does not authorise the request, so a caller that does not pass the right one cannot act. The agent runtime's seam used to take only the request, and the runtime discarded the decision it had just obtained; four tests now fail if a decision stops being checked | Keep the seam shaped so a decision cannot be omitted. A new executor that ignores its decision parameter would not be caught by a type |
+| T15 | Two definitions of what a request touches | One definition, in `tools.ToolRequest.resource`. A second copy in the executor narrowed an execute request to its program name and collapsed a git push to a path, so a decision made on `git push origin main` could not authorise the request it was made for. The two halves of the security model had never agreed, because each was only ever tested against decisions it built itself | An end-to-end test from a written policy file through a decision to a real executor run |
+| T19 | A program forges a command boundary in an interactive session | Boundary marks carry a per-session secret, and the shell hook moves it out of the environment into a shell variable so nothing the person runs inherits it. This was written down and not done: the hooks read a variable nothing assigned, so every mark went out unauthenticated, the session rejected all of them, and the environment variable stayed set for every child to read | The secret is in the byte stream the outer terminal receives. A terminal that logs its input, or a session recorded with `script`, captures it |
+| T20 | A record is altered after it is sealed | The records ledger holds immutable chained entries; a hold, a release, a supersession and a disposal are each an entry, and a record's state is folded from them. It used to edit sealed records in place, in fields no hash covered | The ledger is not yet written to disk, so it holds only what one process did |
+| T17 | The record cannot say who acted | Every event carries an actor derived from the account and machine names, and a person, the workbench and an agent are three different actors in three different namespaces. Every event used to carry sixteen zero bytes, so the envelope could not answer the question an audit trail exists for | The identity is derived from an environment the person controls, so it names an account and is not evidence about a human being. A deployment that needs the second thing needs a signed identity |
+| T18 | The record format changes underneath the hashes | Golden vectors pin the exact bytes this program writes, and a test asserts a stored line still hashes to its stored hash — the original bytes, not a parsed-and-re-encoded version, which is the only direction that notices the encoder and decoder drifting together | The vectors cover the shapes in use today. A payload kind added without a vector is unpinned until one is written |
+| T16 | A permission spreads to a resource its author never named | A rule's scope now covers only the axes it names. An allow rule scoped to hosts used to match `network.connect` on a command or a path resource, because an unnamed axis meant "no restriction on this axis". A refusal keeps the older, wider reading, so tightening this did not narrow any deny | Enforce at the socket as well: the host is checked before the request is built, not when the address is resolved |
+| T2 | A path uses `..` or a symlink to escape the workspace | Policy rejects lexical traversal and mismatched path roots; executors open every path through a workspace directory handle with `RESOLVE_BENEATH` and `RESOLVE_NO_MAGICLINKS`, so the kernel refuses an escaping path in any component; final event-log, object and recovery-evidence entries reject symbolic links | Only Linux enforces this. A build for another platform must refuse to execute rather than fall back to a lexical check |
+| T3 | A command string gains unintended shell meaning | Agent tool requests carry argument vectors, and the executor passes the vector straight to `execve` with no shell; a test asserts that an argument containing a semicolon and a redirect creates no file. The interactive `zag run` command is explicitly a person-requested shell command | Keep the assertion as a release gate; a future convenience that joins a vector back into a line would undo it |
 | T4 | An event is edited, reordered or appended by a stale writer | Content and chain hashes, strict decoding, prefix fingerprint and an exclusive writer lock | Signed external heads are needed to detect whole-log replacement, truncation or a hostile non-cooperating writer |
 | T5 | A crash commits partial state | Objects are immutable and synchronized before events; incomplete and malformed log tails seal the workspace; recovery requires an explicit flag and preserves the exact original log first | Add power-loss fault injection, directory-entry durability checks and recovery exercises on real filesystems |
 | T6 | A child prints OSC 133 bytes to forge a command boundary or status | Service-owned command wrappers use a random marker token that is removed before the command starts; control marks and parser states are bounded | Extend authenticated markers to interactive shell hooks; an ordinary `boundaryFromShell` value alone is not proof of origin |
 | T7 | A child floods output or never exits | Captured output is bounded; deadlines use monotonic time and terminate the process group, escalating to `KILL` | Add operating-system CPU, memory, process-count and disk quotas |
 | T8 | Terminal output discloses a secret | New event and object files use owner-only permissions where POSIX permissions exist | Add detection and redaction before output enters model context or diagnostic bundles |
+| T12 | An agent spends a credential on a provider nobody chose | Asking a model needs three separate decisions — `model.infer` on the connector, `network.connect` on the host, `credentials.use` on the variable — all taken before the request is encoded. The credential is read only after its own decision allows it, is written into a header by the connector, and never enters a decision, a log, an error or a summary. A redirect is never followed, so a credential cannot be carried to a host the policy did not decide | Connect to the address that was checked. The client resolves the name again when it connects, so a name that answers differently to the check and to the connection is not caught |
+| T12a | A model asks for a tool that would widen its own reach | A model's tool call becomes a typed request or nothing: an unknown name, arguments that do not fit the type, or an unknown enum value are all refused before any policy is consulted. The capability is taken from the request kind, never from the arguments, so a model that writes a capability into its own call is writing a field that does not exist. `infer` and `spawn_agent` are not offered at all, and a test asserts their absence rather than leaving it to whoever edits the list | Offer a way for a person to widen the offered set deliberately, with the widening recorded |
+| T12b | An agent loop runs away, or repeats a refused call for ever | Four bounds, each reported separately: turns, tokens, a monotonic wall clock, and a repetition count over a fingerprint of the request's kind and resource. The fingerprint deliberately ignores fields nobody decides on, so varying a byte limit cannot defeat it | Bound the total work an agent may cause across runs, not only within one |
+| T13 | A workspace policy file is written to widen permission | The file is never shown to a model and never consulted by one. Its fallback is not read from the file: an unparsable file allows nothing, and nothing more permissive is substituted. An unknown capability name refuses the whole file rather than dropping the rule, so a denial cannot be narrowed by a typo | Add a recorded event when the policy file changes, so a widening is visible in the log rather than only in the file |
+| T21 | A credential printed by a command is written into a log that cannot be edited afterwards | Command text and captured output are scanned before either becomes a record, and a credential is replaced by a placeholder naming its kind and a salted fingerprint. The same scan runs on everything sent to a model provider, including tool results, and the prompt is hashed after the redaction rather than before, so the record points at what actually left. The count of removals is on the event, which is what the hash chain covers, so a reader holding only the log can tell a clean block from a redacted one. `zag secrets` shows what would be removed without writing anything | The detector finds published credential shapes, delimited key blocks, credentials in URLs, and values assigned to a name that says "secret". A bare password with no prefix, no delimiter and no name beside it is not found, and no detector finds one |
+| T22 | A provider name resolves somewhere it should not, reaching the cloud metadata service or the machine's own network | Every address a name answers with is classified before anything connects, and one bad address refuses the whole name — a client may try any of them. A hosted connector must resolve to public address space; a local one must resolve onto this machine, so a local model whose name suddenly answers with a public address is refused too. Literal addresses are checked without a lookup, which is the case a name-based allowlist has nothing to say about, and IPv4-mapped and IPv4-compatible IPv6 addresses are unmapped before classification, so `::ffff:169.254.169.254` is the metadata service and not a global unicast address. A lookup that fails is a refusal, never a pass. The check is its own stage in the record, after the policy allowed the host by name and before any credential is read | The connection is made by a client that resolves the name a second time. A name that answers correctly to the check and incorrectly to the connection — DNS rebinding — is not caught, and closing it means owning the socket |
 | T9 | A terminal sequence corrupts memory or parser state | Fixed parser bounds, UTF-8 replacement, screen bounds and regression tests | Add coverage-guided fuzzing and differential tests against a mature terminal parser |
 | T10 | A build input is replaced upstream | No package dependencies; CI pins the checkout action and verifies the Zig archive digest | Add signed release provenance, artifact signing and an independently verified toolchain policy |
 | T11 | A future remote client bypasses local policy | No network listener exists today | Define authentication, per-request authorisation, replay protection, rate limits and audit before listening on a socket |
@@ -65,6 +78,18 @@ The following properties must remain release-gate tests:
   deadline and leaves a recorded timeout.
 - A policy denial is stronger than an allow rule, and prompt text never widens
   a capability.
+- An executor refuses a decision whose capability or resource differs from the
+  request it is handed.
+- A command runs from its argument vector, with no shell interpreting it.
+- A model request that the policy refuses is never encoded and never sent, and
+  its credential is never read.
+- A model's tool call becomes a typed request or nothing, and its capability
+  comes from the request kind rather than from anything the model wrote.
+- An agent run stops on every one of its four bounds, and says which.
+- A command line rebuilt from an argument vector runs the same command the
+  vector named.
+- A policy file that does not parse allows nothing, and no other policy is put
+  in its place.
 
 ## Review triggers
 
@@ -74,7 +99,17 @@ Review this model before merging a change that:
 - reads or uses a credential;
 - implements file write, delete, git push or remote execution;
 - sends workspace content to a model provider;
+- adds a connector, a wire format or a credential variable;
+- appends an event anywhere other than through the service, which is what keeps
+  the unwritten-event count honest;
+- changes how an actor identity is derived, or what it is derived from;
+- adds a tool to the set a model is offered, or changes how a tool call is
+  parsed into a typed request;
+- joins an argument vector back into a command line;
+- changes how the workspace policy file is read, or what its fallback is;
 - changes event encoding, recovery, retention or migration;
+- changes what the secret detector looks for, or removes a call to it from a
+  path where text becomes a record or leaves the machine;
 - describes an event record as proof, authentic or tamper-proof.
 
 Report a discovered vulnerability through `SECURITY.md`. Keep affected records

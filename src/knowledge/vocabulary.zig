@@ -104,6 +104,21 @@ pub const entries = [_]C{
         .top_concept = true,
     },
     .{
+        .id = "redaction",
+        .preferred = "redaction",
+        .definition = "replacement of a credential in text by a placeholder that names its kind, done before the text becomes a record or leaves the machine",
+        .designations = &.{
+            .{ .text = "masking", .status = .admitted },
+            .{ .text = "scrubbing", .status = .deprecated, .note = "Says nothing about what replaced the value. Use redaction." },
+        },
+        .relations = &.{
+            .{ .kind = .associative, .target = "workspace-event" },
+            .{ .kind = .associative, .target = "policy" },
+        },
+        .examples = &.{"an API key a command printed, replaced in the stored output by a placeholder naming the provider"},
+        .top_concept = true,
+    },
+    .{
         .id = "authorization-decision",
         .preferred = "authorisation decision",
         .definition = "record of one policy outcome, naming the actor, the capability, the resource, the result and the reason",

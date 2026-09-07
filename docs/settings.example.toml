@@ -1,0 +1,30 @@
+# Settings for zag term. Every line is optional.
+#
+# A setting this build cannot read is reported by name and the built-in
+# value is used instead, so a mistake here never stops a terminal
+# opening.
+
+[terminal]
+# The program to run. Leave it out to use your own $SHELL.
+# shell = "/bin/zsh"
+scrollback = 10000
+columns = 80
+rows = 24
+# Set false to start the shell with no added prompt marks. The record
+# then holds inferred command boundaries rather than marked ones.
+shell_integration = true
+
+[colours]
+text = "#e6e6e6"
+background = "#121212"
+failure = "#ff8a80"
+success = "#9ce6b0"
+structure = "#9ec1ff"
+
+[keys]
+"ctrl+shift+k" = "clear_screen"   # clear the screen and the scrollback
+"ctrl+shift+up" = "previous_block"   # go to the previous command
+"ctrl+shift+down" = "next_block"   # go to the next command
+"ctrl+shift+c" = "copy_block_output"   # copy this command's output
+"ctrl+shift+f" = "search_history"   # search recorded work
+"ctrl+shift+r" = "show_record"   # show what this session has recorded
