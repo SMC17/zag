@@ -12,6 +12,7 @@ const pty_mod = @import("pty.zig");
 const integration = @import("shell_integration.zig");
 const event_mod = @import("../events/event.zig");
 const log_mod = @import("../events/log.zig");
+const graph_mod = @import("../events/graph.zig");
 const content_store_mod = @import("../events/content_store.zig");
 const idmod = @import("../core/id.zig");
 const hashing = @import("../core/hash.zig");
@@ -44,9 +45,19 @@ pub const Session = struct {
     child: ?pty_mod.Child = null,
     child_exit: ?pty_mod.Exit = null,
     timed_out: bool = false,
+    /// The event that opened this session.
+    ///
+    /// Everything the session writes carries it as a correlation, so one unit
+    /// of work is one query rather than a guess from timestamps. Without it the
+    /// execution graph folds a field nobody fills and a real session comes back
+    /// as a flat list of unrelated roots.
+    session_event: event_mod.EventId,
     /// The block currently collecting output, if any.
     open_block: ?idmod.BlockId = null,
     open_block_started: ?timeutil.Timestamp = null,
+    /// The event that submitted the open block. Output and the finish are
+    /// caused by it, which is what makes a block one subtree of the graph.
+    open_block_event: ?event_mod.EventId = null,
     ids: idmod.Generator,
     clock: timeutil.Timestamp,
     /// Bytes of output collected for the open block.
@@ -65,7 +76,7 @@ pub const Session = struct {
         options: Options,
         clock: timeutil.Timestamp,
     ) !Session {
-        const session: Session = .{
+        var session: Session = .{
             .arena = arena,
             .id = id,
             .screen = try grid.Screen.init(arena, options.columns, options.rows, options.scrollback_limit),
@@ -78,14 +89,16 @@ pub const Session = struct {
             .content_store = options.content_store,
             .ids = idmod.Generator.init(@bitCast(clock.ns), @divFloor(clock.ns, timeutil.ns_per_ms)),
             .clock = clock,
+            .session_event = undefined,
         };
-        _ = try log.append(.{ .session_opened = .{
+        const opened = try log.append(.{ .session_opened = .{
             .session = id,
             .workingDirectory = options.working_directory,
             .shell = options.shell,
             .columns = options.columns,
             .rows = options.rows,
         } }, .{ .at = clock, .actor = options.actor });
+        session.session_event = opened.id;
         return session;
     }
 
@@ -178,13 +191,19 @@ pub const Session = struct {
                 self.open_block = block;
                 self.open_block_started = self.clock;
                 self.output = .empty;
-                _ = try self.log.append(.{ .command_submitted = .{
+                const submitted = try self.log.append(.{ .command_submitted = .{
                     .block = block,
                     .session = self.id,
                     .commandText = try self.arena.dupe(u8, command),
                     .workingDirectory = self.tracker.working_directory orelse "",
                     .boundaryFromShell = true,
-                } }, .{ .at = self.clock, .actor = self.actor });
+                } }, .{
+                    .at = self.clock,
+                    .actor = self.actor,
+                    .causedBy = self.session_event,
+                    .correlation = self.session_event,
+                });
+                self.open_block_event = submitted.id;
             },
             .command_finished => |f| {
                 try self.finishOpenBlock(f.exit_status orelse 0, null);
@@ -193,7 +212,12 @@ pub const Session = struct {
                 _ = try self.log.append(.{ .git_changed = .{
                     .session = self.id,
                     .repository = path,
-                } }, .{ .at = self.clock, .actor = self.actor });
+                } }, .{
+                    .at = self.clock,
+                    .actor = self.actor,
+                    .causedBy = self.open_block_event orelse self.session_event,
+                    .correlation = self.session_event,
+                });
             },
             else => {},
         }
@@ -211,7 +235,12 @@ pub const Session = struct {
                 .session = self.id,
                 .contentHash = content_hash,
                 .byteCount = self.output.items.len,
-            } }, .{ .at = self.clock, .actor = self.actor });
+            } }, .{
+                .at = self.clock,
+                .actor = self.actor,
+                .causedBy = self.open_block_event orelse self.session_event,
+                .correlation = self.session_event,
+            });
         }
         const started = self.open_block_started orelse self.clock;
         _ = try self.log.append(.{ .command_finished = .{
@@ -220,9 +249,15 @@ pub const Session = struct {
             .exitStatus = exit_status,
             .duration = self.clock.since(started),
             .signal = signal,
-        } }, .{ .at = self.clock, .actor = self.actor });
+        } }, .{
+            .at = self.clock,
+            .actor = self.actor,
+            .causedBy = self.open_block_event orelse self.session_event,
+            .correlation = self.session_event,
+        });
         self.open_block = null;
         self.open_block_started = null;
+        self.open_block_event = null;
         self.output = .empty;
         self.capture_escape_start = null;
         self.capture_osc_start = null;
@@ -253,7 +288,12 @@ pub const Session = struct {
             .session = self.id,
             .exitStatus = details.status,
             .reason = reason,
-        } }, .{ .at = self.clock, .actor = self.actor });
+        } }, .{
+            .at = self.clock,
+            .actor = self.actor,
+            .causedBy = self.session_event,
+            .correlation = self.session_event,
+        });
     }
 
     pub fn didTimeOut(self: Session) bool {
@@ -552,4 +592,49 @@ test "a chatty process that ignores TERM still meets the hard deadline" {
     };
     try testing.expect(found_finish);
     try testing.expect((try log.verify()) == null);
+}
+
+test "everything a session writes belongs to the session that wrote it" {
+    if (!pty_mod.supported) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var log = log_mod.Log.init(arena, 91);
+    var gen = idmod.Generator.init(92, 0);
+    const id = gen.next(idmod.SessionId);
+    var session = try Session.init(arena, &log, id, .{
+        .working_directory = "/tmp",
+        .shell = "/bin/sh",
+        .actor = .{ .id = gen.next(idmod.ActorId), .kind = .person, .label = "you" },
+    }, .{ .ns = 1_700_000_000 * timeutil.ns_per_s });
+
+    try session.run(
+        "/bin/sh",
+        &.{ "/bin/sh", "-c", "printf hello" },
+        &.{"PATH=/bin:/usr/bin"},
+        "/tmp",
+        timeutil.Duration.fromSeconds(10),
+    );
+    try session.close("done");
+
+    // One root: the session opening. Everything else descends from it, so one
+    // unit of work is one query rather than a guess from timestamps. Before
+    // this, production writers set neither field and a real session came back
+    // as a flat list of unrelated roots.
+    const graph = try graph_mod.Graph.build(arena, log);
+    const roots = try graph.roots();
+    try testing.expectEqual(@as(usize, 1), roots.items.len);
+    try testing.expectEqual(@as(usize, 0), roots.items[0]);
+
+    const opened = log.entries.items[0];
+    try testing.expect(opened.causedBy == null);
+    for (log.entries.items[1..]) |entry| {
+        const correlation = entry.correlation orelse return error.TestUnexpectedResult;
+        try testing.expect(correlation.eql(opened.id));
+    }
+
+    // The whole session comes back from one correlation.
+    const run = try graph.run(opened.id);
+    try testing.expectEqual(log.entries.items.len, run.items.len);
 }
