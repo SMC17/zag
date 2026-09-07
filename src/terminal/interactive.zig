@@ -293,6 +293,7 @@ pub fn run(
         .actor = service.actor,
         .content_store = &service.content,
         .marker_token = if (launch.marksPrompts) options.markerToken else null,
+        .redactor = service.redactor,
     }, wallClock(io));
 
     try tty.enterRaw();

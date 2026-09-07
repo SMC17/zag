@@ -17,6 +17,7 @@ const content_store_mod = @import("../events/content_store.zig");
 const idmod = @import("../core/id.zig");
 const hashing = @import("../core/hash.zig");
 const timeutil = @import("../core/time.zig");
+const secrets = @import("../security/secrets.zig");
 
 pub const Options = struct {
     columns: u16 = 80,
@@ -31,6 +32,14 @@ pub const Options = struct {
     content_store: ?*content_store_mod.Store = null,
     /// A parent-only token required on service-owned command boundary marks.
     marker_token: ?[]const u8 = null,
+    /// Takes credentials out of command text and captured output before either
+    /// becomes a record.
+    ///
+    /// Optional only so that tests exercising the parser need not build one.
+    /// Every production path sets it, because the log is append-only and a
+    /// secret written into it cannot be taken out again without breaking the
+    /// chain that proves nothing was.
+    redactor: ?secrets.Redactor = null,
 };
 
 /// Drives one program and turns its output into workspace events.
@@ -68,6 +77,7 @@ pub const Session = struct {
     /// open. A recognised shell mark is removed from the captured bytes.
     capture_osc_start: ?usize = null,
     content_store: ?*content_store_mod.Store,
+    redactor: ?secrets.Redactor,
 
     pub fn init(
         arena: std.mem.Allocator,
@@ -87,6 +97,7 @@ pub const Session = struct {
             .log = log,
             .actor = options.actor,
             .content_store = options.content_store,
+            .redactor = options.redactor,
             .ids = idmod.Generator.init(@bitCast(clock.ns), @divFloor(clock.ns, timeutil.ns_per_ms)),
             .clock = clock,
             .session_event = undefined,
@@ -179,6 +190,17 @@ pub const Session = struct {
         }
     }
 
+    /// Take credentials out of text on its way into the record.
+    ///
+    /// A session with no redactor keeps the text as it was — the setting that
+    /// exists so a parser test need not build one, and the setting no
+    /// production path uses.
+    fn redact(self: *Session, text: []const u8) !secrets.Result {
+        const redactor = self.redactor orelse
+            return .{ .text = text, .findings = &.{} };
+        return redactor.rewrite(self.arena, text);
+    }
+
     fn handleBoundary(self: *Session, boundary: integration.Boundary) !void {
         switch (boundary) {
             .output_start => |o| {
@@ -191,12 +213,18 @@ pub const Session = struct {
                 self.open_block = block;
                 self.open_block_started = self.clock;
                 self.output = .empty;
+                // `export ANTHROPIC_API_KEY=…` is a command like any other, and
+                // a command line is the most common way a key reaches a log.
+                // It is redacted here, before the text is duplicated into the
+                // arena the event will point at.
+                const clean = try self.redact(command);
                 const submitted = try self.log.append(.{ .command_submitted = .{
                     .block = block,
                     .session = self.id,
-                    .commandText = try self.arena.dupe(u8, command),
+                    .commandText = try self.arena.dupe(u8, clean.text),
                     .workingDirectory = self.tracker.working_directory orelse "",
                     .boundaryFromShell = true,
+                    .redactions = clean.findings.len,
                 } }, .{
                     .at = self.clock,
                     .actor = self.actor,
@@ -228,15 +256,21 @@ pub const Session = struct {
     fn finishOpenBlock(self: *Session, exit_status: u8, signal: ?u8) !void {
         const block = self.open_block orelse return;
         if (self.output.items.len > 0) {
+            // The person watching the terminal already saw the real bytes on
+            // their own screen; `self.output` is the copy on its way to being
+            // kept. This is the last point at which a credential can be taken
+            // out of it, because everything after this is hashed and chained.
+            const clean = try self.redact(self.output.items);
             const content_hash = if (self.content_store) |store|
-                try store.put(self.output.items)
+                try store.put(clean.text)
             else
-                hashing.Hash.of(self.output.items);
+                hashing.Hash.of(clean.text);
             _ = try self.log.append(.{ .process_output = .{
                 .block = block,
                 .session = self.id,
                 .contentHash = content_hash,
-                .byteCount = self.output.items.len,
+                .byteCount = clean.text.len,
+                .redactions = clean.findings.len,
             } }, .{
                 .at = self.clock,
                 .actor = self.actor,

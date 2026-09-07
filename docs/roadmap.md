@@ -170,8 +170,10 @@ Still open:
   not caught.
 - Review `docs/threat-model.md` with local users, malicious repositories,
   compromised child processes, model providers and remote clients in scope.
-- Add secret detection and redaction policy for terminal output, model context,
-  diagnostic bundles and security reports.
+- Extend redaction to the remaining outputs. Command text, captured output and
+  everything sent to a model are redacted today. Diagnostic bundles and
+  generated security reports are not written by this build yet, and must be
+  covered when they are.
 
 ## Priority 2: make the terminal one a person can live in
 

@@ -40,6 +40,9 @@
           "@id": "https://zag.dev/vocab/workspace/policy"
         },
         {
+          "@id": "https://zag.dev/vocab/workspace/redaction"
+        },
+        {
           "@id": "https://zag.dev/vocab/workspace/approval"
         },
         {
@@ -282,6 +285,9 @@
           "@id": "https://zag.dev/vocab/workspace/block"
         },
         {
+          "@id": "https://zag.dev/vocab/workspace/redaction"
+        },
+        {
           "@id": "https://zag.dev/vocab/workspace/execution-graph"
         }
       ],
@@ -487,11 +493,55 @@
           "@id": "https://zag.dev/vocab/workspace/capability"
         },
         {
+          "@id": "https://zag.dev/vocab/workspace/redaction"
+        },
+        {
           "@id": "https://zag.dev/vocab/workspace/authorization-decision"
         }
       ],
       "skos:topConceptOf": {
         "@id": "https://zag.dev/vocab/workspace"
+      },
+      "dcterms:subject": "software engineering"
+    },
+    {
+      "@id": "https://zag.dev/vocab/workspace/redaction",
+      "@type": {
+        "@id": "skos:Concept"
+      },
+      "skos:inScheme": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:prefLabel": {
+        "@value": "redaction",
+        "@language": "en"
+      },
+      "skos:definition": {
+        "@value": "replacement of a credential in text by a placeholder that names its kind, done before the text becomes a record or leaves the machine",
+        "@language": "en"
+      },
+      "skos:altLabel": {
+        "@value": "masking",
+        "@language": "en"
+      },
+      "skos:hiddenLabel": {
+        "@value": "scrubbing",
+        "@language": "en"
+      },
+      "skos:related": [
+        {
+          "@id": "https://zag.dev/vocab/workspace/workspace-event"
+        },
+        {
+          "@id": "https://zag.dev/vocab/workspace/policy"
+        }
+      ],
+      "skos:topConceptOf": {
+        "@id": "https://zag.dev/vocab/workspace"
+      },
+      "skos:example": {
+        "@value": "an API key a command printed, replaced in the stored output by a placeholder naming the provider",
+        "@language": "en"
       },
       "dcterms:subject": "software engineering"
     },
