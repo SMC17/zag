@@ -317,7 +317,7 @@ fn run(
         .objects => try contentObjects(arena, io, w, options),
         .recover => try recoverWorkspace(arena, io, w, options),
         .agents => try agentsFile(arena, io, w, options),
-        .run => try runCommand(arena, io, w, options),
+        .run => try runCommand(arena, io, w, options, environment),
         .shell_hook => try shellHook(w, options),
         .workflow => try workflowReport(arena, w, options),
         .lifecycle => try lifecycleReport(arena, w),
@@ -1006,12 +1006,21 @@ fn knowledgeIndex(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, optio
 }
 
 /// The actor the tool acts as when it opens a workspace of its own accord.
+///
+/// This is the workbench doing its job, not a person asking for something, and
+/// the record has to be able to tell those apart.
 fn workbenchActor() zag.events.event.Actor {
-    return .{
-        .id = zag.core.id.ActorId.fromRaw(.{ .bytes = [_]u8{0} ** 16 }),
-        .kind = .system,
-        .label = "zag",
-    };
+    return zag.events.event.Actor.of(zag.core.identity.program("zag"));
+}
+
+/// The person running the tool.
+///
+/// Derived from the account and machine names, so the same person is the same
+/// actor in every workspace they open. Every event used to carry sixteen zero
+/// bytes here, which meant the record could not say who wrote it or even
+/// whether a person was involved.
+fn personActor(arena: std.mem.Allocator, environment: []const []const u8) !zag.events.event.Actor {
+    return zag.events.event.Actor.of(try zag.core.identity.person(arena, environment));
 }
 
 /// The wall clock, read through the platform's input and output layer rather
@@ -1178,6 +1187,26 @@ fn askAModel(
         return 1;
     }
 
+    // The run is recorded in the workspace, like everything else. A model path
+    // that talked to a provider, ran tools and printed to standard output
+    // without writing a single event was the one place this product did not do
+    // what it says it does.
+    const opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.root,
+        .actor = try personActor(arena, environment),
+        .now = wallClock(io),
+    }) catch {
+        try w.print("zag could not open the workspace in {s}, so this run would not be recorded.\n", .{options.root});
+        return 1;
+    };
+    var service = opened.service;
+    if (!opened.report.logIsHealthy()) {
+        try opened.report.writeSummary(w);
+        try w.writeAll("Keep the file as it is. A broken log is evidence, not a fault to repair.\n");
+        return 1;
+    }
+    var recorder = zag.workspace.service.Service.AgentRecorder.init(&service);
+
     var engine = zag.ai.policy.Engine.init(arena, loaded.policy, @bitCast(wallClock(io).ns));
     var identifiers = zag.core.id.Generator.init(@bitCast(wallClock(io).ns), 0);
     const context: zag.ai.policy.Context = .{
@@ -1210,6 +1239,7 @@ fn askAModel(
         .executor = executor,
         .engine = &engine,
         .clock = monotonic(io),
+        .journal = recorder.journal(),
     };
 
     var budget: zag.ai.loop.Budget = .{};
@@ -1227,6 +1257,13 @@ fn askAModel(
         .budget = budget,
     }, question.items, context);
 
+    // The record is committed before anything is printed, so what a person
+    // reads on screen is what the log already holds.
+    service.flush(io) catch |err| {
+        try w.print("The run finished, but zag could not commit its record: {s}.\n", .{@errorName(err)});
+        return 1;
+    };
+
     if (transcript.answer.len > 0) try w.print("{s}\n\n", .{transcript.answer});
 
     for (transcript.turns) |turn| {
@@ -1241,6 +1278,14 @@ fn askAModel(
     if (transcript.toolCallCount() > 0) try w.writeAll("\n");
 
     try transcript.writeSummary(w);
+    if (recorder.failure) |problem| {
+        try w.print("Part of this run could not be recorded: {s}.\n", .{problem});
+    } else {
+        try w.print("Recorded as {d} events in {s}/.workspace. Read it with \"zag why\".\n", .{
+            recorder.recorded,
+            options.root,
+        });
+    }
 
     if (transcript.pending) |request| {
         try w.print("\nIt is waiting for you to allow: {s} on {s}.\n", .{
@@ -1494,11 +1539,7 @@ fn interactiveTerminal(
 
     const opened = zag.workspace.service.Service.open(arena, io, .{
         .root = options.root,
-        .actor = .{
-            .id = zag.core.id.ActorId.fromRaw(.{ .bytes = [_]u8{0} ** 16 }),
-            .kind = .person,
-            .label = "you",
-        },
+        .actor = try personActor(arena, environment),
         .now = wallClock(io),
     }) catch {
         try w.print("zag could not open the workspace in {s}.\n", .{options.root});
@@ -1625,7 +1666,13 @@ fn needsQuoting(argument: []const u8) bool {
     return false;
 }
 
-fn runCommand(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: Options) !u8 {
+fn runCommand(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+    environment: []const []const u8,
+) !u8 {
     if (options.passthrough.len == 0) {
         try w.writeAll("Put the command after two dashes. For example: zag run -- echo hello\n");
         return 2;
@@ -1637,11 +1684,7 @@ fn runCommand(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, options: 
 
     const opened = zag.workspace.service.Service.open(arena, io, .{
         .root = options.root,
-        .actor = .{
-            .id = zag.core.id.ActorId.fromRaw(.{ .bytes = [_]u8{0} ** 16 }),
-            .kind = .person,
-            .label = "you",
-        },
+        .actor = try personActor(arena, environment),
         .now = wallClock(io),
     }) catch {
         try w.print("zag could not open the workspace in {s}.\n", .{options.root});
@@ -3021,7 +3064,7 @@ test "a command that fails is recorded as failed, with its status" {
     const status = try runCommand(arena, io, &w, .{
         .root = root,
         .passthrough = &.{ "sh", "-c", "exit 3" },
-    });
+    }, &.{ "USER=tester", "HOSTNAME=test-machine" });
 
     try testing.expectEqual(@as(u8, 3), status);
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "[failed]") != null);
@@ -3043,4 +3086,64 @@ test "a command that fails is recorded as failed, with its status" {
         }
     }
     try testing.expect(saw_failure);
+}
+
+test "the record says who wrote it, and tells a person from the workbench" {
+    if (!zag.terminal.pty.supported) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var buffer: [8192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buffer);
+    _ = try runCommand(arena, io, &w, .{
+        .root = root,
+        .passthrough = &.{ "echo", "hello" },
+    }, &.{ "USER=sean", "HOSTNAME=workshop" });
+
+    const path = try std.fmt.allocPrint(arena, "{s}/.workspace/events.jsonl", .{root});
+    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20));
+    const loaded = try zag.events.log.Log.loadJsonLines(arena, source, 1);
+    try testing.expect(loaded.log.entries.items.len > 0);
+
+    const zero = zag.core.id.ActorId.fromRaw(.{ .bytes = [_]u8{0} ** 16 });
+    const expected = try zag.core.identity.person(arena, &.{ "USER=sean", "HOSTNAME=workshop" });
+
+    for (loaded.log.entries.items) |entry| {
+        // Not the zero identifier, which is what every event used to carry.
+        try testing.expect(!entry.actor.id.eql(zero));
+        // The person who ran it, and readable as such.
+        try testing.expect(entry.actor.id.eql(expected.id));
+        try testing.expectEqual(zag.data.provenance.ProducerKind.person, entry.actor.kind);
+        try testing.expectEqualStrings("sean", entry.actor.label);
+    }
+
+    // The same account on the same machine is the same actor in another
+    // workspace, so a person can be followed across their own work.
+    var elsewhere = std.testing.tmpDir(.{});
+    defer elsewhere.cleanup();
+    var second_buffer: [8192]u8 = undefined;
+    var second = std.Io.Writer.fixed(&second_buffer);
+    _ = try runCommand(arena, io, &second, .{
+        .root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{elsewhere.sub_path}),
+        .passthrough = &.{ "echo", "again" },
+    }, &.{ "USER=sean", "HOSTNAME=workshop" });
+    const second_path = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/.workspace/events.jsonl", .{elsewhere.sub_path});
+    const second_source = try std.Io.Dir.cwd().readFileAlloc(io, second_path, arena, .limited(1 << 20));
+    const second_log = try zag.events.log.Log.loadJsonLines(arena, second_source, 1);
+    try testing.expect(second_log.log.entries.items[0].actor.id.eql(expected.id));
+
+    // And the workbench acting on its own is a different actor, of a different
+    // kind. A governance framework that cannot tell those apart describes
+    // nothing.
+    const workbench = workbenchActor();
+    try testing.expect(!workbench.id.eql(expected.id));
+    try testing.expectEqual(zag.data.provenance.ProducerKind.system, workbench.kind);
 }

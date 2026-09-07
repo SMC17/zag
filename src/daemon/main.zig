@@ -147,11 +147,7 @@ pub fn main(init: std.process.Init) !u8 {
 fn openWorkspace(arena: std.mem.Allocator, io: std.Io, options: Options) !zag.workspace.service.Opened {
     return zag.workspace.service.Service.open(arena, io, .{
         .root = options.root,
-        .actor = .{
-            .id = zag.core.id.ActorId.fromRaw(.{ .bytes = [_]u8{0} ** 16 }),
-            .kind = .system,
-            .label = "zagd",
-        },
+        .actor = zag.events.event.Actor.of(zag.core.identity.program("zagd")),
         .now = wallClock(io),
     });
 }

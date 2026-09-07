@@ -17,6 +17,7 @@
 const std = @import("std");
 const event_mod = @import("../events/event.zig");
 const log_mod = @import("../events/log.zig");
+const graph_mod = @import("../events/graph.zig");
 const content_store_mod = @import("../events/content_store.zig");
 const block_mod = @import("block.zig");
 const model_mod = @import("model.zig");
@@ -25,6 +26,7 @@ const workflow_mod = @import("workflow.zig");
 const base_mod = @import("../knowledge/base.zig");
 const vocabulary_mod = @import("../knowledge/vocabulary.zig");
 const policy_mod = @import("../ai/policy.zig");
+const loop_mod = @import("../ai/loop.zig");
 const capability_mod = @import("../ai/capability.zig");
 const session_mod = @import("../terminal/session.zig");
 const idmod = @import("../core/id.zig");
@@ -360,6 +362,24 @@ pub const Service = struct {
     /// Append new records after checking the exact on-disk prefix under an
     /// exclusive advisory lock. Content objects are made durable first, so a
     /// committed event never points to an object that was only in memory.
+    /// Append an event and remember that it has not been written out yet.
+    ///
+    /// Everything that adds to the log goes through here. Appending straight to
+    /// `self.log` compiles and looks right, and quietly leaves `unflushed` at
+    /// zero, so the next flush returns early and the events stay in memory
+    /// until the process ends. That is how a run can report having recorded
+    /// seven events and leave no file behind.
+    pub fn record(
+        self: *Service,
+        payload: event_mod.WorkspaceEvent,
+        options: log_mod.AppendOptions,
+    ) !event_mod.Envelope {
+        if (self.sealed) return error.LogBroken;
+        const envelope = try self.log.append(payload, options);
+        self.unflushed += 1;
+        return envelope;
+    }
+
     pub fn flush(self: *Service, io: std.Io) !void {
         if (!self.persist) return;
         try self.content.flush(io);
@@ -526,6 +546,186 @@ pub const Service = struct {
             .exitStatus = exit_status,
         };
     }
+
+    /// Record an agent run into this workspace.
+    ///
+    /// One session, one agent, one causal tree: the agent's start is the root,
+    /// every tool call is caused by it, and each call's outcome is caused by
+    /// the request that asked for it. That is the same shape a recorded
+    /// command has, so `zag why`, the block list and the dependency graph all
+    /// work on an agent run without knowing it was one.
+    ///
+    /// The recorder is handed to `ai.loop.Runner`, which reports each moment as
+    /// it reaches it. Nothing is written at the end, so a run that is
+    /// interrupted has still written what it did.
+    pub const AgentRecorder = struct {
+        service: *Service,
+        session: idmod.SessionId,
+        agent: idmod.AgentId,
+        /// The event that started the run. Everything else carries it.
+        started: ?event_mod.EventId = null,
+        /// The most recent tool request, which its outcome is caused by.
+        pending_call: ?event_mod.EventId = null,
+        pending_id: ?idmod.ToolCallId = null,
+        /// Written down so a caller can say how much reached the record.
+        recorded: usize = 0,
+        /// Set when an append failed. The run carries on; a person is told.
+        failure: ?[]const u8 = null,
+        /// The session event everything in the run is correlated to.
+        correlation: ?event_mod.EventId = null,
+
+        pub fn init(service: *Service) AgentRecorder {
+            return .{
+                .service = service,
+                .session = service.ids.next(idmod.SessionId),
+                .agent = service.ids.next(idmod.AgentId),
+                .started = null,
+                .pending_call = null,
+                .pending_id = null,
+            };
+        }
+
+        pub fn journal(self: *AgentRecorder) loop_mod.Journal {
+            return .{ .context = self, .recordFn = write };
+        }
+
+        fn write(context: *anyopaque, moment: loop_mod.Moment) anyerror!void {
+            const self: *AgentRecorder = @ptrCast(@alignCast(context));
+            self.append(moment) catch |err| {
+                if (self.failure == null) self.failure = @errorName(err);
+                return err;
+            };
+            self.recorded += 1;
+        }
+
+        fn append(self: *AgentRecorder, moment: loop_mod.Moment) !void {
+            const service = self.service;
+            const actor = service.actor;
+            const at = service.clock;
+
+            switch (moment) {
+                .started => |e| {
+                    const opened = try service.record(.{ .session_opened = .{
+                        .session = self.session,
+                        .workingDirectory = service.root,
+                    } }, .{ .at = at, .actor = actor });
+                    const begun = try service.record(.{ .agent_started = .{
+                        .agent = self.agent,
+                        .session = self.session,
+                        .request = try service.arena.dupe(u8, e.request),
+                        .provider = try service.arena.dupe(u8, e.provider),
+                        .model = try service.arena.dupe(u8, e.model),
+                        .policy = try service.arena.dupe(u8, e.policy),
+                    } }, .{
+                        .at = at,
+                        .actor = actor,
+                        .causedBy = opened.id,
+                        .correlation = opened.id,
+                    });
+                    self.started = begun.id;
+                    // The correlation for the whole run is the session, so one
+                    // query returns it all.
+                    self.correlation = opened.id;
+                },
+                .said => |e| {
+                    _ = try service.record(.{ .agent_message = .{
+                        .agent = self.agent,
+                        .session = self.session,
+                        .role = switch (e.role) {
+                            .plan => .plan,
+                            .progress => .progress,
+                            .result => .result,
+                            .question => .question,
+                            .refusal => .refusal,
+                        },
+                        .text = try service.arena.dupe(u8, e.text),
+                    } }, .{
+                        .at = at,
+                        .actor = actor,
+                        .causedBy = self.started,
+                        .correlation = self.correlation,
+                    });
+                },
+                .asked => |e| {
+                    const call = service.ids.next(idmod.ToolCallId);
+                    self.pending_id = call;
+                    const requested = try service.record(.{ .tool_requested = .{
+                        .call = call,
+                        .agent = self.agent,
+                        .session = self.session,
+                        .tool = try service.arena.dupe(u8, e.tool),
+                        .capability = try service.arena.dupe(u8, e.capability),
+                        .argumentsJson = try service.arena.dupe(u8, e.argumentsJson),
+                        .resource = try service.arena.dupe(u8, e.resource),
+                    } }, .{
+                        .at = at,
+                        .actor = actor,
+                        .causedBy = self.started,
+                        .correlation = self.correlation,
+                    });
+                    self.pending_call = requested.id;
+
+                    // A decision that asked for a person is an approval on the
+                    // record, not a footnote in a summary.
+                    if (e.decision) |decision| {
+                        if (decision.effect == .require_human) {
+                            _ = try service.record(.{ .approval_requested = .{
+                                .approval = decision.id,
+                                .session = self.session,
+                                .agent = self.agent,
+                                .capability = try service.arena.dupe(u8, e.capability),
+                                .resource = try service.arena.dupe(u8, e.resource),
+                                .promptText = try service.arena.dupe(u8, decision.reason),
+                                .policy = try service.arena.dupe(u8, decision.policy_id),
+                            } }, .{
+                                .at = at,
+                                .actor = actor,
+                                .causedBy = requested.id,
+                                .correlation = self.correlation,
+                            });
+                        }
+                    }
+                },
+                .settled => |e| {
+                    const call = self.pending_id orelse service.ids.next(idmod.ToolCallId);
+                    _ = try service.record(.{ .tool_finished = .{
+                        .call = call,
+                        .agent = self.agent,
+                        .session = self.session,
+                        .outcome = switch (e.outcome) {
+                            .completed => .completed,
+                            .failed => .failed,
+                            .denied => .denied,
+                            .cancelled => .cancelled,
+                            .timed_out => .timed_out,
+                        },
+                        .duration = .{ .ns = 0 },
+                        .resultHash = e.resultHash,
+                        .summary = try service.arena.dupe(u8, e.summary),
+                    } }, .{
+                        .at = at,
+                        .actor = actor,
+                        .causedBy = self.pending_call orelse self.started,
+                        .correlation = self.correlation,
+                    });
+                    self.pending_call = null;
+                    self.pending_id = null;
+                },
+                .finished => |e| {
+                    _ = try service.record(.{ .session_closed = .{
+                        .session = self.session,
+                        .exitStatus = if (e.ending.succeeded()) 0 else 1,
+                        .reason = e.ending.text(),
+                    } }, .{
+                        .at = at,
+                        .actor = actor,
+                        .causedBy = self.started,
+                        .correlation = self.correlation,
+                    });
+                },
+            }
+        }
+    };
 
     // --- Workflows ---------------------------------------------------------
 
@@ -1234,4 +1434,162 @@ test "two workspaces opened at the same instant do not mint the same identifiers
         .seed = 42,
     })).service;
     try testing.expect(replay_one.ids.next(idmod.SessionId).eql(replay_two.ids.next(idmod.SessionId)));
+}
+
+test "a recorded command is one subtree, from the session down to its output" {
+    if (!@import("../terminal/pty.zig").supported) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var service = (try Service.open(arena, io, .{
+        .root = root,
+        .actor = testActor(),
+        .now = .{ .ns = 1_700_000_000 * timeutil.ns_per_s },
+    })).service;
+    _ = try service.runCommand("printf hello", timeutil.Duration.fromSeconds(10));
+
+    const graph = try graph_mod.Graph.build(arena, service.log);
+
+    // One root, and it is the session. Not one root per event.
+    const roots = try graph.roots();
+    try testing.expectEqual(@as(usize, 1), roots.items.len);
+    const opened = service.log.entries.items[roots.items[0]];
+    try testing.expect(opened.payload == .session_opened);
+
+    // Output and the finish hang off the command that produced them, which is
+    // what makes a block a subtree rather than three events that happen to
+    // share an identifier in their payload.
+    var submitted_index: ?usize = null;
+    var children: usize = 0;
+    for (service.log.entries.items, 0..) |entry, index| {
+        switch (entry.payload) {
+            .command_submitted => submitted_index = index,
+            .process_output, .command_finished => {
+                const parent = graph.nodes[index].parent orelse return error.TestUnexpectedResult;
+                try testing.expectEqual(submitted_index.?, parent);
+                // And it is reachable from the session, through the command.
+                try testing.expect(graph.causedBy(index, roots.items[0]));
+                children += 1;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(children >= 2);
+
+    // "Why did this happen" reads forwards, from the session to the event.
+    const last = service.log.entries.items.len - 1;
+    const chain = try graph.ancestry(last);
+    try testing.expect(chain.items.len >= 2);
+    try testing.expectEqual(roots.items[0], chain.items[0]);
+}
+
+test "an agent run is recorded as one causal tree, refusals included" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var service = (try Service.open(arena, io, .{
+        .root = root,
+        .actor = testActor(),
+        .now = .{ .ns = 1_700_000_000 * timeutil.ns_per_s },
+    })).service;
+
+    var recorder = Service.AgentRecorder.init(&service);
+    const journal = recorder.journal();
+
+    journal.record(.{ .started = .{
+        .request = "read notes.txt then delete it",
+        .provider = "ollama",
+        .model = "llama3.2",
+        .policy = "workspace",
+    } });
+    journal.record(.{ .asked = .{
+        .tool = "read_file",
+        .capability = "fs.read",
+        .resource = "notes.txt",
+        .argumentsJson = "",
+        .decision = null,
+    } });
+    journal.record(.{ .settled = .{
+        .tool = "read_file",
+        .outcome = .completed,
+        .summary = "Read 12 bytes from notes.txt.",
+        .resultHash = hashing.Hash.of("twelve bytes"),
+    } });
+    journal.record(.{ .asked = .{
+        .tool = "delete",
+        .capability = "fs.delete",
+        .resource = "notes.txt",
+        .argumentsJson = "",
+        .decision = null,
+    } });
+    journal.record(.{ .settled = .{
+        .tool = "delete",
+        .outcome = .denied,
+        .summary = "No rule in this policy allows it.",
+        .resultHash = hashing.Hash.zero,
+    } });
+    journal.record(.{ .finished = .{ .ending = .answered } });
+
+    try testing.expect(recorder.failure == null);
+    try testing.expect(recorder.recorded > 0);
+
+    // The events are counted as unwritten, so they reach the file. Appending
+    // straight to the log leaves this at zero and the flush returns early.
+    try testing.expect(service.unflushed > 0);
+    try service.flush(io);
+
+    const path = try std.fmt.allocPrint(arena, "{s}/.workspace/events.jsonl", .{root});
+    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20));
+    const loaded = try log_mod.Log.loadJsonLines(arena, source, 1);
+    try testing.expect(try loaded.log.verify() == null);
+
+    // One root, and everything hangs off it.
+    const graph = try graph_mod.Graph.build(arena, loaded.log);
+    const roots = try graph.roots();
+    try testing.expectEqual(@as(usize, 1), roots.items.len);
+
+    var started: ?usize = null;
+    var requests: usize = 0;
+    var refused: usize = 0;
+    for (loaded.log.entries.items, 0..) |entry, index| {
+        switch (entry.payload) {
+            .agent_started => started = index,
+            .tool_requested => {
+                requests += 1;
+                // Every call is caused by the agent that made it.
+                try testing.expectEqual(started.?, graph.nodes[index].parent.?);
+            },
+            .tool_finished => |e| {
+                if (e.outcome == .denied) refused += 1;
+                // And every outcome is caused by the request that asked for it.
+                const parent = graph.nodes[index].parent orelse return error.TestUnexpectedResult;
+                try testing.expect(loaded.log.entries.items[parent].payload == .tool_requested);
+            },
+            else => {},
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), requests);
+    // The refusal is on the record. A run that only wrote down what it managed
+    // to do would be the least useful half of the story.
+    try testing.expectEqual(@as(usize, 1), refused);
+
+    // The whole run comes back from one correlation.
+    const run = try graph.run(loaded.log.entries.items[roots.items[0]].id);
+    try testing.expectEqual(loaded.log.entries.items.len, run.items.len);
 }

@@ -73,7 +73,23 @@ of everything in it.
 What a model pays attention to is chosen by walking that graph from the event
 being asked about, nearest first. Recency is only a tie-break.
 
-Four things in this list were not true until recently, and are worth naming
+The model path enters the record. `zag ask` writes a session, the agent that
+started, every tool it asked for, what the policy decided, and what happened. It
+is one causal tree, which `zag why` and the dependency graph read like any other
+work. Until now it talked to a provider, ran tools and printed to the screen
+without writing a single event.
+
+Every event says who wrote it. The actor is derived from the account and the
+machine name, so the same person is the same actor in every workspace they open.
+The workbench acting on its own is a different actor of a different kind. Every
+event used to carry sixteen zero bytes.
+
+The record format is pinned by golden vectors: lines this program produced, kept
+byte for byte. Tests assert that a stored line still hashes to its stored hash,
+and that the encoder still produces those exact bytes. A renamed field now fails
+a test instead of silently re-interpreting every record ever written.
+
+Five things in this list were not true until recently, and are worth naming
 because the tests were green throughout. The agent runtime obtained a decision
 and discarded it, calling an executor that could not receive one. A second copy
 of "what resource does this request touch" disagreed with the first, so the two

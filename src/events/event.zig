@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const idmod = @import("../core/id.zig");
+const identity = @import("../core/identity.zig");
 const hashing = @import("../core/hash.zig");
 const timeutil = @import("../core/time.zig");
 const provenance = @import("../data/provenance.zig");
@@ -33,6 +34,15 @@ pub const Actor = struct {
     kind: provenance.ProducerKind,
     /// Short display name. Never used for identity.
     label: []const u8 = "",
+
+    /// The actor for a derived identity.
+    ///
+    /// `core/identity.zig` decides who somebody is; this turns that into the
+    /// three fields an event carries, so there is one definition of an actor
+    /// rather than one here and a copy there.
+    pub fn of(who: identity.Identity) Actor {
+        return .{ .id = who.id, .kind = who.kind, .label = who.label };
+    }
 };
 
 pub const SessionOpened = struct {

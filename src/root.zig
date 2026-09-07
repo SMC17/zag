@@ -12,6 +12,7 @@ pub const core = struct {
     pub const hash = @import("core/hash.zig");
     pub const scan = @import("core/scan.zig");
     pub const id = @import("core/id.zig");
+    pub const identity = @import("core/identity.zig");
     pub const time = @import("core/time.zig");
 };
 
@@ -70,6 +71,7 @@ pub const events = struct {
     pub const log = @import("events/log.zig");
     pub const graph = @import("events/graph.zig");
     pub const lineage = @import("events/lineage.zig");
+    pub const format = @import("events/format.zig");
     pub const content_store = @import("events/content_store.zig");
     pub const recovery = @import("events/recovery.zig");
 };
