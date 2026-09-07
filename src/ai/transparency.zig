@@ -175,9 +175,8 @@ pub const workbench_obligations = [_]Obligation{
         .topic = .redress,
         .audience = .affected_person,
         .timing = .on_incident,
-        .answered_by = "The repository issue tracker",
-        .satisfied = false,
-        .gap = "A person affected by a change an agent made, who does not use the workbench, has no route to raise it other than through the repository owner.",
+        .answered_by = "docs/if-something-is-wrong.md",
+        .satisfied = true,
     },
 };
 
@@ -200,15 +199,30 @@ test "every transparency topic asks a question a person would ask" {
     }
 }
 
+test "every obligation names where its answer lives" {
+    // An obligation that says it is met has to say where. "Somebody could ask
+    // us" is not an answer to "what do I do if it is wrong", and the field
+    // exists so that claiming to have met one costs writing the page.
+    for (workbench_obligations) |obligation| {
+        try testing.expect(obligation.answered_by.len > 0);
+        if (!obligation.satisfied) try testing.expect(obligation.gap.len > 0);
+    }
+}
+
 test "unmet obligations are listed rather than hidden" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
+    // Every obligation is met today, and each one says where. When one is not,
+    // it appears here with its gap, and `zag check` counts it as a problem —
+    // it used to print the gap and leave the count at zero, so the build stayed
+    // green while listing what it had not done.
     const unmet = try unmetObligations(arena);
-    try testing.expectEqual(@as(usize, 1), unmet.items.len);
-    try testing.expectEqual(Topic.redress, unmet.items[0].topic);
-    try testing.expect(unmet.items[0].gap.len > 0);
+    for (unmet.items) |obligation| {
+        try testing.expect(obligation.gap.len > 0);
+    }
+    try testing.expectEqual(@as(usize, 0), unmet.items.len);
 }
 
 test "the clear review finds a document that cannot be compared or acted on" {

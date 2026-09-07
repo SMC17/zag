@@ -282,3 +282,108 @@ verification = "static_analysis"
 severity = "major"
 rationale = "A draft read as approved is the most common way wrong guidance spreads."
 check = "KB04"
+
+# Requirements switched on by a profile rather than by the default.
+#
+# Each of these was named by a profile before it was written, so the profile
+# switched on nothing and the exclusion excluded nothing. `zag check` now
+# refuses a profile that names a requirement that does not exist.
+
+[[requirement]]
+id = "ISO-42001:R-EVIDENCE"
+standard = "ISO/IEC 42001"
+clause = "9.1"
+statement = "Each control the organisation claims is supported by evidence that names the artefact it is about and when it was produced."
+scopes = ["ai_system", "records"]
+verification = "static_analysis"
+severity = "blocking"
+rationale = "A control nobody can produce evidence for is a control nobody can audit, and an evidence record that names no artefact cannot be checked against the thing it describes."
+residual_judgement = "Whether the evidence establishes the control is a judgement an auditor makes. A checker sees only that a record exists, names an artefact, and carries its hash."
+
+[[requirement]]
+id = "ISO-15489:R-RETENTION"
+standard = "ISO 15489"
+clause = "9.9"
+statement = "Every record has a retention rule, and a record is not disposed of before its rule allows or while a hold is on it."
+scopes = ["records"]
+verification = "automated_test"
+severity = "blocking"
+rationale = "A record kept for ever is as much a failure of records management as one destroyed early, and a legal hold that can be ignored is not a hold."
+residual_judgement = "Whether the retention period is the right one for the jurisdiction and the business is decided by the organisation, not by a checker."
+
+[[requirement]]
+id = "ISO-24495-2:R-OBLIGATION-CLEAR"
+standard = "ISO 24495-2"
+clause = "5.3"
+statement = "Text that places an obligation on the reader says who must do what, in the active voice, without leaving the actor to be inferred."
+scopes = ["interface_text", "documentation"]
+verification = "static_analysis"
+severity = "major"
+rationale = "A reader cannot comply with an obligation whose subject is missing. \"Approval must be obtained\" does not say by whom, from whom, or when."
+residual_judgement = "Whether the reader understands what they are obliged to do is established by asking readers, not by finding the subject of a sentence."
+
+[[requirement]]
+id = "ISO-24495-3:R-METHOD"
+standard = "ISO 24495-3"
+clause = "6.4"
+statement = "A statement of a result says how the result was produced, in enough detail for a reader to judge it."
+scopes = ["documentation", "reporting"]
+verification = "static_analysis"
+severity = "major"
+rationale = "A number without a method is not a finding. A reader who cannot see how it was measured cannot tell a measurement from an estimate."
+residual_judgement = "Whether the method described is sufficient for this reader to judge the result is established by review, not by the presence of a method section."
+
+[[requirement]]
+id = "ISO-24495-3:R-UNCERTAINTY"
+standard = "ISO 24495-3"
+clause = "6.5"
+statement = "A reported figure says what it does not establish, and where a range or a spread applies, gives it."
+scopes = ["documentation", "reporting"]
+verification = "static_analysis"
+severity = "major"
+rationale = "A figure quoted without its uncertainty invites a precision nobody measured. This product's own benchmark output is the example: one machine gave 75 MiB/s and another 56 MiB/s for the same commit."
+residual_judgement = "Whether the stated uncertainty is honest is a judgement about the measurement, which no checker makes."
+
+[[requirement]]
+id = "STE100:R-APPROVED-VERB"
+standard = "ASD-STE100"
+clause = "Part 1, Section 1"
+statement = "A verb in a procedure is one of the approved verbs, used in its approved meaning."
+scopes = ["interface_text", "documentation"]
+verification = "static_analysis"
+severity = "major"
+rationale = "Controlled English works because one word means one thing. A verb outside the approved set is a word a reader has to guess at, and a reader following a procedure cannot afford to guess."
+residual_judgement = "Whether an approved verb was used in its approved sense is judged by a person; a checker sees only that the word is on the list."
+
+[[requirement]]
+id = "STE100:R-ONE-INSTRUCTION"
+standard = "ASD-STE100"
+clause = "Part 1, Section 5"
+statement = "A sentence in a procedure gives one instruction."
+scopes = ["interface_text", "documentation"]
+verification = "static_analysis"
+severity = "major"
+rationale = "Two instructions in one sentence are two things to do and one thing to forget. A reader working through a procedure marks progress by sentence."
+residual_judgement = "Whether two clauses are one instruction or two is a judgement about the task, not about the grammar."
+
+[[requirement]]
+id = "ER:R-SHORT-SENTENCE"
+standard = "Easy-to-Read"
+clause = "4.2"
+statement = "A sentence carries one idea and stays short enough to hold in mind while reading it."
+scopes = ["interface_text", "documentation"]
+verification = "static_analysis"
+severity = "major"
+rationale = "A reader with a cognitive disability, or reading in a second language, or reading under pressure, loses the start of a long sentence before reaching its end."
+residual_judgement = "Whether this reader can follow this sentence is established by reading it with them. A word count is a proxy and is treated as one."
+
+[[requirement]]
+id = "ER:R-SUPPORTING-IMAGE"
+standard = "Easy-to-Read"
+clause = "5.1"
+statement = "An image that carries meaning has a text alternative saying the same thing, and an image that is decoration is marked as decoration."
+scopes = ["interface_text", "documentation"]
+verification = "static_analysis"
+severity = "blocking"
+rationale = "An image supporting easy-to-read text is doing part of the explaining. A reader who cannot see it loses that part unless the text says it too, and a decorative image announced as meaningful wastes their attention."
+residual_judgement = "Whether the alternative says the same thing as the image is judged by a person who can see both."

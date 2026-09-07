@@ -115,6 +115,28 @@ pub const AgentMessage = struct {
     text: []const u8,
 };
 
+/// An agent run ended, and why.
+///
+/// Without this the block folded from `agent_started` has no finish, so it
+/// stays running for ever: a workspace with a hundred completed agent runs
+/// shows a hundred that are still going. It also means the run itself has no
+/// duration and no outcome, only its individual tool calls, so "how long did
+/// that take and did it work" had no answer at the level a person asks it.
+pub const AgentFinished = struct {
+    agent: AgentId,
+    session: SessionId,
+    outcome: enum { answered, refused, stopped_by_policy, waiting_for_a_person, out_of_budget, unavailable },
+    duration: timeutil.Duration,
+    /// Tool calls the run made, and how many were refused.
+    toolCalls: u32 = 0,
+    refusedCalls: u32 = 0,
+    /// What the run cost, where the provider said.
+    inputTokens: u64 = 0,
+    outputTokens: u64 = 0,
+    /// One sentence for the person reading the block list later.
+    summary: []const u8 = "",
+};
+
 pub const ToolRequested = struct {
     call: ToolCallId,
     agent: AgentId,
@@ -176,6 +198,18 @@ pub const ApprovalResolved = struct {
     note: []const u8 = "",
 };
 
+/// The shell moved to another directory.
+///
+/// This is not a repository changing, and recording it as one was wrong: a
+/// `cd /tmp` became "the repository moved to /tmp", so a history search
+/// filtered by repository returned directories that were never repositories.
+/// The workbench learns this from an OSC 7 mark, which says where the shell is
+/// and nothing at all about version control.
+pub const DirectoryChanged = struct {
+    session: SessionId,
+    path: []const u8,
+};
+
 pub const GitChanged = struct {
     session: SessionId,
     repository: []const u8,
@@ -222,12 +256,14 @@ pub const WorkspaceEvent = union(enum) {
     command_finished: CommandFinished,
     agent_started: AgentStarted,
     agent_message: AgentMessage,
+    agent_finished: AgentFinished,
     tool_requested: ToolRequested,
     tool_finished: ToolFinished,
     file_opened: FileOpened,
     file_changed: FileChanged,
     approval_requested: ApprovalRequested,
     approval_resolved: ApprovalResolved,
+    directory_changed: DirectoryChanged,
     git_changed: GitChanged,
     diagnostic: Diagnostic,
     evidence_recorded: EvidenceRecorded,
@@ -247,12 +283,14 @@ pub const WorkspaceEvent = union(enum) {
             .command_finished => |e| e.session,
             .agent_started => |e| e.session,
             .agent_message => |e| e.session,
+            .agent_finished => |e| e.session,
             .tool_requested => |e| e.session,
             .tool_finished => |e| e.session,
             .file_opened => |e| e.session,
             .file_changed => |e| e.session,
             .approval_requested => |e| e.session,
             .approval_resolved => |e| e.session,
+            .directory_changed => |e| e.session,
             .git_changed => |e| e.session,
             .diagnostic => |e| e.session,
             .evidence_recorded => |e| e.session,
@@ -274,7 +312,7 @@ pub const WorkspaceEvent = union(enum) {
     /// automated decision-making?
     pub fn isAgentAction(self: WorkspaceEvent) bool {
         return switch (self) {
-            .agent_started, .agent_message, .tool_requested, .tool_finished => true,
+            .agent_started, .agent_message, .agent_finished, .tool_requested, .tool_finished => true,
             .file_changed => |e| e.agent != null,
             else => false,
         };

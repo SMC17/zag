@@ -236,9 +236,18 @@ pub fn writeSystemCard(facts: SystemFacts, w: *std.Io.Writer) !void {
     try w.print("Ask a question or report a problem: {s}.\n", .{facts.contact});
     try w.writeAll("Every claim here can be checked against the workspace log, which you hold.\n");
 
+    // This section is always here, whichever way it reads. A card that showed
+    // the heading only when something was missing would go quiet exactly when a
+    // reader most wants to know the question was asked, and its absence would
+    // be indistinguishable from nobody having checked.
     const unmet = try transparency.unmetObligations(facts.risks.arena);
-    if (unmet.items.len > 0) {
-        try w.writeAll("\n## What this system does not yet answer\n");
+    try w.writeAll("\n## What this system does not yet answer\n");
+    if (unmet.items.len == 0) {
+        try w.writeAll("Every question in the transparency list has an answer, and each one says where:\n");
+        for (transparency.workbench_obligations) |obligation| {
+            try w.print("  - {s} {s}\n", .{ obligation.topic.question(), obligation.answered_by });
+        }
+    } else {
         for (unmet.items) |obligation| {
             try w.print("  - {s} {s}\n", .{ obligation.topic.question(), obligation.gap });
         }

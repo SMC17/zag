@@ -50,6 +50,17 @@ pub const Rule = enum {
     ambiguous_datetime,
     ambiguous_unit,
 
+    /// The rule with this code, when there is one.
+    ///
+    /// Exists so a profile that says "do not apply PL006" can be checked
+    /// against the rules that exist, instead of naming a code nobody looks up.
+    pub fn byCode(wanted: []const u8) ?Rule {
+        for (std.enums.values(Rule)) |rule| {
+            if (std.mem.eql(u8, rule.code(), wanted)) return rule;
+        }
+        return null;
+    }
+
     pub fn code(self: Rule) []const u8 {
         return switch (self) {
             .undefined_abbreviation => "PL001",

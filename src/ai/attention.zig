@@ -325,6 +325,14 @@ pub fn writeEvent(envelope: Envelope, w: *std.Io.Writer) std.Io.Writer.Error!voi
         .user_message => |e| try w.print("You said: {s}", .{e.text}),
         .agent_message => |e| try w.print("The agent said ({s}): {s}", .{ @tagName(e.role), e.text }),
         .agent_started => |e| try w.print("An agent started, for: {s}", .{e.request}),
+        .agent_finished => |e| {
+            try w.print("The agent {s}, after ", .{@tagName(e.outcome)});
+            try notation.writeDuration(w, e.duration);
+            try w.print(", with {d} tool call", .{e.toolCalls});
+            if (e.toolCalls != 1) try w.writeAll("s");
+            if (e.refusedCalls > 0) try w.print(" ({d} refused)", .{e.refusedCalls});
+            try w.writeAll(".");
+        },
         .tool_requested => |e| try w.print("A tool was asked for: {s} ({s})", .{ e.tool, e.capability }),
         .tool_finished => |e| {
             try w.print("That tool {s}.", .{switch (e.outcome) {
@@ -338,6 +346,7 @@ pub fn writeEvent(envelope: Envelope, w: *std.Io.Writer) std.Io.Writer.Error!voi
         },
         .approval_requested => |e| try w.print("You were asked: {s}", .{e.promptText}),
         .approval_resolved => |e| try w.print("You answered: {s}.", .{@tagName(e.outcome)}),
+        .directory_changed => |e| try w.print("The shell moved to {s}.", .{e.path}),
         .git_changed => |e| {
             try w.print("The repository moved", .{});
             if (e.branch) |branch| try w.print(" on {s}", .{branch});
