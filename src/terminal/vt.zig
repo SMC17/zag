@@ -13,6 +13,7 @@
 //! tests, and it makes no claim to be a full terminal.
 
 const std = @import("std");
+const scan = @import("../core/scan.zig");
 
 pub const max_params = 16;
 pub const max_intermediates = 2;
@@ -134,6 +135,16 @@ pub const Parser = struct {
         self.* = .{};
     }
 
+    /// True when the next printable ASCII byte would simply be printed.
+    ///
+    /// The ground state with no partly-decoded character in hand is the only
+    /// state where that holds, and it is the state a terminal spends almost all
+    /// of its time in. A caller that wants to take a shortcut over a run of
+    /// ordinary text asks this first.
+    pub fn inPlainGround(self: Parser) bool {
+        return self.state == .ground and self.utf8_remaining == 0;
+    }
+
     /// Feed one byte. Returns the action it completes, if any.
     ///
     /// Slices inside the returned action point into the parser and stay valid
@@ -191,9 +202,36 @@ pub const Parser = struct {
     }
 
     /// Feed a slice, appending each action to `out`.
+    /// Feed a whole buffer, taking the fast road through ordinary text.
+    ///
+    /// Almost every byte a terminal receives is printable ASCII in the ground
+    /// state, and for those the state machine does nothing but hand the byte
+    /// back. So when the parser is in the ground state with no partly-decoded
+    /// character in hand, a vectorised scan finds where the next interesting
+    /// byte is, and the whole run before it is printed in a tight loop with the
+    /// output capacity reserved once.
+    ///
+    /// The state machine is still the definition. It runs for every byte the
+    /// scan stops at, and a test feeds the same bytes through both roads and
+    /// asserts the actions are identical, so the shortcut cannot quietly start
+    /// disagreeing with the thing it is a shortcut for.
     pub fn feed(self: *Parser, arena: std.mem.Allocator, bytes: []const u8, out: *std.ArrayList(Action)) !void {
-        for (bytes) |byte| {
-            if (self.advance(byte)) |action| try out.append(arena, action);
+        var index: usize = 0;
+        while (index < bytes.len) {
+            if (self.inPlainGround()) {
+                const rest = bytes[index..];
+                const run = scan.indexOfNonPrintable(rest) orelse rest.len;
+                if (run > 0) {
+                    try out.ensureUnusedCapacity(arena, run);
+                    for (rest[0..run]) |byte| {
+                        out.appendAssumeCapacity(.{ .print = byte });
+                    }
+                    index += run;
+                    continue;
+                }
+            }
+            if (self.advance(bytes[index])) |action| try out.append(arena, action);
+            index += 1;
         }
     }
 
@@ -697,4 +735,104 @@ test "parameter values are clamped rather than wrapped" {
 
     const actions = try collect(arena, "\x1b[999999999H");
     try testing.expectEqual(@as(u16, 65535), actions.items[0].csi.params[0]);
+}
+
+test "the fast road through plain text produces exactly what the state machine does" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A stream that mixes long printable runs with the things that end one:
+    // escape sequences, control characters, and multi-byte characters. The
+    // fast path has to hand every one of those back.
+    var stream: std.ArrayList(u8) = .empty;
+    var random = std.Random.DefaultPrng.init(4242);
+    const r = random.random();
+    var pieces: usize = 0;
+    while (pieces < 400) : (pieces += 1) {
+        switch (r.uintLessThan(u8, 6)) {
+            0 => try stream.appendSlice(arena, "\x1b[31;1m"),
+            1 => try stream.appendSlice(arena, "\x1b]133;A\x07"),
+            2 => try stream.appendSlice(arena, "\r\n"),
+            3 => try stream.appendSlice(arena, "wörld — ✓"),
+            4 => try stream.appendSlice(arena, "\x1bP1$rm\x1b\\"),
+            else => {
+                const run = r.uintLessThan(usize, 200) + 1;
+                var i: usize = 0;
+                while (i < run) : (i += 1) {
+                    try stream.append(arena, 0x20 + r.uintLessThan(u8, 0x5f));
+                }
+            },
+        }
+    }
+
+    // The whole buffer, through `feed`.
+    var fast_parser = Parser.init();
+    var fast: std.ArrayList(Action) = .empty;
+    try fast_parser.feed(arena, stream.items, &fast);
+
+    // The same bytes, one at a time, through `advance`.
+    var slow_parser = Parser.init();
+    var slow: std.ArrayList(Action) = .empty;
+    for (stream.items) |byte| {
+        if (slow_parser.advance(byte)) |action| try slow.append(arena, copyAction(arena, action));
+    }
+
+    try testing.expectEqual(slow.items.len, fast.items.len);
+    for (fast.items, slow.items) |a, b| {
+        try testing.expectEqual(std.meta.activeTag(a), std.meta.activeTag(b));
+        switch (a) {
+            .print => |value| try testing.expectEqual(value, b.print),
+            else => {},
+        }
+    }
+    // The stream really did exercise both roads: thousands of printable bytes
+    // that took the shortcut, and escape sequences that could not.
+    var printed: usize = 0;
+    var sequences: usize = 0;
+    for (fast.items) |action| {
+        switch (action) {
+            .print => printed += 1,
+            .csi, .osc, .esc, .dcs => sequences += 1,
+            else => {},
+        }
+    }
+    try testing.expect(printed > 3_000);
+    try testing.expect(sequences > 100);
+    try testing.expectEqual(State.ground, fast_parser.state);
+}
+
+/// Actions can point into the parser, which the next byte overwrites. A test
+/// that keeps them has to copy the parts it keeps.
+fn copyAction(arena: std.mem.Allocator, action: Action) Action {
+    return switch (action) {
+        .osc => |o| .{ .osc = .{ .raw = arena.dupe(u8, o.raw) catch o.raw } },
+        else => action,
+    };
+}
+
+test "a buffer split at every point gives the same actions as one piece" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A read from a pseudoterminal lands wherever it lands, so a sequence can
+    // arrive in two pieces. The fast path must not change that.
+    const stream = "plain text \x1b[1;32mgreen\x1b[0m more text wörld \x1b]133;D;0\x07 end";
+
+    var whole_parser = Parser.init();
+    var whole: std.ArrayList(Action) = .empty;
+    try whole_parser.feed(arena, stream, &whole);
+
+    var split: usize = 0;
+    while (split <= stream.len) : (split += 1) {
+        var parser = Parser.init();
+        var pieces: std.ArrayList(Action) = .empty;
+        try parser.feed(arena, stream[0..split], &pieces);
+        try parser.feed(arena, stream[split..], &pieces);
+        try testing.expectEqual(whole.items.len, pieces.items.len);
+        for (whole.items, pieces.items) |a, b| {
+            try testing.expectEqual(std.meta.activeTag(a), std.meta.activeTag(b));
+        }
+    }
 }

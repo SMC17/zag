@@ -54,7 +54,33 @@ pub const Scope = struct {
     /// The rule stops applying after this instant.
     valid_until: ?Timestamp = null,
 
-    pub fn matches(self: Scope, resource: Resource, agent: ?[]const u8, now: Timestamp) bool {
+    /// True when this scope names no resource axis at all.
+    ///
+    /// Such a scope says nothing about *what* the rule applies to, only
+    /// possibly about who and until when, so it applies to every resource.
+    pub fn namesNoResource(self: Scope) bool {
+        return self.paths.len == 0 and self.commands.len == 0 and
+            self.hosts.len == 0 and self.remotes.len == 0 and
+            self.credentials.len == 0;
+    }
+
+    /// Does this scope cover `resource`?
+    ///
+    /// `widen` is the direction the caller is safe to be wrong in. An allow
+    /// rule must not cover a resource its author did not name, so it passes
+    /// false and an unnamed axis means no match. A deny rule must not be
+    /// narrowed by the same reasoning, so it passes true and an unnamed axis
+    /// still matches.
+    ///
+    /// The asymmetry is the point, and it is the same principle as
+    /// `Effect.strongest`: when the rules are ambiguous, refuse.
+    ///
+    /// Without it the axes are orthogonal, and a rule that says "you may
+    /// connect to localhost" also allows `network.connect` on a *command*
+    /// resource, because the scope names no commands and an unnamed axis used
+    /// to mean "no restriction on this axis". That reading is right for a deny
+    /// and catastrophic for an allow.
+    pub fn matches(self: Scope, resource: Resource, agent: ?[]const u8, now: Timestamp, widen: bool) bool {
         if (self.valid_until) |until| {
             if (now.ns > until.ns) return false;
         }
@@ -66,14 +92,18 @@ pub const Scope = struct {
             }
             if (!found) return false;
         }
+        if (self.namesNoResource()) return true;
+
         return switch (resource) {
-            .none => true,
-            .path => |p| self.paths.len == 0 or matchesAnyPath(self.paths, p),
-            .command => |c| self.commands.len == 0 or matchesAnyCommand(self.commands, c),
-            .host => |h| self.hosts.len == 0 or matchesAnyHost(self.hosts, h),
-            .remote => |r| self.remotes.len == 0 or matchesAnyPrefix(self.remotes, r),
-            .credential => |c| self.credentials.len == 0 or matchesAnyPrefix(self.credentials, c),
-            .service => |s| self.hosts.len == 0 or matchesAnyPrefix(self.hosts, s),
+            // A capability with no resource is covered by a scope that names
+            // one only if that scope is allowed to widen.
+            .none => widen,
+            .path => |p| if (self.paths.len == 0) widen else matchesAnyPath(self.paths, p),
+            .command => |c| if (self.commands.len == 0) widen else matchesAnyCommand(self.commands, c),
+            .host => |h| if (self.hosts.len == 0) widen else matchesAnyHost(self.hosts, h),
+            .remote => |r| if (self.remotes.len == 0) widen else matchesAnyPrefix(self.remotes, r),
+            .credential => |c| if (self.credentials.len == 0) widen else matchesAnyPrefix(self.credentials, c),
+            .service => |s| if (self.hosts.len == 0) widen else matchesAnyPrefix(self.hosts, s),
         };
     }
 };
@@ -142,8 +172,32 @@ fn matchesAnyCommand(names: []const []const u8, command: []const u8) bool {
     return false;
 }
 
+/// Strip a port from a host, leaving the host itself.
+///
+/// A colon does not mean a port. `::1` is a whole address made of them, and a
+/// bracketed address carries its port outside the brackets. Splitting on the
+/// first colon turned `::1` into the empty string, so a policy that listed it —
+/// as this repository's own shipped policy does — silently never matched, and
+/// the workspace was one rule short of what its author wrote.
+pub fn hostWithoutPort(host: []const u8) []const u8 {
+    if (host.len == 0) return host;
+    if (host[0] == '[') {
+        // `[::1]:8080` — the address is inside the brackets.
+        if (std.mem.indexOfScalar(u8, host, ']')) |close| return host[1..close];
+        return host[1..];
+    }
+    // A bare IPv6 address has more than one colon and no port.
+    var colons: usize = 0;
+    for (host) |byte| {
+        if (byte == ':') colons += 1;
+    }
+    if (colons > 1) return host;
+    if (std.mem.indexOfScalar(u8, host, ':')) |colon| return host[0..colon];
+    return host;
+}
+
 fn matchesAnyHost(patterns: []const []const u8, host: []const u8) bool {
-    const name = if (std.mem.indexOfScalar(u8, host, ':')) |colon| host[0..colon] else host;
+    const name = hostWithoutPort(host);
     for (patterns) |pattern| {
         if (std.mem.eql(u8, pattern, name)) return true;
         if (std.mem.startsWith(u8, pattern, "*.")) {
@@ -175,7 +229,9 @@ pub const Rule = struct {
             if (c == request.capability) capability_matches = true;
         }
         if (!capability_matches) return false;
-        return self.scope.matches(request.resource, agent, now);
+        // A refusal may cover more than its author spelled out; a permission
+        // may not.
+        return self.scope.matches(request.resource, agent, now, self.effect == .deny);
     }
 };
 
@@ -307,6 +363,41 @@ pub const Engine = struct {
             .agent = context.agent,
             .decided_at = context.now,
             .from_standing_grant = from_grant,
+        };
+        try self.decisions.append(self.arena, decision);
+        return decision;
+    }
+
+    /// Mint a decision that a person made, rather than a rule.
+    ///
+    /// When a policy says "ask a person", the answer is not the decision: the
+    /// pending decision still says `require_human`, and an executor handed that
+    /// one correctly refuses to act on it. So the person's answer has to become
+    /// its own decision, recorded like any other, saying that a person allowed
+    /// this and who they were.
+    ///
+    /// This is the only way to produce an allowed decision without a rule, and
+    /// it lives here because the engine is the only thing that mints decisions.
+    pub fn allowedByPerson(
+        self: *Engine,
+        request: Request,
+        context: Context,
+        by: idmod.ActorId,
+        standing: bool,
+    ) !Decision {
+        self.ids.clock_ms = @divFloor(context.now.ns, timeutil.ns_per_ms);
+        const decision: Decision = .{
+            .id = self.ids.next(idmod.DecisionId),
+            .request = request,
+            .effect = .allow,
+            .rule_id = null,
+            .policy_id = self.policy.id,
+            .reason = if (standing) "You allowed this here, and asked not to be asked again." else "You allowed this, once.",
+            .actor = by,
+            .session = context.session,
+            .agent = context.agent,
+            .decided_at = context.now,
+            .from_standing_grant = standing,
         };
         try self.decisions.append(self.arena, decision);
         return decision;
@@ -576,4 +667,130 @@ test "every decision is kept as a record" {
     try testing.expectEqual(@as(usize, 2), for_agent.items.len);
     try testing.expectEqual(Effect.deny, engine.decisions.items[1].effect);
     try testing.expect(std.mem.indexOf(u8, engine.decisions.items[1].reason, "not allowed") != null);
+}
+
+test "a permission does not spread to a resource its author never named" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // "You may reach a model on this computer." Nothing else.
+    const rules = [_]Rule{.{
+        .id = "local-only",
+        .capabilities = &.{.@"network.connect"},
+        .scope = .{ .hosts = &.{ "localhost", "127.0.0.1", "::1" } },
+        .effect = .allow,
+        .reason = "Only a model on this computer may be reached.",
+    }};
+    var engine = Engine.init(arena, .{
+        .id = "t",
+        .name = "Local only",
+        .description = "Only a model on this computer.",
+        .rules = &rules,
+    }, 7);
+    var gen = idmod.Generator.init(3, 0);
+    const context: Context = .{ .actor = gen.next(idmod.ActorId), .now = .{ .ns = 1 } };
+
+    // The hosts it names are allowed. `::1` among them: a colon is not a port
+    // separator when the address is made of them.
+    for ([_][]const u8{ "localhost", "127.0.0.1", "::1", "localhost:11434", "[::1]:8080" }) |host| {
+        const decision = try engine.decide(.{
+            .capability = .@"network.connect",
+            .resource = .{ .host = host },
+        }, context);
+        try testing.expect(decision.isAllowed());
+    }
+    const elsewhere = try engine.decide(.{
+        .capability = .@"network.connect",
+        .resource = .{ .host = "api.example.test" },
+    }, context);
+    try testing.expect(!elsewhere.isAllowed());
+
+    // And the hole this closes: the same rule used to allow `network.connect`
+    // on a command or a path, because it named no commands and no paths and an
+    // unnamed axis meant "no restriction on this axis". A rule about hosts
+    // must say nothing about anything else.
+    const as_command = try engine.decide(.{
+        .capability = .@"network.connect",
+        .resource = .{ .command = "npm install" },
+    }, context);
+    try testing.expect(!as_command.isAllowed());
+
+    const as_path = try engine.decide(.{
+        .capability = .@"network.connect",
+        .resource = .{ .path = "/etc/shadow" },
+    }, context);
+    try testing.expect(!as_path.isAllowed());
+
+    const as_credential = try engine.decide(.{
+        .capability = .@"network.connect",
+        .resource = .{ .credential = "ANTHROPIC_API_KEY" },
+    }, context);
+    try testing.expect(!as_credential.isAllowed());
+}
+
+test "a refusal still covers what its author did not spell out" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The asymmetry that makes the rule above safe. A refusal scoped to one
+    // axis must not be narrowed by the same reasoning that keeps a permission
+    // from spreading, or tightening the engine would quietly loosen every deny
+    // in every workspace.
+    const rules = [_]Rule{
+        .{
+            .id = "allow-everything",
+            .capabilities = &.{.@"fs.write"},
+            .effect = .allow,
+            .reason = "Writing is allowed here.",
+        },
+        .{
+            .id = "not-in-etc",
+            .capabilities = &.{.@"fs.write"},
+            .scope = .{ .paths = &.{"/etc"} },
+            .effect = .deny,
+            .reason = "Nothing writes to /etc.",
+        },
+    };
+    var engine = Engine.init(arena, .{
+        .id = "t",
+        .name = "Write, not /etc",
+        .description = "Writing is allowed outside /etc.",
+        .rules = &rules,
+    }, 8);
+    var gen = idmod.Generator.init(3, 0);
+    const context: Context = .{ .actor = gen.next(idmod.ActorId), .now = .{ .ns = 1 } };
+
+    const in_repo = try engine.decide(.{
+        .capability = .@"fs.write",
+        .resource = .{ .path = "/repo/a.zig" },
+    }, context);
+    try testing.expect(in_repo.isAllowed());
+
+    const in_etc = try engine.decide(.{
+        .capability = .@"fs.write",
+        .resource = .{ .path = "/etc/passwd" },
+    }, context);
+    try testing.expect(!in_etc.isAllowed());
+
+    // A write request arriving with a resource kind the deny does not name is
+    // still refused, because a refusal reaches further than it spells out.
+    const odd = try engine.decide(.{
+        .capability = .@"fs.write",
+        .resource = .{ .service = "something-unexpected" },
+    }, context);
+    try testing.expect(!odd.isAllowed());
+}
+
+test "a colon is not always a port" {
+    try testing.expectEqualStrings("localhost", hostWithoutPort("localhost"));
+    try testing.expectEqualStrings("localhost", hostWithoutPort("localhost:11434"));
+    try testing.expectEqualStrings("127.0.0.1", hostWithoutPort("127.0.0.1:8080"));
+    // The case that was broken: an address made of colons.
+    try testing.expectEqualStrings("::1", hostWithoutPort("::1"));
+    try testing.expectEqualStrings("::1", hostWithoutPort("[::1]:8080"));
+    try testing.expectEqualStrings("fe80::1", hostWithoutPort("fe80::1"));
+    try testing.expectEqualStrings("2001:db8::1", hostWithoutPort("[2001:db8::1]:443"));
+    try testing.expectEqualStrings("", hostWithoutPort(""));
 }

@@ -48,9 +48,30 @@ pub const Profile = struct {
     /// Requirements this profile deliberately does not apply, with the reason.
     exclusions: []const Exclusion = &.{},
 
+    /// Something this profile deliberately does not apply.
+    ///
+    /// The subject used to be a bare `requirement_id`, and one profile put a
+    /// plain-language rule code in it. Those are two different namespaces, so
+    /// the exclusion matched nothing and the rule it meant to switch off stayed
+    /// on — silently, because nothing ever looked the identifier up. Saying
+    /// which kind of thing is being excluded lets `zag check` look it up in the
+    /// right table and refuse a name that is in neither.
     pub const Exclusion = struct {
-        requirement_id: []const u8,
+        subject: Subject,
         reason: []const u8,
+
+        pub const Subject = union(enum) {
+            /// An identifier from the requirements register.
+            requirement: []const u8,
+            /// A rule code from the plain-language checker, such as `PL006`.
+            language_rule: []const u8,
+
+            pub fn text(self: Subject) []const u8 {
+                return switch (self) {
+                    .requirement, .language_rule => |value| value,
+                };
+            }
+        };
     };
 
     pub fn appliesTo(self: Profile, scope: Scope) bool {
@@ -61,9 +82,28 @@ pub const Profile = struct {
         return false;
     }
 
+    /// Why this profile does not apply a requirement, when it does not.
     pub fn excludes(self: Profile, requirement_id: []const u8) ?[]const u8 {
         for (self.exclusions) |exclusion| {
-            if (std.mem.eql(u8, exclusion.requirement_id, requirement_id)) return exclusion.reason;
+            switch (exclusion.subject) {
+                .requirement => |id| if (std.mem.eql(u8, id, requirement_id)) return exclusion.reason,
+                .language_rule => {},
+            }
+        }
+        return null;
+    }
+
+    /// Why this profile does not apply a plain-language rule, when it does not.
+    ///
+    /// A separate question from the one above, because they are separate
+    /// namespaces. Asking one function both used to mean the legal profile's
+    /// exclusion of `PL006` matched nothing at all.
+    pub fn excludesLanguageRule(self: Profile, code: []const u8) ?[]const u8 {
+        for (self.exclusions) |exclusion| {
+            switch (exclusion.subject) {
+                .language_rule => |rule| if (std.mem.eql(u8, rule, code)) return exclusion.reason,
+                .requirement => {},
+            }
         }
         return null;
     }
@@ -144,7 +184,7 @@ pub const scientific: Profile = .{
     .scopes = &.{ .scientific_text, .reporting },
     .extra_requirements = &.{ "ISO-24495-3:R-METHOD", "ISO-24495-3:R-UNCERTAINTY" },
     .exclusions = &.{.{
-        .requirement_id = "STE100:R-APPROVED-VERB",
+        .subject = .{ .requirement = "STE100:R-APPROVED-VERB" },
         .reason = "Controlled English removes the precision a scientific argument needs. Plain language still applies.",
     }},
 };
@@ -159,7 +199,7 @@ pub const legal: Profile = .{
     .scopes = &.{.legal_text},
     .extra_requirements = &.{"ISO-24495-2:R-OBLIGATION-CLEAR"},
     .exclusions = &.{.{
-        .requirement_id = "PL006",
+        .subject = .{ .language_rule = "PL006" },
         .reason = "Some legal terms are nouns formed from verbs and cannot be replaced without changing their meaning.",
     }},
 };

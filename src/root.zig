@@ -10,7 +10,9 @@ const std = @import("std");
 
 pub const core = struct {
     pub const hash = @import("core/hash.zig");
+    pub const scan = @import("core/scan.zig");
     pub const id = @import("core/id.zig");
+    pub const identity = @import("core/identity.zig");
     pub const time = @import("core/time.zig");
 };
 
@@ -68,6 +70,8 @@ pub const events = struct {
     pub const event = @import("events/event.zig");
     pub const log = @import("events/log.zig");
     pub const graph = @import("events/graph.zig");
+    pub const lineage = @import("events/lineage.zig");
+    pub const format = @import("events/format.zig");
     pub const content_store = @import("events/content_store.zig");
     pub const recovery = @import("events/recovery.zig");
 };
@@ -77,6 +81,7 @@ pub const workspace = struct {
     pub const model = @import("workspace/model.zig");
     pub const workflow = @import("workspace/workflow.zig");
     pub const history = @import("workspace/history.zig");
+    pub const index = @import("workspace/index.zig");
     pub const service = @import("workspace/service.zig");
 };
 
@@ -92,13 +97,16 @@ pub const terminal = struct {
     pub const session = @import("terminal/session.zig");
     pub const tty = @import("terminal/tty.zig");
     pub const interactive = @import("terminal/interactive.zig");
+    pub const settings = @import("terminal/settings.zig");
 };
 
 pub const ai = struct {
     pub const capability = @import("ai/capability.zig");
     pub const policy = @import("ai/policy.zig");
+    pub const policy_file = @import("ai/policy_file.zig");
     pub const approval = @import("ai/approval.zig");
     pub const tools = @import("ai/tools.zig");
+    pub const toolschema = @import("ai/toolschema.zig");
     pub const runtime = @import("ai/runtime.zig");
     pub const risk = @import("ai/risk.zig");
     pub const impact = @import("ai/impact.zig");
@@ -106,6 +114,27 @@ pub const ai = struct {
     pub const transparency = @import("ai/transparency.zig");
     pub const documentation = @import("ai/documentation.zig");
     pub const lifecycle = @import("ai/lifecycle.zig");
+    pub const sandbox = @import("ai/sandbox.zig");
+    pub const executor = @import("ai/executor.zig");
+    pub const provider = @import("ai/provider.zig");
+    pub const catalog = @import("ai/catalog.zig");
+    pub const transport = @import("ai/transport.zig");
+    pub const loop = @import("ai/loop.zig");
+    pub const attention = @import("ai/attention.zig");
+    pub const stream = @import("ai/stream.zig");
+    pub const schedule = @import("ai/schedule.zig");
+    pub const wire = struct {
+        pub const anthropic = @import("ai/wire/anthropic.zig");
+        pub const openai = @import("ai/wire/openai.zig");
+        pub const gemini = @import("ai/wire/gemini.zig");
+        pub const ollama = @import("ai/wire/ollama.zig");
+        pub const huggingface = @import("ai/wire/huggingface.zig");
+    };
+};
+
+pub const security = struct {
+    pub const secrets = @import("security/secrets.zig");
+    pub const netguard = @import("security/netguard.zig");
 };
 
 pub const records = struct {

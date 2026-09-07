@@ -146,11 +146,30 @@ pub const defs_prefix = "#/$defs/";
 /// `ref_prefix` selects where those references point, so the same generator
 /// serves standalone schema files (`#/$defs/`) and OpenAPI components.
 pub fn writeType(comptime T: type, w: *std.Io.Writer, comptime ref_prefix: []const u8) std.Io.Writer.Error!void {
+    return writeTypeMode(T, w, ref_prefix);
+}
+
+/// Write a schema with nothing referenced: every nested type is written where
+/// it is used.
+///
+/// A model provider takes one self-contained schema for each tool. It has no
+/// document to resolve a `$ref` against, so a schema that references anything
+/// arrives with holes in it. This writes the same shape with the references
+/// expanded.
+///
+/// A type that contains itself would expand forever. Nothing in this build does,
+/// and the compiler's branch quota stops a mistake at compile time rather than
+/// at run time.
+pub fn writeInline(comptime T: type, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    return writeTypeMode(T, w, null);
+}
+
+fn writeTypeMode(comptime T: type, w: *std.Io.Writer, comptime ref_prefix: ?[]const u8) std.Io.Writer.Error!void {
     @setEvalBranchQuota(200_000);
     switch (@typeInfo(T)) {
         .optional => |o| {
             try w.writeAll("{\"anyOf\":[");
-            try writeType(o.child, w, ref_prefix);
+            try writeTypeMode(o.child, w, ref_prefix);
             try w.writeAll(",{\"type\":\"null\"}]}");
         },
         .bool => try w.writeAll("{\"type\":\"boolean\"}"),
@@ -249,10 +268,12 @@ pub fn writeType(comptime T: type, w: *std.Io.Writer, comptime ref_prefix: []con
     }
 }
 
-fn writeRef(comptime T: type, w: *std.Io.Writer, comptime ref_prefix: []const u8) std.Io.Writer.Error!void {
+fn writeRef(comptime T: type, w: *std.Io.Writer, comptime ref_prefix: ?[]const u8) std.Io.Writer.Error!void {
+    if (comptime ref_prefix == null) return writeTypeMode(T, w, null);
+    const prefix: []const u8 = comptime ref_prefix.?;
     const U = Unwrapped(T);
     if (isComposite(U) and U == T) {
-        try w.print("{{\"$ref\":\"{s}{s}\"}}", .{ ref_prefix, typeName(U) });
+        try w.print("{{\"$ref\":\"{s}{s}\"}}", .{ prefix, typeName(U) });
         return;
     }
     if (isComposite(U)) {
@@ -287,7 +308,7 @@ fn writeRef(comptime T: type, w: *std.Io.Writer, comptime ref_prefix: []const u8
             else => {},
         }
     }
-    try writeType(T, w, ref_prefix);
+    try writeTypeMode(T, w, ref_prefix);
 }
 
 /// Write a complete schema document for `T`, with every reachable composite

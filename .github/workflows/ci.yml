@@ -68,8 +68,21 @@ jobs:
           ./zig-out/bin/zag knowledge
           ./zig-out/bin/zagd verify
 
-      - name: Write the conformance statement
-        run: ./zig-out/bin/zag evidence
+      - name: Write the conformance statement, and check it matches what is committed
+        run: |
+          ./zig-out/bin/zag evidence
+          # The statement records when it was produced, so that field differs on
+          # every run. Everything else must not: the results, the subjects and
+          # the hashes of the artefacts they are about are what the committed
+          # file is for. Without this check the file could sit in the repository
+          # claiming passes for code that had changed underneath it.
+          strip_time() { sed 's/"created_at":"[^"]*"/"created_at":""/g'; }
+          strip_time < evidence/conformance.jsonl > /tmp/produced.jsonl
+          git show HEAD:evidence/conformance.jsonl | strip_time > /tmp/committed.jsonl
+          if ! diff -u /tmp/committed.jsonl /tmp/produced.jsonl; then
+            echo "The conformance statement has changed. Run './zig-out/bin/zag evidence' and commit the result."
+            exit 1
+          fi
 
       - name: Show the accessibility statement
         run: ./zig-out/bin/zag accessibility
