@@ -205,8 +205,12 @@ editing Zig.
   --stream` reads a model's answer as it arrives, for all five wire formats;
   the desktop renderer and the daemon interface do not exist yet and will need
   the same treatment.
-- Run more than one tool call at a time. A turn that asks for four independent
-  reads runs them one after another.
+- Bound the width of a turn against the machine it runs on. Independent tool
+  calls now run at the same time, grouped into waves of calls that touch nothing
+  in common, and the record comes out identical either way. What is not decided
+  yet is how many units of concurrency a turn should be allowed on a small
+  machine — today it is however many the widest wave holds, up to the
+  calls-per-turn budget.
 - Add macOS pseudoterminal and Windows ConPTY implementations, and the terminal
   settings each one needs, with the same behavioural test suite used on Linux.
 - Define remote replay, reconnect and conflict semantics before allowing more

@@ -120,6 +120,7 @@ pub const ai = struct {
     pub const loop = @import("ai/loop.zig");
     pub const attention = @import("ai/attention.zig");
     pub const stream = @import("ai/stream.zig");
+    pub const schedule = @import("ai/schedule.zig");
     pub const wire = struct {
         pub const anthropic = @import("ai/wire/anthropic.zig");
         pub const openai = @import("ai/wire/openai.zig");
