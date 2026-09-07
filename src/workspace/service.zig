@@ -161,7 +161,12 @@ pub const Options = struct {
     /// Injected, so a replay produces the same log twice.
     now: Timestamp,
     /// Seed for the identifiers the service mints.
-    seed: u64 = 1,
+    ///
+    /// Left unset in a deployment, so the seed is drawn from the operating
+    /// system and two workspaces opened at the same instant do not mint the
+    /// same first identifier. A test sets it, because a replay that produces a
+    /// different log every time proves nothing.
+    seed: ?u64 = null,
     /// When false, the service holds the log in memory only. Tests use this.
     persist: bool = true,
 };
@@ -193,7 +198,12 @@ pub const Service = struct {
     /// Open a workspace: read the log, verify it, fold it, and read the
     /// knowledge base. Never repairs anything.
     pub fn open(arena: std.mem.Allocator, io: std.Io, options: Options) !Opened {
-        var log = log_mod.Log.init(arena, options.seed);
+        const seed: u64 = if (options.seed) |chosen| chosen else blk: {
+            var bytes: [8]u8 = undefined;
+            try io.randomSecure(&bytes);
+            break :blk std.mem.readInt(u64, &bytes, .little);
+        };
+        var log = log_mod.Log.init(arena, seed);
         var created = false;
         var chain_break: ?log_mod.Break = null;
         var torn_bytes: usize = 0;
@@ -207,7 +217,7 @@ pub const Service = struct {
                 persisted_bytes = contents.len;
                 persisted_fingerprint = hashing.Hash.of(contents);
                 if (contents.len > 0) {
-                    const loaded = try log_mod.Log.loadJsonLines(arena, contents, options.seed);
+                    const loaded = try log_mod.Log.loadJsonLines(arena, contents, seed);
                     log = loaded.log;
                     torn_bytes = loaded.torn_bytes;
                     malformed = loaded.malformed;
@@ -248,8 +258,8 @@ pub const Service = struct {
             .log = log,
             .content = content_store_mod.Store.init(arena, options.root),
             .knowledge = knowledge,
-            .policy = policy_mod.Engine.init(arena, policy, options.seed),
-            .ids = idmod.Generator.init(options.seed, @divFloor(options.now.ns, timeutil.ns_per_ms)),
+            .policy = policy_mod.Engine.init(arena, policy, seed),
+            .ids = idmod.Generator.init(seed, @divFloor(options.now.ns, timeutil.ns_per_ms)),
             .persist = options.persist,
             .sealed = chain_break != null or torn_bytes > 0 or malformed != null,
             .persisted_bytes = persisted_bytes,
@@ -1170,4 +1180,58 @@ test "history search runs against a service's own log" {
     const results = try service.search("zig status:succeeded", .{ .now = service.clock });
     try testing.expectEqual(@as(usize, 1), results.matchCount);
     try testing.expectEqualStrings("zig build test", results.hits[0].block.commandText.?);
+}
+
+test "two workspaces opened at the same instant do not mint the same identifiers" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var first_tmp = std.testing.tmpDir(.{});
+    defer first_tmp.cleanup();
+    var second_tmp = std.testing.tmpDir(.{});
+    defer second_tmp.cleanup();
+
+    // The same instant, deliberately: the timestamp half of an identifier is
+    // then identical, so anything that keeps them apart has to come from the
+    // random half. With a fixed default seed, it did not.
+    const at = try Timestamp.parseIso("2026-09-07T10:00:00.000Z");
+
+    var first = (try Service.open(arena, io, .{
+        .root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{first_tmp.sub_path}),
+        .actor = testActor(),
+        .now = at,
+    })).service;
+    var second = (try Service.open(arena, io, .{
+        .root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{second_tmp.sub_path}),
+        .actor = testActor(),
+        .now = at,
+    })).service;
+
+    const a = first.ids.next(idmod.SessionId);
+    const b = second.ids.next(idmod.SessionId);
+    try testing.expect(!a.eql(b));
+
+    // They still agree about when they were minted, which is the half that is
+    // meant to be the same.
+    try testing.expectEqual(a.timestampMillis(), b.timestampMillis());
+
+    // And a test that asks for a seed still gets the same identifiers twice,
+    // because a replay that cannot be repeated proves nothing.
+    var replay_one = (try Service.open(arena, io, .{
+        .root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{first_tmp.sub_path}),
+        .actor = testActor(),
+        .now = at,
+        .seed = 42,
+    })).service;
+    var replay_two = (try Service.open(arena, io, .{
+        .root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{second_tmp.sub_path}),
+        .actor = testActor(),
+        .now = at,
+        .seed = 42,
+    })).service;
+    try testing.expect(replay_one.ids.next(idmod.SessionId).eql(replay_two.ids.next(idmod.SessionId)));
 }
