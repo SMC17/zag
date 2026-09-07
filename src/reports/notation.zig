@@ -11,7 +11,6 @@
 
 const std = @import("std");
 const metrics = @import("metrics.zig");
-const currency_mod = @import("../interop/currency.zig");
 const timeutil = @import("../core/time.zig");
 
 pub const Metric = metrics.Metric;
@@ -53,17 +52,8 @@ pub fn varianceOf(value: Value, metric: Metric) Variance {
     return if (improvement) .better else .worse;
 }
 
-/// Write a number with the metric's precision. Money is written through the
-/// currency rules; everything else takes the metric's decimal places.
+/// Write a number with the metric's precision.
 pub fn writeNumber(w: *std.Io.Writer, metric: Metric, value: f64) !void {
-    if (metric.currency_code) |code| {
-        const currency_code = try currency_mod.CurrencyCode.parse(code);
-        var scale: f64 = 1;
-        for (0..currency_code.minorUnits()) |_| scale *= 10;
-        const money: currency_mod.Money = .{ .minor = @intFromFloat(@round(value * scale)), .currency = currency_code };
-        try w.print("{f}", .{money});
-        return;
-    }
     switch (metric.decimals) {
         0 => try w.print("{d:.0}", .{value}),
         1 => try w.print("{d:.1}", .{value}),
@@ -75,7 +65,7 @@ pub fn writeNumber(w: *std.Io.Writer, metric: Metric, value: f64) !void {
 /// The full presentation of one value: number, unit, variance and confidence.
 pub fn writeValue(w: *std.Io.Writer, metric: Metric, value: Value) !void {
     try writeNumber(w, metric, value.value);
-    if (metric.currency_code == null and !std.mem.eql(u8, metric.unit, "1")) {
+    if (!std.mem.eql(u8, metric.unit, "1")) {
         try w.print(" {s}", .{metric.unit});
     }
 
@@ -210,7 +200,7 @@ pub const BarChart = struct {
 
     pub fn write(self: BarChart, w: *std.Io.Writer) !void {
         try w.print("{s}\n", .{self.title});
-        try w.print("Measured in {s}. ", .{if (self.metric.currency_code) |c| c else self.metric.unit});
+        try w.print("Measured in {s}. ", .{self.metric.unit});
         try w.print("{s}\n\n", .{switch (self.metric.direction) {
             .higher_is_better => "Higher is better.",
             .lower_is_better => "Lower is better.",
@@ -279,30 +269,6 @@ test "a falling number is better when lower is better" {
     var aw: std.Io.Writer.Allocating = .init(arena);
     try writeValue(&aw.writer, metric, value);
     try testing.expectEqualStrings("8.0 ms  +20.0% against the period before", aw.written());
-}
-
-test "money is written through the currency rules" {
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const metric: Metric = .{
-        .id = "cost",
-        .name = "Cost of agent runs",
-        .definition = "What the model provider charged for runs in this workspace.",
-        .kind = .flow,
-        .unit = "1",
-        .direction = .lower_is_better,
-        .source = "provider invoices",
-        .currency_code = "USD",
-    };
-    var aw: std.Io.Writer.Allocating = .init(arena);
-    try writeValue(&aw.writer, metric, .{
-        .metric_id = "cost",
-        .value = 12.5,
-        .period = .{ .start = timeutil.Timestamp.epoch, .end = timeutil.Timestamp.epoch },
-    });
-    try testing.expectEqualStrings("12.50 USD", aw.written());
 }
 
 test "a sampled figure says so, with its sample size" {

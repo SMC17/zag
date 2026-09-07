@@ -19,7 +19,6 @@ pub const core = struct {
 pub const interop = struct {
     pub const toml = @import("interop/toml.zig");
     pub const countries = @import("interop/countries.zig");
-    pub const currency = @import("interop/currency.zig");
     pub const units = @import("interop/units.zig");
     pub const jsonschema = @import("interop/jsonschema.zig");
     pub const openapi = @import("interop/openapi.zig");
@@ -46,7 +45,6 @@ pub const data = struct {
     pub const provenance = @import("data/provenance.zig");
     pub const lifecycle = @import("data/lifecycle.zig");
     pub const quality = @import("data/quality.zig");
-    pub const fair = @import("data/fair.zig");
 };
 
 pub const standards = struct {
@@ -62,8 +60,6 @@ pub const language = struct {
     pub const audience = @import("language/audience.zig");
     pub const readability = @import("language/readability.zig");
     pub const plain = @import("language/plain.zig");
-    pub const controlled = @import("language/controlled.zig");
-    pub const easy_read = @import("language/easy_read.zig");
 };
 
 pub const events = struct {
@@ -144,10 +140,6 @@ pub const records = struct {
 pub const content = struct {
     pub const ir = @import("content/ir.zig");
     pub const markdown = @import("content/markdown.zig");
-    pub const dita = @import("content/dita.zig");
-    pub const docbook = @import("content/docbook.zig");
-    pub const s1000d = @import("content/s1000d.zig");
-    pub const iirds = @import("content/iirds.zig");
 };
 
 pub const accessibility = struct {
