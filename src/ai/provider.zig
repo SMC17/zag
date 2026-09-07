@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const hashing = @import("../core/hash.zig");
+const netguard = @import("../security/netguard.zig");
 
 pub const Role = enum {
     user,
@@ -238,13 +239,46 @@ pub const Endpoint = struct {
     /// Extra headers a deployment needs, such as a cloud resource name.
     extraHeaders: []const HttpRequest.Header = &.{},
 
-    /// The host part of the base address, for the policy engine.
-    pub fn host(self: Endpoint) []const u8 {
+    /// The host and port of the base address, with no scheme and no path.
+    ///
+    /// `api.anthropic.com`, `localhost:11434`, `[::1]:8080`. Kept together
+    /// because the port is part of what a person writes in a rule, and every
+    /// consumer that wants one without the other says so.
+    pub fn authority(self: Endpoint) []const u8 {
         var rest = self.baseUrl;
         if (std.mem.indexOf(u8, rest, "://")) |at| rest = rest[at + 3 ..];
         if (std.mem.indexOfScalar(u8, rest, '/')) |at| rest = rest[0..at];
-        if (std.mem.indexOfScalar(u8, rest, ':')) |at| rest = rest[0..at];
         return rest;
+    }
+
+    /// The host part of the base address, for the policy engine.
+    ///
+    /// Splitting on the first colon was wrong for exactly one shape and it is
+    /// the shape a local model uses: `[::1]:8080` came back as `[` and matched
+    /// no rule anybody could write. The port rules live in one place and this
+    /// calls them.
+    pub fn host(self: Endpoint) []const u8 {
+        return netguard.hostWithoutPort(self.authority());
+    }
+
+    /// The port, or the default for the scheme.
+    pub fn port(self: Endpoint) u16 {
+        const rest = self.authority();
+        const after = if (rest.len > 0 and rest[0] == '[')
+            (if (std.mem.indexOfScalar(u8, rest, ']')) |close| rest[close + 1 ..] else "")
+        else blk: {
+            // A bare IPv6 address is all colons and carries no port.
+            var colons: usize = 0;
+            for (rest) |byte| {
+                if (byte == ':') colons += 1;
+            }
+            if (colons > 1) break :blk "";
+            break :blk if (std.mem.indexOfScalar(u8, rest, ':')) |at| rest[at..] else "";
+        };
+        if (after.len > 1 and after[0] == ':') {
+            if (std.fmt.parseInt(u16, after[1..], 10)) |parsed| return parsed else |_| {}
+        }
+        return if (std.mem.startsWith(u8, self.baseUrl, "http://")) 80 else 443;
     }
 
     /// True when the endpoint is on this machine. A local model still passes

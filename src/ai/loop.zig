@@ -393,7 +393,11 @@ pub const Runner = struct {
                 try turns.append(self.arena, .{ .number = number, .attempt = attempt });
                 ending = switch (err) {
                     error.NeedsApproval => .waiting_for_a_person,
-                    error.NotPermitted, error.CredentialMissing => .stopped_by_policy,
+                    // An address that is not where its name said is a
+                    // refusal by the workspace, not a provider being down. It
+                    // stops the run the same way a policy denial does, because
+                    // that is what it is.
+                    error.NotPermitted, error.CredentialMissing, error.AddressRefused => .stopped_by_policy,
                     error.ProviderRejected, error.SendFailed => .provider_unavailable,
                     error.OutOfMemory => return error.OutOfMemory,
                 };
