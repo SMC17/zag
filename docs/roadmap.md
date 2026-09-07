@@ -110,6 +110,22 @@ open for clients, and it has no socket. `zag check` never loaded the requirement
 register. Every profile naming a requirement was therefore checked against an
 empty set, and eleven dangling identifiers went unnoticed.
 
+The worst of them was in the recording terminal. The shell hooks read a variable
+called `__zag_token` in four places, and every hook left it empty. Each boundary
+mark therefore went out unauthenticated. An authenticated session rejected every
+one, so `zag term` ended up recording no command boundaries.
+
+The environment variable carrying that secret stayed set as well. Every program
+the person ran inherited the token whose job is to stop programs forging
+boundaries. The hooks now move it into a shell variable and unset it, and a test
+fails if a hook stops doing either.
+
+The records ledger called itself append-only and hash-chained while three
+functions edited sealed records in place. A hold, its release and a disposal
+changed fields that lay outside every hash, with no entry to mark them. Somebody
+could lift a hold and destroy a record, leaving nothing behind. The ledger holds immutable
+chained entries now, and a record's state is folded from them.
+
 Deleting and pushing were refused as typed requests and reachable by running
 the program, so the typed refusal was the one that could not run. An agent now
 has to use the typed request, and may not run a shell at all.
