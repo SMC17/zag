@@ -78,6 +78,14 @@ pub const Session = struct {
     capture_osc_start: ?usize = null,
     content_store: ?*content_store_mod.Store,
     redactor: ?secrets.Redactor,
+    /// Where the session was opened.
+    ///
+    /// The fallback for a block's working directory. The tracker only knows one
+    /// when the shell reports it, and a shell that does not leaves the field
+    /// empty — so `zag why` printed "Ran: zig build test (in )", which reads
+    /// like the directory is unknown when it is simply the one the session
+    /// started in.
+    working_directory: []const u8,
 
     pub fn init(
         arena: std.mem.Allocator,
@@ -101,6 +109,7 @@ pub const Session = struct {
             .ids = idmod.Generator.init(@bitCast(clock.ns), @divFloor(clock.ns, timeutil.ns_per_ms)),
             .clock = clock,
             .session_event = undefined,
+            .working_directory = options.working_directory,
         };
         const opened = try log.append(.{ .session_opened = .{
             .session = id,
@@ -222,7 +231,7 @@ pub const Session = struct {
                     .block = block,
                     .session = self.id,
                     .commandText = try self.arena.dupe(u8, clean.text),
-                    .workingDirectory = self.tracker.working_directory orelse "",
+                    .workingDirectory = self.tracker.working_directory orelse self.working_directory,
                     .boundaryFromShell = true,
                     .redactions = clean.findings.len,
                 } }, .{

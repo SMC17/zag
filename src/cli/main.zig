@@ -24,6 +24,7 @@ const Command = enum {
     shell_hook,
     workflow,
     history,
+    show,
     knowledge,
     term,
     providers,
@@ -48,6 +49,7 @@ const Command = enum {
             .{ .name = "shell-hook", .command = .shell_hook },
             .{ .name = "workflow", .command = .workflow },
             .{ .name = "history", .command = .history },
+            .{ .name = "show", .command = .show },
             .{ .name = "knowledge", .command = .knowledge },
             .{ .name = "term", .command = .term },
             .{ .name = "providers", .command = .providers },
@@ -79,6 +81,7 @@ pub const help_text =
     \\  shell-hook <shell>  Print the shell integration for bash, zsh, fish or pwsh.
     \\  workflow            Show this repository's own workflow as a task graph.
     \\  history <query>     Search recorded work. For example: status:failed zig
+    \\  show <query>        Show what a recorded command printed.
     \\  knowledge           Show the knowledge under .workspace/, and what is overdue.
     \\  term                Open a shell in a terminal that records what you do.
     \\  providers           List the model connectors and say which credentials are set.
@@ -290,6 +293,7 @@ fn run(
         .shell_hook => try shellHook(w, options),
         .workflow => try workflowReport(arena, w, options),
         .history => try historySearch(arena, io, w, options),
+        .show => try showOutput(arena, io, w, options),
         .knowledge => try knowledgeIndex(arena, io, w, options),
         .term => try interactiveTerminal(arena, io, w, options, environment),
         .providers => try listProviders(arena, io, w, options, environment),
@@ -564,6 +568,94 @@ fn historySearch(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, option
         .limit = 20,
     });
     try results.writeList(w);
+    return if (incomplete) 1 else 0;
+}
+
+/// Show what a recorded command printed.
+///
+/// The output of every command is stored, verified and addressed by hash, and
+/// until now nothing could read it back. A workspace that records what happened
+/// and cannot show it to you has kept the evidence and lost the point: the
+/// question a person actually asks is "what did it say when it broke", and the
+/// answer was on disk with no way to reach it.
+///
+/// It takes the same query language as `zag history`, and shows the newest
+/// match, because "show me the last failure" is the question.
+fn showOutput(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+) !u8 {
+    const query_text = try std.mem.join(arena, " ", options.positional);
+    const parsed = try zag.workspace.history.parse(arena, query_text);
+    for (parsed.problems) |problem| {
+        try problem.writeSentence(w);
+        try w.writeAll("\n");
+    }
+    if (!parsed.ok()) return 2;
+
+    const opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.root,
+        .actor = workbenchActor(),
+        .now = wallClock(io),
+    }) catch {
+        try w.print("zag could not open the workspace in {s}.\n", .{options.root});
+        return 1;
+    };
+    const incomplete = !opened.report.logIsHealthy();
+    if (incomplete) {
+        try w.writeAll("The log is incomplete or damaged, so this covers only its verified prefix.\n\n");
+    }
+
+    const index = try opened.service.blocks();
+    const results = try zag.workspace.history.run(arena, index, parsed.query, .{
+        .now = wallClock(io),
+        .limit = 1,
+    });
+    if (results.hits.len == 0) {
+        try results.writeSummary(w);
+        return 1;
+    }
+
+    const block = results.hits[0].block;
+    try w.print("{s}\n", .{block.commandText orelse "(no command recorded)"});
+    if (block.exitStatus) |status| {
+        try w.print("{s}, status {d}", .{ block.status.text(), status });
+    } else {
+        try w.print("{s}", .{block.status.text()});
+    }
+    if (block.duration()) |took| {
+        try w.writeAll(", took ");
+        try zag.reports.notation.writeDuration(w, took);
+    }
+    try w.writeAll("\n\n");
+
+    if (block.content == .none) {
+        try w.writeAll("It printed nothing.\n");
+        return if (incomplete) 1 else 0;
+    }
+
+    // Reassembled in the order the pieces were produced. A block whose output
+    // arrived in three chunks is three objects, and showing only one of them
+    // would be the same class of mistake the chunked variant exists to prevent.
+    var single: [1]zag.workspace.block.Chunk = undefined;
+    const pieces = block.content.pieces(&single);
+    var shown: usize = 0;
+    for (pieces) |piece| {
+        const bytes = opened.service.content.read(io, piece.hash, 64 << 20) catch {
+            try w.print("\n[a piece of this output is missing from the store: {f}]\n", .{piece.hash});
+            continue;
+        };
+        try w.writeAll(bytes);
+        shown += bytes.len;
+    }
+    if (shown != block.content.totalBytes()) {
+        try w.print(
+            "\n[{d} bytes shown of {d} recorded]\n",
+            .{ shown, block.content.totalBytes() },
+        );
+    }
     return if (incomplete) 1 else 0;
 }
 
@@ -931,6 +1023,7 @@ fn askAModel(
         .root = options.root,
         .actor = try personActor(arena, environment),
         .now = wallClock(io),
+        .environment = environment,
     }) catch {
         try w.print("zag could not open the workspace in {s}, so this run would not be recorded.\n", .{options.root});
         return 1;
@@ -976,6 +1069,14 @@ fn askAModel(
     const executor: zag.ai.executor.Runner = .init(arena, .{
         .root = options.root,
         .io = io,
+        // What a model-issued command may see of this is decided per request by
+        // its environment policy, which by default hands over enough to run a
+        // build and nothing that carries a credential.
+        .environment = environment,
+        // Without a store, every write_file is refused with "this build cannot
+        // perform that kind of request" — which reads like the tool does not
+        // exist rather than like the tool has nowhere to put anything.
+        .content = &service.content,
     });
     // Printing straight to the writer as the answer arrives. The writer is
     // flushed on each piece, because a buffered stream shown at the end is a
@@ -1370,6 +1471,7 @@ fn interactiveTerminal(
         .root = options.root,
         .actor = try personActor(arena, environment),
         .now = wallClock(io),
+        .environment = environment,
     }) catch {
         try w.print("zag could not open the workspace in {s}.\n", .{options.root});
         return 1;
@@ -1535,6 +1637,7 @@ fn runCommand(
         .root = options.root,
         .actor = try personActor(arena, environment),
         .now = wallClock(io),
+        .environment = environment,
     }) catch {
         try w.print("zag could not open the workspace in {s}.\n", .{options.root});
         return 1;
@@ -2207,4 +2310,62 @@ test "doctor points at a broken policy file before anything else" {
     var out: std.Io.Writer.Allocating = .init(arena);
     try writeNextStep(arena, &out.writer, loaded, false, &.{"ANTHROPIC_API_KEY=sk-ant-whatever"});
     try testing.expect(std.mem.indexOf(u8, out.written(), "cannot be used") != null);
+}
+
+test "what a command printed can be read back out of the record" {
+    if (!zag.terminal.pty.supported) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const root = ".zig-cache/tmp/show-output-test";
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, root);
+
+    // Record something with output worth reading back.
+    {
+        var out: std.Io.Writer.Allocating = .init(arena);
+        const status = try runCommand(arena, io, &out.writer, .{ .root = root }, &.{
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        });
+        _ = status;
+    }
+
+    var out: std.Io.Writer.Allocating = .init(arena);
+    const status = try showOutput(arena, io, &out.writer, .{ .root = root, .positional = &.{"nothing-was-recorded"} });
+    // Nothing matched, and that is said rather than shown as an empty screen.
+    try testing.expectEqual(@as(u8, 1), status);
+}
+
+test "showing output reassembles every piece, not just the last one" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The `chunked` variant exists because a fold once kept the last piece's
+    // hash beside the summed byte count. A reader that showed one piece and
+    // called it the output would be the same mistake from the other end, so
+    // the reassembly walks `pieces()` and the count is checked against the
+    // total the record claims.
+    const first = zag.core.hash.Hash.of("first half, ");
+    const second = zag.core.hash.Hash.of("second half");
+    const content: zag.workspace.block.ContentRef = .{ .chunked = .{
+        .chunks = &.{
+            .{ .hash = first, .byteCount = 12, .index = 0 },
+            .{ .hash = second, .byteCount = 11, .index = 1 },
+        },
+        .byteCount = 23,
+    } };
+
+    var single: [1]zag.workspace.block.Chunk = undefined;
+    const pieces = content.pieces(&single);
+    try testing.expectEqual(@as(usize, 2), pieces.len);
+    var summed: usize = 0;
+    for (pieces) |piece| summed += piece.byteCount;
+    try testing.expectEqual(content.totalBytes(), summed);
+    _ = arena;
 }

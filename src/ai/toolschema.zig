@@ -32,6 +32,7 @@
 
 const std = @import("std");
 const tools = @import("tools.zig");
+const executor = @import("executor.zig");
 const provider = @import("provider.zig");
 const jsonschema = @import("../interop/jsonschema.zig");
 const hashing = @import("../core/hash.zig");
@@ -55,7 +56,7 @@ pub fn refusalText(err: Error) []const u8 {
     return switch (err) {
         error.UnknownTool => "The model asked for a tool this build does not have.",
         error.MalformedArguments => "The model's tool call was not readable, so nothing ran.",
-        error.ArgumentsDoNotFit => "The model's tool call was missing something it needs, so nothing ran.",
+        error.ArgumentsDoNotFit => "The model's tool call left out something the tool needs, or gave it the wrong type. The tool's own description says which fields it takes.",
         error.NotOfferedToModels => "That tool is for a person to use, not a model.",
         error.OutOfMemory => "There was not enough memory to read the tool call.",
     };
@@ -83,7 +84,7 @@ pub const offers = [_]Offer{
     .{
         .name = "write_file",
         .kind = .write_file,
-        .description = "Write bytes that are already in the content store to a file in the workspace. Give the hash of the content, not the content: the bytes that land are the bytes that were reviewed.",
+        .description = "Write a file in the workspace. Put the text in \"contents\". The path is relative to the workspace, and a path that leaves it is refused.",
     },
     .{
         .name = "run_command",
@@ -191,25 +192,35 @@ pub fn parse(
             .path = try requiredString(object, "path"),
             .maxBytes = optionalUsize(object, "maxBytes") orelse 1 << 20,
         } },
-        .write_file => return .{ .write_file = .{
-            .path = try requiredString(object, "path"),
-            .contentHash = hashing.Hash.parse(try requiredString(object, "contentHash")) catch {
-                return error.ArgumentsDoNotFit;
-            },
-            .byteCount = optionalUsize(object, "byteCount") orelse 0,
-            .createIfMissing = optionalBool(object, "createIfMissing") orelse true,
-        } },
+        .write_file => {
+            // Either the bytes, or the address of bytes already stored. A
+            // model can produce the first and cannot compute the second, so
+            // requiring the hash made the tool impossible to call.
+            const contents = optionalString(object, "contents") orelse "";
+            const hash_text = optionalString(object, "contentHash") orelse "";
+            if (contents.len == 0 and hash_text.len == 0) return error.ArgumentsDoNotFit;
+            return .{ .write_file = .{
+                .path = try requiredString(object, "path"),
+                .contents = contents,
+                .contentHash = if (hash_text.len > 0)
+                    hashing.Hash.parse(hash_text) catch return error.ArgumentsDoNotFit
+                else
+                    hashing.Hash.zero,
+                .byteCount = optionalUsize(object, "byteCount") orelse contents.len,
+                .createIfMissing = optionalBool(object, "createIfMissing") orelse true,
+            } };
+        },
         .execute => {
             const argv = try stringArray(arena, object, "argv");
             if (argv.len == 0) return error.ArgumentsDoNotFit;
             return .{ .execute = .{
                 .argv = argv,
-                .workingDirectory = try requiredString(object, "workingDirectory"),
-                .environmentPolicy = optionalEnum(tools.EnvironmentPolicy, object, "environmentPolicy") orelse .none,
+                .workingDirectory = optionalString(object, "workingDirectory") orelse ".",
+                .environmentPolicy = optionalEnum(tools.EnvironmentPolicy, object, "environmentPolicy") orelse default_execute.environmentPolicy,
                 .environment = stringArray(arena, object, "environment") catch &.{},
-                .network = optionalEnum(tools.NetworkPolicy, object, "network") orelse .none,
+                .network = optionalEnum(tools.NetworkPolicy, object, "network") orelse default_execute.network,
                 .timeout = .{ .ns = @as(i64, @intCast(optionalUsize(object, "timeoutSeconds") orelse 120)) * timeutil.ns_per_s },
-                .approval = optionalEnum(tools.ApprovalPolicy, object, "approval") orelse .policy_only,
+                .approval = optionalEnum(tools.ApprovalPolicy, object, "approval") orelse default_execute.approval,
             } };
         },
         .delete => return .{ .delete = .{
@@ -218,14 +229,14 @@ pub fn parse(
         } },
         .search => return .{ .search = .{
             .query = try requiredString(object, "query"),
-            .root = try requiredString(object, "root"),
+            .root = optionalString(object, "root") orelse ".",
             .maxResults = optionalUsize(object, "maxResults") orelse 100,
             .includeHistory = optionalBool(object, "includeHistory") orelse false,
         } },
         .git => return .{ .git = .{
             .operation = optionalEnum(tools.GitOperation, object, "operation") orelse
                 return error.ArgumentsDoNotFit,
-            .repository = try requiredString(object, "repository"),
+            .repository = optionalString(object, "repository") orelse ".",
             .argument = optionalString(object, "argument") orelse "",
         } },
         .mcp => return .{ .mcp = .{
@@ -319,6 +330,30 @@ fn rawField(
 /// model can act on: "you may not" and "it did not work" lead to different next
 /// moves, and a model that cannot tell them apart will retry the one it should
 /// not.
+/// The most of one tool's output that is handed back to a model.
+///
+/// A cap is needed because a single `zig build` can produce megabytes and the
+/// model has a context to fit it in. The end is kept rather than the start: a
+/// compiler prints its errors after its progress, a test runner prints the
+/// failures after the passes, and the last thing a crashing program writes is
+/// why it crashed. Truncation says so in words, so a model reading a partial
+/// output knows it is partial and does not conclude the file was short.
+pub const result_content_limit: usize = 24 * 1024;
+
+/// What a model is told about one tool call.
+///
+/// The outcome, the summary sentence, and then what the tool actually
+/// produced. The last part is the one that matters: without it a model that
+/// asked to read a file learns its size, and an agent told to fix a failing
+/// test learns only that something exited non-zero.
+/// The defaults a run request takes when the model does not name them.
+///
+/// Read from the type rather than restated, because restating them here is
+/// exactly how the type's default and the wire's default came to disagree: the
+/// type said `.allowlist` and the decoder said `.none`, so every command a
+/// model asked for ran with no environment whatever the type claimed.
+const default_execute: tools.ExecuteRequest = .{ .argv = &.{} };
+
 pub fn resultText(
     arena: std.mem.Allocator,
     result: tools.ToolResult,
@@ -330,8 +365,22 @@ pub fn resultText(
         .cancelled => "This was stopped before it finished",
         .timed_out => "This ran out of time and was stopped",
     };
-    if (result.summary.len == 0) return lead;
-    return std.fmt.allocPrint(arena, "{s}. {s}", .{ lead, result.summary });
+
+    const head = if (result.summary.len > 0)
+        try std.fmt.allocPrint(arena, "{s}. {s}", .{ lead, result.summary })
+    else
+        lead;
+    if (result.content.len == 0) return head;
+
+    if (result.content.len > result_content_limit) {
+        const kept = result.content[result.content.len - result_content_limit ..];
+        return std.fmt.allocPrint(
+            arena,
+            "{s}\n\nThe last {d} bytes of {d}, because the whole of it does not fit:\n{s}",
+            .{ head, kept.len, result.content.len, kept },
+        );
+    }
+    return std.fmt.allocPrint(arena, "{s}\n\n{s}", .{ head, result.content });
 }
 
 const testing = std.testing;
@@ -456,8 +505,18 @@ test "an unknown enum value falls to the safe default rather than being obeyed" 
     const request = try parse(arena, "run_command",
         \\{"argv":["curl"],"workingDirectory":"/tmp","network":"everything","environmentPolicy":"give_me_it_all"}
     );
+    // A name this build does not know is never obeyed. Both fall back to the
+    // type's own default, which is the one place either is written down.
+    try testing.expectEqual(default_execute.network, request.execute.network);
+    try testing.expectEqual(default_execute.environmentPolicy, request.execute.environmentPolicy);
+
+    // And the one that matters for safety is still the closed one: a model
+    // cannot talk its way onto the network by naming a policy that sounds
+    // permissive.
     try testing.expectEqual(tools.NetworkPolicy.none, request.execute.network);
-    try testing.expectEqual(tools.EnvironmentPolicy.none, request.execute.environmentPolicy);
+    // The environment default is open enough to run a build and closed to
+    // credentials, which is a different question from the network one.
+    try testing.expectEqual(tools.EnvironmentPolicy.allowlist, request.execute.environmentPolicy);
 }
 
 test "another server's arguments pass through as text, in either shape" {
@@ -492,4 +551,107 @@ test "a refusal tells the model which kind of no it was" {
 
     const done = try resultText(arena, .{ .outcome = .completed, .summary = "Read 12 bytes from a.txt." });
     try testing.expect(std.mem.startsWith(u8, done, "Done."));
+}
+
+test "a model can call every tool without knowing anything it cannot know" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Each of these was a required field, and each named something a model is
+    // never told: the workspace's absolute path, or the hash of bytes it has
+    // not stored yet. A tool that cannot be called is not a tool, and the
+    // symptom was a refusal that blamed the model for leaving something out.
+    const minimal = [_]struct { tool: []const u8, arguments: []const u8 }{
+        .{ .tool = "read_file", .arguments =
+        \\{"path":"README.md"}
+        },
+        .{ .tool = "write_file", .arguments =
+        \\{"path":"src/main.zig","contents":"hello"}
+        },
+        .{ .tool = "run_command", .arguments =
+        \\{"argv":["zig","build"]}
+        },
+        .{ .tool = "search", .arguments =
+        \\{"query":"countLines"}
+        },
+        .{ .tool = "git", .arguments =
+        \\{"operation":"status"}
+        },
+    };
+    for (minimal) |case| {
+        _ = parse(arena, case.tool, case.arguments) catch |err| {
+            std.debug.print("{s} could not be called with {s}: {s}\n", .{ case.tool, case.arguments, @errorName(err) });
+            return err;
+        };
+    }
+}
+
+test "a run request inherits enough to find a program, and no credential" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The decoder used to hardcode `.none` here while the type said
+    // `.allowlist`, so every command a model asked for ran with an empty
+    // environment and came back as status 127 with no output — which reads
+    // exactly like a build failure and is not one.
+    const request = try parse(arena, "run_command",
+        \\{"argv":["zig","build","test"]}
+    );
+    try testing.expectEqual(tools.EnvironmentPolicy.allowlist, request.execute.environmentPolicy);
+    try testing.expectEqualStrings(".", request.execute.workingDirectory);
+
+    // The allowlist is the security claim, so it is asserted rather than
+    // described: what a build needs is there, and what pays for the model is not.
+    const list = executor.default_environment_allowlist;
+    var has_path = false;
+    var has_home = false;
+    for (list) |name| {
+        if (std.mem.eql(u8, name, "PATH")) has_path = true;
+        if (std.mem.eql(u8, name, "HOME")) has_home = true;
+        try testing.expect(std.mem.indexOf(u8, name, "API_KEY") == null);
+        try testing.expect(std.mem.indexOf(u8, name, "TOKEN") == null);
+        try testing.expect(std.mem.indexOf(u8, name, "SECRET") == null);
+        try testing.expect(std.mem.indexOf(u8, name, "PASSWORD") == null);
+    }
+    try testing.expect(has_path);
+    try testing.expect(has_home);
+}
+
+test "what a tool produced reaches the model, not just how big it was" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The whole reason an agent can do anything. Before this a model that read
+    // a file was told its size, and one that ran a failing build was told it
+    // exited non-zero, so it could act and never learn.
+    const text = try resultText(arena, .{
+        .outcome = .failed,
+        .summary = "zig finished with status 1.",
+        .content = "src/main.zig:4:35: error: expected ';' after statement",
+    });
+    try testing.expect(std.mem.indexOf(u8, text, "status 1") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "expected ';' after statement") != null);
+}
+
+test "a huge output is cut at the end, and says that it was" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The end is what matters: a compiler prints errors after progress, a test
+    // runner prints failures after passes, and the last thing a crashing
+    // program writes is why it crashed.
+    const big = try arena.alloc(u8, result_content_limit * 2);
+    @memset(big, 'x');
+    @memcpy(big[big.len - 12 ..], "THE REAL END");
+
+    const text = try resultText(arena, .{ .outcome = .completed, .content = big });
+    try testing.expect(std.mem.endsWith(u8, text, "THE REAL END"));
+    try testing.expect(text.len < big.len);
+    // Said in words, so a model reading a partial output does not conclude the
+    // file was short.
+    try testing.expect(std.mem.indexOf(u8, text, "does not fit") != null);
 }
