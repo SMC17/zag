@@ -45,6 +45,8 @@ against that actor.
 | T7 | A child floods output or never exits | Captured output is bounded; deadlines use monotonic time and terminate the process group, escalating to `KILL` | Add operating-system CPU, memory, process-count and disk quotas |
 | T8 | Terminal output discloses a secret | New event and object files use owner-only permissions where POSIX permissions exist | Add detection and redaction before output enters model context or diagnostic bundles |
 | T12 | An agent spends a credential on a provider nobody chose | Asking a model needs three separate decisions — `model.infer` on the connector, `network.connect` on the host, `credentials.use` on the variable — all taken before the request is encoded. The credential is read only after its own decision allows it, is written into a header by the connector, and never enters a decision, a log, an error or a summary. A redirect is never followed, so a credential cannot be carried to a host the policy did not decide | Enforce the host at the socket, including name resolution and address changes; a host that resolves to an unexpected address is not yet caught |
+| T12a | A model asks for a tool that would widen its own reach | A model's tool call becomes a typed request or nothing: an unknown name, arguments that do not fit the type, or an unknown enum value are all refused before any policy is consulted. The capability is taken from the request kind, never from the arguments, so a model that writes a capability into its own call is writing a field that does not exist. `infer` and `spawn_agent` are not offered at all, and a test asserts their absence rather than leaving it to whoever edits the list | Offer a way for a person to widen the offered set deliberately, with the widening recorded |
+| T12b | An agent loop runs away, or repeats a refused call for ever | Four bounds, each reported separately: turns, tokens, a monotonic wall clock, and a repetition count over a fingerprint of the request's kind and resource. The fingerprint deliberately ignores fields nobody decides on, so varying a byte limit cannot defeat it | Bound the total work an agent may cause across runs, not only within one |
 | T13 | A workspace policy file is written to widen permission | The file is never shown to a model and never consulted by one. Its fallback is not read from the file: an unparsable file allows nothing, and nothing more permissive is substituted. An unknown capability name refuses the whole file rather than dropping the rule, so a denial cannot be narrowed by a typo | Add a recorded event when the policy file changes, so a widening is visible in the log rather than only in the file |
 | T9 | A terminal sequence corrupts memory or parser state | Fixed parser bounds, UTF-8 replacement, screen bounds and regression tests | Add coverage-guided fuzzing and differential tests against a mature terminal parser |
 | T10 | A build input is replaced upstream | No package dependencies; CI pins the checkout action and verifies the Zig archive digest | Add signed release provenance, artifact signing and an independently verified toolchain policy |
@@ -72,6 +74,11 @@ The following properties must remain release-gate tests:
 - A command runs from its argument vector, with no shell interpreting it.
 - A model request that the policy refuses is never encoded and never sent, and
   its credential is never read.
+- A model's tool call becomes a typed request or nothing, and its capability
+  comes from the request kind rather than from anything the model wrote.
+- An agent run stops on every one of its four bounds, and says which.
+- A command line rebuilt from an argument vector runs the same command the
+  vector named.
 - A policy file that does not parse allows nothing, and no other policy is put
   in its place.
 
@@ -84,6 +91,9 @@ Review this model before merging a change that:
 - implements file write, delete, git push or remote execution;
 - sends workspace content to a model provider;
 - adds a connector, a wire format or a credential variable;
+- adds a tool to the set a model is offered, or changes how a tool call is
+  parsed into a typed request;
+- joins an argument vector back into a command line;
 - changes how the workspace policy file is read, or what its fallback is;
 - changes event encoding, recovery, retention or migration;
 - describes an event record as proof, authentic or tamper-proof.

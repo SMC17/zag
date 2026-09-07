@@ -10,6 +10,7 @@ const std = @import("std");
 
 pub const core = struct {
     pub const hash = @import("core/hash.zig");
+    pub const scan = @import("core/scan.zig");
     pub const id = @import("core/id.zig");
     pub const time = @import("core/time.zig");
 };
@@ -68,6 +69,7 @@ pub const events = struct {
     pub const event = @import("events/event.zig");
     pub const log = @import("events/log.zig");
     pub const graph = @import("events/graph.zig");
+    pub const lineage = @import("events/lineage.zig");
     pub const content_store = @import("events/content_store.zig");
     pub const recovery = @import("events/recovery.zig");
 };
@@ -100,6 +102,7 @@ pub const ai = struct {
     pub const policy_file = @import("ai/policy_file.zig");
     pub const approval = @import("ai/approval.zig");
     pub const tools = @import("ai/tools.zig");
+    pub const toolschema = @import("ai/toolschema.zig");
     pub const runtime = @import("ai/runtime.zig");
     pub const risk = @import("ai/risk.zig");
     pub const impact = @import("ai/impact.zig");
@@ -112,6 +115,8 @@ pub const ai = struct {
     pub const provider = @import("ai/provider.zig");
     pub const catalog = @import("ai/catalog.zig");
     pub const transport = @import("ai/transport.zig");
+    pub const loop = @import("ai/loop.zig");
+    pub const attention = @import("ai/attention.zig");
     pub const wire = struct {
         pub const anthropic = @import("ai/wire/anthropic.zig");
         pub const openai = @import("ai/wire/openai.zig");

@@ -57,6 +57,10 @@ pub const Summary = struct {
 pub const Graph = struct {
     arena: std.mem.Allocator,
     nodes: []Node,
+    /// Where each event identifier sits. Kept so that looking one up is a hash
+    /// rather than a walk: a report that resolves a hundred identifiers over a
+    /// hundred thousand events should not cost ten million comparisons.
+    index_of: std.AutoArrayHashMapUnmanaged([16]u8, usize) = .empty,
 
     pub fn build(arena: std.mem.Allocator, log: log_mod.Log) !Graph {
         const entries = log.entries.items;
@@ -78,22 +82,37 @@ pub const Graph = struct {
         }
         for (child_lists, 0..) |list, i| nodes[i].children = list.items;
 
-        // Depth, computed by walking up. Cycles are impossible because a cause
-        // always precedes its effect in the log.
+        // Depth, in one pass.
+        //
+        // A cause is appended before its effect, so a parent always sits at a
+        // lower index than its child and its depth is already final by the time
+        // the child is reached. Walking up from each node instead would cost
+        // the depth of the tree for every node, which on one long agent run —
+        // the exact case this exists for — is the square of its length.
         for (nodes, 0..) |*node, i| {
-            var depth: usize = 0;
-            var current = node.parent;
-            var guard: usize = 0;
-            while (current) |p| : (guard += 1) {
-                if (guard > entries.len) break;
-                depth += 1;
-                current = nodes[p].parent;
-            }
-            node.depth = depth;
-            _ = i;
+            const parent = node.parent orelse {
+                node.depth = 0;
+                continue;
+            };
+            node.depth = if (parent < i) nodes[parent].depth + 1 else 0;
         }
 
-        return .{ .arena = arena, .nodes = nodes };
+        return .{ .arena = arena, .nodes = nodes, .index_of = index_of };
+    }
+
+    /// True when every cause sits before its effect.
+    ///
+    /// This is the property the whole file rests on: it makes log order a
+    /// topological order, so nothing here has to sort, and it makes the depth
+    /// pass above correct. It holds because an event cannot be caused by one
+    /// that has not happened. It is checked rather than assumed, because a
+    /// merged or repaired log is exactly where it would stop holding.
+    pub fn causesPrecedeEffects(self: Graph) bool {
+        for (self.nodes, 0..) |node, i| {
+            const parent = node.parent orelse continue;
+            if (parent >= i) return false;
+        }
+        return true;
     }
 
     pub fn roots(self: Graph) !std.ArrayList(usize) {
@@ -105,10 +124,40 @@ pub const Graph = struct {
     }
 
     pub fn indexOf(self: Graph, id: EventId) ?usize {
-        for (self.nodes, 0..) |node, i| {
-            if (node.envelope.id.eql(id)) return i;
+        return self.index_of.get(id.raw.bytes);
+    }
+
+    /// The chain of causes above one event, from the root down to it.
+    ///
+    /// This is the answer to "why did this happen": each step is the event that
+    /// caused the next. It reads forwards, because that is the order a person
+    /// asking the question wants to read it in.
+    pub fn ancestry(self: Graph, index: usize) !std.ArrayList(usize) {
+        var upwards: std.ArrayList(usize) = .empty;
+        var current: ?usize = index;
+        var guard: usize = 0;
+        while (current) |i| : (guard += 1) {
+            if (guard > self.nodes.len) break;
+            try upwards.append(self.arena, i);
+            current = self.nodes[i].parent;
         }
-        return null;
+        std.mem.reverse(usize, upwards.items);
+        return upwards;
+    }
+
+    /// True when `cause` is somewhere above `effect`.
+    ///
+    /// Costs the depth of the tree, not a search of it, because there is only
+    /// ever one way up.
+    pub fn causedBy(self: Graph, effect: usize, cause: usize) bool {
+        var current = self.nodes[effect].parent;
+        var guard: usize = 0;
+        while (current) |i| : (guard += 1) {
+            if (guard > self.nodes.len) return false;
+            if (i == cause) return true;
+            current = self.nodes[i].parent;
+        }
+        return false;
     }
 
     /// Every event caused by this one, directly or indirectly.
