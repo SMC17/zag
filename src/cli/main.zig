@@ -110,6 +110,8 @@ pub const help_text =
     \\  --compact-at <n>    Make room in the conversation once it passes n bytes.
     \\  --resume            Carry on the last run in this workspace.
     \\  --explore           Let "zag route" consider connectors never used here.
+    \\  --children          Let a run hand parts of the work to child agents.
+    \\  --depth <n>         How many levels of agents a run may have. Default 2.
     \\  --raw               Start the shell with no added prompt marks.
     \\  --stream            Print a model's answer as it arrives, not when it finishes.
     \\  --init              Write a starter policy file. Used with "zag policy".
@@ -140,6 +142,15 @@ const Options = struct {
     /// Put every connector this build knows into the routing draw, including
     /// ones that may not be installed.
     explore: bool = false,
+    /// Offer `spawn_agent`, so a run may hand self-contained work to children.
+    ///
+    /// Off by default, and deliberately: the bounds in `ai/swarm.zig` make
+    /// spawning safe to offer, not right to offer. A run that fans work out
+    /// spends more and produces a record with a tree in it, and that is worth
+    /// asking for rather than getting by surprise.
+    children: bool = false,
+    /// Levels of agents a run may have, counting itself. Empty means two.
+    depth: []const u8 = "",
     provider: []const u8 = "",
     model: []const u8 = "",
     turns: []const u8 = "",
@@ -189,6 +200,10 @@ fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
             options.explore = true;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--children")) {
+            options.children = true;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--raw")) {
             options.raw = true;
             continue;
@@ -207,6 +222,7 @@ fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
             .{ .flag = "--provider", .field = &options.provider },
             .{ .flag = "--model", .field = &options.model },
             .{ .flag = "--turns", .field = &options.turns },
+            .{ .flag = "--depth", .field = &options.depth },
             .{ .flag = "--compact-at", .field = &options.compact_at },
         };
         var matched = false;
@@ -1387,12 +1403,37 @@ fn askAModel(
         earlier = rebuilt.messages;
     }
 
+    const model = if (options.model.len > 0) options.model else defaultModel(connector);
+
+    // Handing self-contained work to children, when it was asked for. The
+    // children run on this same runner and this same policy engine, so nothing
+    // a child decides is anything this run could not have decided; what they
+    // have of their own is a context, which is the entire point. See
+    // ai/swarm.zig for the bounds and why they are what they are.
+    var children: zag.ai.loop.Children = .{
+        .runner = &runner,
+        .connector = connector,
+        .model = model,
+        .acting = context,
+        .budget = budget,
+    };
+    if (options.depth.len > 0) {
+        children.bounds.maxDepth = std.fmt.parseInt(usize, options.depth, 10) catch {
+            try w.print("\"{s}\" is not a number of levels.\n", .{options.depth});
+            return 2;
+        };
+    }
+
     const transcript = try runner.run(.{
         .connector = connector,
-        .model = if (options.model.len > 0) options.model else defaultModel(connector),
+        .model = model,
         .system = agent_instructions,
         .budget = budget,
         .resuming = earlier,
+        .spawning = if (options.children)
+            .{ .spawner = children.spawner(), .bounds = children.bounds }
+        else
+            null,
     }, question.items, context);
 
     // The record is committed before anything is printed, so what a person

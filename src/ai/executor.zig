@@ -252,14 +252,18 @@ pub const Runner = struct {
             },
             .search => |q| self.search(q),
             .git => |g| self.git(g),
-            // The remaining request kinds have no executor in this build. They
-            // are named rather than silently treated as failures, because
-            // "not built" and "did not work" are different things. None of
-            // them is offered to a model, so a model cannot spend a turn
-            // discovering it.
             .delete => |d| self.delete(d),
-            // No MCP client in this build, and `call_mcp_tool` is no longer
-            // offered to models, so nothing can reach this from a model.
+            // The remaining request kinds have no executor here, and are named
+            // rather than silently treated as failures, because "not built"
+            // and "did not work" are different things.
+            //
+            // No MCP client in this build, and `call_mcp_tool` is not offered
+            // to models, so nothing can reach that from a model. `spawn_agent`
+            // is offered, but it never arrives here: starting an agent is not
+            // work against a filesystem or a process table, and the loop sends
+            // it to the spawner its caller supplied. Reaching this line means
+            // a typed request was handed straight to the executor by something
+            // other than the loop.
             .mcp, .spawn_agent, .infer => error.NoExecutor,
         };
     }

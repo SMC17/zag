@@ -25,10 +25,21 @@
 //! escalation: text can make a model *ask* for anything, and asking is all it
 //! can do.
 //!
-//! Two request kinds are deliberately absent from what a model is offered.
-//! `infer` would let a model spend the workspace's credential on a request
-//! nobody read, and `spawn_agent` would let it widen its own reach by creating
-//! something to act for it. Both exist as typed requests, for a person to make.
+//! **`infer` is deliberately absent from what a model is offered.** It would
+//! let a model spend the workspace's credential on a request nobody read. It
+//! exists as a typed request, for a person to make.
+//!
+//! `spawn_agent` was withheld on the same grounds — a model that can create
+//! something to act for it can widen its own reach — until that objection
+//! could be answered rather than avoided. It is answered in `ai/swarm.zig`: a
+//! child runs on the same policy engine as its parent and so can never decide
+//! anything the parent could not, its depth and fan-out are bounded, and it
+//! spends from the parent's remaining budget rather than a copy of it. The
+//! tool is therefore *offerable* rather than offered: `declarations` takes an
+//! `Offering`, and a caller with nothing to run a child on does not advertise
+//! it. Parsing it always works, because a request that is refused by the
+//! `agent.spawn` capability is refused by the policy engine, where every other
+//! refusal of this kind is decided.
 
 const std = @import("std");
 const tools = @import("tools.zig");
@@ -71,10 +82,13 @@ pub const Offer = struct {
     kind: std.meta.Tag(ToolRequest),
 };
 
-/// Every tool a model may ask for, in the order a person would read them.
+/// Every tool a model may always ask for, in the order a person would read
+/// them.
 ///
-/// `infer` and `spawn_agent` are not here, and their absence is enforced by a
-/// test rather than left to whoever edits this list next.
+/// `infer` is not here, and its absence is enforced by a test rather than left
+/// to whoever edits this list next. `spawn_agent` is not here either, because
+/// it is offered only when there is something to run a child on — see
+/// `spawn_agent_offer` and `Offering`.
 /// The tools a model is told about.
 ///
 /// Only what the executor can actually perform. `call_mcp_tool` was
@@ -115,6 +129,43 @@ pub const offers = [_]Offer{
     },
 };
 
+/// The tool that starts a child agent, offered only when a caller has
+/// something to run one on.
+///
+/// The description tells the model the two things it has to know to use this
+/// well and cannot work out for itself: that it gets an answer rather than a
+/// transcript, and that the child cannot see anything it was not told. A model
+/// that thinks the child shares its context writes "look into that" and gets
+/// back a child asking what "that" is.
+pub const spawn_agent_offer: Offer = .{
+    .name = "spawn_agent",
+    .kind = .spawn_agent,
+    .description =
+    "Hand a self-contained piece of work to a child agent and get back its answer, not its transcript. " ++
+        "Use it when finding something out would cost more reading than the answer is worth: \"which file defines the retry backoff, and what are the numbers\". " ++
+        "The child starts fresh and knows only what \"request\" says, so write it as though for someone who has not read this conversation. " ++
+        "It runs under the same permissions you do and can never be given more. It gets part of the turns you have left, so it is worth doing when the answer saves you more than it costs.",
+};
+
+/// Which of the optional tools this caller can actually perform.
+///
+/// Offering a tool is a claim that it works, so the caller that would have to
+/// do the work is the one that decides whether it is advertised.
+pub const Offering = struct {
+    /// Set when the caller has a `swarm.Spawner`. A loop with none would offer
+    /// a tool that answers "this build cannot do that" after the model has
+    /// already spent a turn deciding to use it.
+    spawnAgent: bool = false,
+};
+
+/// Every offer this offering advertises, in order.
+pub fn offersFor(arena: std.mem.Allocator, offering: Offering) ![]const Offer {
+    var out: std.ArrayList(Offer) = .empty;
+    try out.appendSlice(arena, &offers);
+    if (offering.spawnAgent) try out.append(arena, spawn_agent_offer);
+    return out.items;
+}
+
 /// The type behind one offer, as a comptime value.
 ///
 /// This is what keeps the schema and the executor from drifting: both come from
@@ -126,10 +177,18 @@ pub fn Payload(comptime kind: std.meta.Tag(ToolRequest)) type {
     @compileError("no payload for " ++ @tagName(kind));
 }
 
+/// Look a name up among every offer that exists, offered or not.
+///
+/// Parsing does not depend on the offering, and deliberately so. Whether a
+/// model may start a child is a question about the `agent.spawn` capability,
+/// and it is answered by the policy engine along with every other question of
+/// that kind — not by whether a name was in a list. A model that asks for a
+/// tool it was not offered gets the policy's answer, which is the honest one.
 pub fn find(name: []const u8) ?Offer {
     for (offers) |offer| {
         if (std.mem.eql(u8, offer.name, name)) return offer;
     }
+    if (std.mem.eql(u8, spawn_agent_offer.name, name)) return spawn_agent_offer;
     return null;
 }
 
@@ -138,6 +197,7 @@ pub fn nameOf(kind: std.meta.Tag(ToolRequest)) ?[]const u8 {
     for (offers) |offer| {
         if (offer.kind == kind) return offer.name;
     }
+    if (spawn_agent_offer.kind == kind) return spawn_agent_offer.name;
     return null;
 }
 
@@ -145,21 +205,36 @@ pub fn nameOf(kind: std.meta.Tag(ToolRequest)) ?[]const u8 {
 ///
 /// Every schema is written inline, with nothing referenced, because a provider
 /// has no document to resolve a reference against.
-pub fn declarations(arena: std.mem.Allocator) ![]const provider.Tool {
+pub fn declarations(arena: std.mem.Allocator, offering: Offering) ![]const provider.Tool {
     var out: std.ArrayList(provider.Tool) = .empty;
     inline for (offers) |offer| {
-        var schema: std.Io.Writer.Allocating = .init(arena);
-        try jsonschema.writeInline(Payload(offer.kind), &schema.writer);
-        try out.append(arena, .{
-            .name = offer.name,
-            .description = offer.description,
-            .schemaJson = schema.written(),
-            // A provider that can hold a model to the schema should. It costs
-            // nothing here and removes a whole class of malformed call.
-            .strict = true,
-        });
+        try out.append(arena, try declarationOf(arena, offer, Payload(offer.kind)));
+    }
+    if (offering.spawnAgent) {
+        try out.append(arena, try declarationOf(
+            arena,
+            spawn_agent_offer,
+            Payload(spawn_agent_offer.kind),
+        ));
     }
     return out.items;
+}
+
+fn declarationOf(
+    arena: std.mem.Allocator,
+    offer: Offer,
+    comptime Request: type,
+) !provider.Tool {
+    var schema: std.Io.Writer.Allocating = .init(arena);
+    try jsonschema.writeInline(Request, &schema.writer);
+    return .{
+        .name = offer.name,
+        .description = offer.description,
+        .schemaJson = schema.written(),
+        // A provider that can hold a model to the schema should. It costs
+        // nothing here and removes a whole class of malformed call.
+        .strict = true,
+    };
 }
 
 /// Turn one tool call into a typed request, or refuse it.
@@ -174,9 +249,7 @@ pub fn parse(
     const offer = find(name) orelse {
         // Named but withheld reads differently from never existing, and a
         // person reading the record deserves the difference.
-        if (std.mem.eql(u8, name, "infer") or std.mem.eql(u8, name, "spawn_agent")) {
-            return error.NotOfferedToModels;
-        }
+        if (std.mem.eql(u8, name, "infer")) return error.NotOfferedToModels;
         return error.UnknownTool;
     };
 
@@ -246,7 +319,18 @@ pub fn parse(
             .tool = try requiredString(object, "tool"),
             .argumentsJson = try rawField(arena, object, "argumentsJson"),
         } },
-        .infer, .spawn_agent => return error.NotOfferedToModels,
+        .spawn_agent => {
+            const request = try requiredString(object, "request");
+            // A child with no work to do spends a request to say so. Refused
+            // here rather than started, because an empty request is a model
+            // mistake and the message about it should name the field.
+            if (request.len == 0) return error.ArgumentsDoNotFit;
+            return .{ .spawn_agent = .{
+                .label = optionalString(object, "label") orelse "child",
+                .request = request,
+            } };
+        },
+        .infer => return error.NotOfferedToModels,
     }
 }
 
@@ -499,7 +583,7 @@ test "the declarations carry every field of the type behind them" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const declared = try declarations(arena);
+    const declared = try declarations(arena, .{});
     try testing.expectEqual(offers.len, declared.len);
 
     inline for (offers, 0..) |offer, index| {
@@ -525,25 +609,89 @@ test "the declarations carry every field of the type behind them" {
     }
 }
 
-test "a model is never offered the tools that would widen its own reach" {
+test "a model is never offered the tool that would spend the workspace's credential" {
+    // `infer` would let a model ask a model on a request nobody read, paid for
+    // by whoever owns the key. It stays a typed request for a person to make.
     for (offers) |offer| {
         try testing.expect(offer.kind != .infer);
-        try testing.expect(offer.kind != .spawn_agent);
     }
     try testing.expect(nameOf(.infer) == null);
-    try testing.expect(nameOf(.spawn_agent) == null);
 
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // Asking for one by name is refused, and the refusal says which kind of no
+    // Asking for it by name is refused, and the refusal says which kind of no
     // it is: withheld, not missing.
     try testing.expectError(error.NotOfferedToModels, parse(arena, "infer",
         \\{"provider":"anthropic","model":"claude-opus-5"}
     ));
-    try testing.expectError(error.NotOfferedToModels, parse(arena, "spawn_agent", "{}"));
     try testing.expectError(error.UnknownTool, parse(arena, "sudo", "{}"));
+}
+
+test "starting a child is offered only when there is something to run one on" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Not in the always-offered list, because a caller with no spawner would
+    // be advertising a tool that answers "this build cannot do that" after the
+    // model has already spent a turn deciding to use it.
+    for (offers) |offer| {
+        try testing.expect(offer.kind != .spawn_agent);
+    }
+
+    const without = try declarations(arena, .{});
+    for (without) |tool| {
+        try testing.expect(!std.mem.eql(u8, tool.name, "spawn_agent"));
+    }
+
+    const with = try declarations(arena, .{ .spawnAgent = true });
+    try testing.expectEqual(offers.len + 1, with.len);
+    try testing.expectEqualStrings("spawn_agent", with[with.len - 1].name);
+
+    // The schema is generated from the same type the loop hands to the
+    // spawner, like every other tool's.
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, with[with.len - 1].schemaJson, .{});
+    const properties = parsed.value.object.get("properties").?.object;
+    inline for (std.meta.fields(tools.SpawnAgentRequest)) |field| {
+        try testing.expect(properties.contains(field.name));
+    }
+
+    // And a model cannot name the policy its child runs under, because there
+    // is no such field to name. That absence is the whole reason this tool
+    // could be offered at all.
+    try testing.expect(!properties.contains("policy"));
+    try testing.expect(!@hasField(tools.SpawnAgentRequest, "policy"));
+}
+
+test "a spawn request becomes typed whether or not it was offered" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Parsing does not depend on the offering. Whether this run may start a
+    // child is a question about the `agent.spawn` capability, and it gets the
+    // policy engine's answer along with every other question of that kind — a
+    // refusal a person can find in the record, rather than a name missing from
+    // a list.
+    const request = try parse(arena, "spawn_agent",
+        \\{"label":"read the retry code","request":"Which file sets the retry backoff, and what are the numbers?"}
+    );
+    try testing.expectEqual(tools.Capability.@"agent.spawn", request.capability());
+    try testing.expectEqualStrings("read the retry code", request.spawn_agent.label);
+
+    // A label is not something a model has to think of; work to do is.
+    const unlabelled = try parse(arena, "spawn_agent",
+        \\{"request":"Count the tests."}
+    );
+    try testing.expectEqualStrings("child", unlabelled.spawn_agent.label);
+
+    // A child with nothing to do spends a request to say so.
+    try testing.expectError(error.ArgumentsDoNotFit, parse(arena, "spawn_agent", "{}"));
+    try testing.expectError(error.ArgumentsDoNotFit, parse(arena, "spawn_agent",
+        \\{"request":""}
+    ));
 }
 
 test "a tool call becomes a typed request, and the capability comes from the kind" {
@@ -644,11 +792,14 @@ test "a tool with no executor behind it is not offered at all" {
 
     // Everything that is offered has an executor behind it. This is the claim
     // the offer list makes, so it is the claim under test.
-    const declared = try declarations(arena);
+    const declared = try declarations(arena, .{});
     try testing.expectEqual(offers.len, declared.len);
     for (offers) |offer| {
         switch (offer.kind) {
             .read_file, .write_file, .execute, .delete, .search, .git => {},
+            // `spawn_agent` is not in this list either: it has something behind
+            // it only when a caller supplied a spawner, which is exactly why it
+            // is offered separately rather than always.
             .mcp, .spawn_agent, .infer => {
                 std.debug.print("{s} is offered and has no executor\n", .{offer.name});
                 return error.TestUnexpectedResult;
