@@ -75,6 +75,13 @@ pub const Offer = struct {
 ///
 /// `infer` and `spawn_agent` are not here, and their absence is enforced by a
 /// test rather than left to whoever edits this list next.
+/// The tools a model is told about.
+///
+/// Only what the executor can actually perform. `call_mcp_tool` was
+/// offered here with nothing behind it, so a model that reached for
+/// either spent a turn to be told this build "cannot perform that kind of
+/// request" — which is a promise broken at the worst moment, after the model
+/// has already decided what to do. Offering a tool is a claim that it works.
 pub const offers = [_]Offer{
     .{
         .name = "read_file",
@@ -94,7 +101,7 @@ pub const offers = [_]Offer{
     .{
         .name = "delete",
         .kind = .delete,
-        .description = "Delete a file or directory in the workspace. This cannot be undone from the record, so it usually asks a person first.",
+        .description = "Delete a file or an empty directory in the workspace. This cannot be undone from the record, so it usually asks a person first. A directory tree is not removed in one step.",
     },
     .{
         .name = "search",
@@ -105,11 +112,6 @@ pub const offers = [_]Offer{
         .name = "git",
         .kind = .git,
         .description = "Read or change the repository: status, log, diff, branch, commit, push, or add a worktree. Each one is decided separately.",
-    },
-    .{
-        .name = "call_mcp_tool",
-        .kind = .mcp,
-        .description = "Call a tool on a Model Context Protocol server that this workspace is connected to.",
     },
 };
 
@@ -519,20 +521,33 @@ test "an unknown enum value falls to the safe default rather than being obeyed" 
     try testing.expectEqual(tools.EnvironmentPolicy.allowlist, request.execute.environmentPolicy);
 }
 
-test "another server's arguments pass through as text, in either shape" {
+test "a tool with no executor behind it is not offered at all" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const as_object = try parse(arena, "call_mcp_tool",
+    // There is no MCP client in this build. Offering the tool anyway meant a
+    // model spent a turn deciding to call it and was then told the build could
+    // not do it — a promise broken after the decision was already made. The
+    // request kind stays, because the type is what a client would fill in; it
+    // is simply not advertised.
+    try testing.expectError(error.UnknownTool, parse(arena, "call_mcp_tool",
         \\{"server":"docs","tool":"lookup","argumentsJson":{"term":"block"}}
-    );
-    try testing.expect(std.mem.indexOf(u8, as_object.mcp.argumentsJson, "\"term\"") != null);
+    ));
 
-    const as_text = try parse(arena, "call_mcp_tool",
-        \\{"server":"docs","tool":"lookup","argumentsJson":"{\"term\":\"block\"}"}
-    );
-    try testing.expect(std.mem.indexOf(u8, as_text.mcp.argumentsJson, "\"term\"") != null);
+    // Everything that is offered has an executor behind it. This is the claim
+    // the offer list makes, so it is the claim under test.
+    const declared = try declarations(arena);
+    try testing.expectEqual(offers.len, declared.len);
+    for (offers) |offer| {
+        switch (offer.kind) {
+            .read_file, .write_file, .execute, .delete, .search, .git => {},
+            .mcp, .spawn_agent, .infer => {
+                std.debug.print("{s} is offered and has no executor\n", .{offer.name});
+                return error.TestUnexpectedResult;
+            },
+        }
+    }
 }
 
 test "a refusal tells the model which kind of no it was" {

@@ -114,7 +114,9 @@ pub const DeleteRequest = struct {
 
 pub const SearchRequest = struct {
     query: []const u8,
-    root: []const u8,
+    /// Where to search, relative to the workspace. Defaulted for the same
+    /// reason as everything else here: a model is never told an absolute path.
+    root: []const u8 = ".",
     maxResults: usize = 100,
     /// Search the workspace history rather than the files.
     includeHistory: bool = false,
@@ -124,7 +126,8 @@ pub const GitOperation = enum { status, log, diff, commit, push, branch, worktre
 
 pub const GitRequest = struct {
     operation: GitOperation,
-    repository: []const u8,
+    /// The repository, relative to the workspace.
+    repository: []const u8 = ".",
     /// Commit message, branch name, or remote address, depending on operation.
     argument: []const u8 = "",
 };

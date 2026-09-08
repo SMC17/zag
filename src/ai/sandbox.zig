@@ -156,6 +156,94 @@ pub const Root = struct {
     }
 
     /// Write a whole file beneath the root, creating it if needed.
+    /// Remove a file or an empty directory beneath the root.
+    ///
+    /// `unlinkat` takes a directory handle and a name, and — unlike `openat2` —
+    /// has no `RESOLVE_BENEATH`. Handing it the root's handle and a relative
+    /// path means the kernel walks any `..` in that path like it would
+    /// anywhere else, so `../neighbour` deleted the neighbour. Every other
+    /// operation in this file is contained and that one was not, which is the
+    /// worst shape for a hole to have: it looks like the others.
+    ///
+    /// So the parent directory is opened through `openat2` with the same
+    /// resolution rules as everything else, and the name is unlinked relative
+    /// to *that* handle. A path that climbs out fails at the open, before
+    /// anything is removed, and a name with no separator left in it cannot
+    /// climb anywhere.
+    pub fn remove(self: Root, relative: []const u8, directory: bool) Error!void {
+        if (comptime !supported) return error.ContainmentUnavailable;
+        if (relative.len == 0) return error.NotFound;
+
+        // Split into the directory to resolve and the name to remove. A
+        // trailing slash would make the name empty, which is not a thing to
+        // remove.
+        const cut = std.mem.lastIndexOfScalar(u8, relative, '/');
+        const parent_path = if (cut) |at| relative[0..at] else ".";
+        const name = if (cut) |at| relative[at + 1 ..] else relative;
+        if (name.len == 0) return error.NotFound;
+        // The name is unlinked relative to the parent handle, so it must be a
+        // plain name. `.` and `..` are not names of things to delete.
+        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.NotFound;
+
+        const parent_fd = try self.openDirectory(parent_path);
+        defer _ = linux.close(parent_fd);
+
+        var name_buffer: [4096]u8 = undefined;
+        if (name.len >= name_buffer.len) return error.EscapesWorkspace;
+        @memcpy(name_buffer[0..name.len], name);
+        name_buffer[name.len] = 0;
+        const name_z: [*:0]const u8 = @ptrCast(&name_buffer);
+
+        const at_removedir: usize = 0x200;
+        const rc = linux.syscall3(
+            .unlinkat,
+            @as(usize, @bitCast(@as(isize, parent_fd))),
+            @intFromPtr(name_z),
+            if (directory) at_removedir else 0,
+        );
+        return switch (linux.errno(rc)) {
+            .SUCCESS => {},
+            .NOENT => error.NotFound,
+            .ACCES, .PERM => error.AccessDenied,
+            .XDEV, .LOOP => error.EscapesWorkspace,
+            .ISDIR => error.IsDirectory,
+            .NOTEMPTY => error.AccessDenied,
+            else => error.NotFound,
+        };
+    }
+
+    /// Open a directory beneath the root, contained the same way a file is.
+    fn openDirectory(self: Root, relative: []const u8) Error!linux.fd_t {
+        var buffer: [4096]u8 = undefined;
+        if (relative.len >= buffer.len) return error.EscapesWorkspace;
+        @memcpy(buffer[0..relative.len], relative);
+        buffer[relative.len] = 0;
+        const path_z: [*:0]const u8 = @ptrCast(&buffer);
+
+        var open_flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true };
+        open_flags.CLOEXEC = true;
+        var how: OpenHow = .{
+            .flags = @as(u32, @bitCast(open_flags)),
+            .mode = 0,
+            .resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS,
+        };
+        const rc = linux.syscall4(
+            .openat2,
+            @as(usize, @bitCast(@as(isize, self.fd))),
+            @intFromPtr(path_z),
+            @intFromPtr(&how),
+            @sizeOf(OpenHow),
+        );
+        return switch (linux.errno(rc)) {
+            .SUCCESS => @intCast(rc),
+            .NOENT => error.NotFound,
+            .ACCES, .PERM => error.AccessDenied,
+            .XDEV, .LOOP => error.EscapesWorkspace,
+            .NOTDIR => error.NotFound,
+            else => error.OpenFailed,
+        };
+    }
+
     pub fn writeFile(self: Root, relative: []const u8, bytes: []const u8) Error!void {
         var path_buffer: [4096]u8 = undefined;
         const fd = try self.openFile(relative, .write_truncate, &path_buffer);

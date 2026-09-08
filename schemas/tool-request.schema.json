@@ -251,8 +251,7 @@
         }
       },
       "required": [
-        "query",
-        "root"
+        "query"
       ],
       "additionalProperties": false
     },
@@ -270,8 +269,7 @@
         }
       },
       "required": [
-        "operation",
-        "repository"
+        "operation"
       ],
       "additionalProperties": false
     },
