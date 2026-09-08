@@ -79,6 +79,7 @@ zag history "status:failed zig" # search recorded work, not a text file
 zag show "kind:command zig build"  # what that command actually printed
 zag ask --resume               # carry on where the last run stopped
 zag ask --children "..."       # let the run hand parts of the work to child agents
+zag ask --best-of 3 "..."      # run it three times, judge each, keep the best
 zag route                      # which model to use next, from what has worked here
 zag route "fix the parser"     # the same, with the task in hand: a trained policy
 zag trajectories               # every recorded agent run, scored
@@ -232,6 +233,31 @@ evidence and not instruction.
 
 Each verdict goes into the log as evidence: which model gave it, against which
 rubric, with the whole thing addressed by hash. A run is judged once.
+
+### Running it more than once
+
+`zag ask --best-of 3` runs the same task three times, scores each attempt, and
+gives you the one that worked. It is the cheapest large improvement available
+to an agent system and it is cheap only in engineering: it costs exactly three
+times as much, and that number is printed.
+
+Two things it does that most best-of-N does not:
+
+**It checks the attempts were different.** Three runs of one prompt with
+nothing varied produce three near-identical answers and a bill three times the
+size. Attempts get rising temperatures — the first is left at the provider's
+own setting, so a best-of-N can only be as bad as one attempt plus the cost of
+the others — and the report counts the distinct answers. If there was only one,
+it says the extra attempts bought nothing.
+
+**The selector is not the thing being selected.** Ranking runs on arithmetic
+over the record first, weighted 0.6 against 0.4 for the judge. Asking a model
+which of its own answers it likes best selects for confidence; the arithmetic
+cannot be talked into anything.
+
+Every attempt is a real run in the record with its own agent identifier. The
+losing ones are the interesting half — same task, same model, same moment —
+so read them with `zag trajectories`.
 
 ### Routing with the task in hand
 
