@@ -27,6 +27,7 @@ const Command = enum {
     show,
     trajectories,
     eval,
+    route,
     knowledge,
     term,
     providers,
@@ -54,6 +55,7 @@ const Command = enum {
             .{ .name = "show", .command = .show },
             .{ .name = "trajectories", .command = .trajectories },
             .{ .name = "eval", .command = .eval },
+            .{ .name = "route", .command = .route },
             .{ .name = "knowledge", .command = .knowledge },
             .{ .name = "term", .command = .term },
             .{ .name = "providers", .command = .providers },
@@ -88,6 +90,7 @@ pub const help_text =
     \\  show <query>        Show what a recorded command printed.
     \\  trajectories        Write every recorded agent run as JSON Lines, with its score.
     \\  eval <baseline>     Compare this workspace's runs against an earlier export.
+    \\  route               Say which model to use next, from what they did here.
     \\  knowledge           Show the knowledge under .workspace/, and what is overdue.
     \\  term                Open a shell in a terminal that records what you do.
     \\  providers           List the model connectors and say which credentials are set.
@@ -106,6 +109,7 @@ pub const help_text =
     \\  --turns <count>     How many times a model may be asked in one run.
     \\  --compact-at <n>    Make room in the conversation once it passes n bytes.
     \\  --resume            Carry on the last run in this workspace.
+    \\  --explore           Let "zag route" consider connectors never used here.
     \\  --raw               Start the shell with no added prompt marks.
     \\  --stream            Print a model's answer as it arrives, not when it finishes.
     \\  --init              Write a starter policy file. Used with "zag policy".
@@ -133,6 +137,9 @@ const Options = struct {
     compact_at: []const u8 = "",
     /// Carry on the last run in this workspace rather than starting a new one.
     resume_last: bool = false,
+    /// Put every connector this build knows into the routing draw, including
+    /// ones that may not be installed.
+    explore: bool = false,
     provider: []const u8 = "",
     model: []const u8 = "",
     turns: []const u8 = "",
@@ -176,6 +183,10 @@ fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
         }
         if (std.mem.eql(u8, arg, "--resume")) {
             options.resume_last = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--explore")) {
+            options.explore = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--raw")) {
@@ -314,6 +325,7 @@ fn run(
         .show => try showOutput(arena, io, w, options),
         .trajectories => try writeTrajectories(arena, io, w, options),
         .eval => try compareAgainstBaseline(arena, io, w, options),
+        .route => try routeToAModel(arena, io, w, options, environment),
         .knowledge => try knowledgeIndex(arena, io, w, options),
         .term => try interactiveTerminal(arena, io, w, options, environment),
         .providers => try listProviders(arena, io, w, options, environment),
@@ -589,6 +601,99 @@ fn historySearch(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, option
     });
     try results.writeList(w);
     return if (incomplete) 1 else 0;
+}
+
+/// Say which model to use next, from what the models did here.
+///
+/// Thompson sampling over the recorded runs. The posteriors are derived from
+/// the log every time rather than kept in a table, so they cannot drift from
+/// the record and cannot be edited to make a model look good.
+fn routeToAModel(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+    environment: []const []const u8,
+) !u8 {
+    const opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.root,
+        .actor = workbenchActor(),
+        .now = wallClock(io),
+    }) catch {
+        try w.print("zag could not open the workspace in {s}.\n", .{options.root});
+        return 1;
+    };
+
+    const known = try zag.ai.bandit.armsIn(arena, opened.service.log);
+
+    // Which connectors are worth putting in the draw.
+    //
+    // Not all of them. This build knows ten ways to reach a model on this
+    // computer, and offering every one as an untried arm is how a router
+    // explores for ever: nine uniform draws produce something above 0.9 nearly
+    // every round, which beats any real record. The arithmetic is in
+    // `bandit.crowdingFrom`, and the fix is the candidate list rather than a
+    // fudge factor on the sampler.
+    //
+    // So the default is what is demonstrably usable: a hosted connector whose
+    // credential is set, and anything this workspace has actually run. Local
+    // runtimes that may not even be installed are behind --explore.
+    const env: Environment = .{ .entries = environment };
+    var candidates: std.ArrayList(zag.ai.bandit.Arm) = .empty;
+    var untried: usize = 0;
+    for (zag.ai.catalog.connectors) |connector| {
+        const has_key = connector.keyVariable.len > 0 and
+            Environment.lookup(@constCast(&env), connector.keyVariable) != null;
+
+        var used_here = false;
+        for (known) |arm| {
+            if (std.mem.eql(u8, arm.connector, connector.id)) used_here = true;
+        }
+        if (!options.explore and !has_key and !used_here) continue;
+        if (!used_here) untried += 1;
+        try candidates.append(arena, .{
+            .connector = connector.id,
+            .model = defaultModel(connector),
+        });
+    }
+
+    const arms = try zag.ai.bandit.withCandidates(arena, known, candidates.items);
+    if (arms.len == 0) {
+        try w.writeAll("No connector is reachable from here, so there is nothing to choose between.\n");
+        try w.writeAll("Run \"zag providers\" to see what this build knows and which credentials are set.\n");
+        return 1;
+    }
+
+    try w.writeAll("What the record says\n");
+    for (arms) |arm| {
+        try w.writeAll("  ");
+        try arm.writeSentence(w);
+        try w.writeAll("\n");
+    }
+
+    // Said out loud when it matters, because a router that is really just
+    // exploring looks exactly like one that is working.
+    const crowding = zag.ai.bandit.crowdingFrom(untried);
+    if (untried > 2 and known.len > 0) {
+        try w.print(
+            "\n{d} of these have never been used here. Untried arms draw from an even\nchance, so the best of {d} of them clears {d:.2} most rounds and will usually\nbeat a real record. Expect exploration rather than a recommendation.\n",
+            .{ untried, untried, crowding },
+        );
+    }
+
+    // Drawn from a real seed: a router that picked the same arm every time
+    // would be a lookup table, not a sampler.
+    var seed_bytes: [8]u8 = undefined;
+    try io.randomSecure(&seed_bytes);
+    const choice = zag.ai.bandit.choose(arms, std.mem.readInt(u64, &seed_bytes, .little)).?;
+
+    try w.writeAll("\nUse next\n  ");
+    try choice.writeSentence(w);
+    try w.print("\n\n  zag ask --provider {s} --model {s} \"...\"\n", .{
+        choice.arm.connector,
+        choice.arm.model,
+    });
+    return 0;
 }
 
 /// Compare this workspace's runs against an earlier export.
