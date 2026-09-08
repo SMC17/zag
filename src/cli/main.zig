@@ -28,6 +28,7 @@ const Command = enum {
     trajectories,
     eval,
     route,
+    judge,
     knowledge,
     term,
     providers,
@@ -56,6 +57,7 @@ const Command = enum {
             .{ .name = "trajectories", .command = .trajectories },
             .{ .name = "eval", .command = .eval },
             .{ .name = "route", .command = .route },
+            .{ .name = "judge", .command = .judge },
             .{ .name = "knowledge", .command = .knowledge },
             .{ .name = "term", .command = .term },
             .{ .name = "providers", .command = .providers },
@@ -89,6 +91,7 @@ pub const help_text =
     \\  history <query>     Search recorded work. For example: status:failed zig
     \\  show <query>        Show what a recorded command printed.
     \\  trajectories        Write every recorded agent run as JSON Lines, with its score.
+    \\  judge               Ask a model what it thinks of the recorded runs, and record it.
     \\  eval <baseline>     Compare this workspace's runs against an earlier export.
     \\  route               Say which model to use next, from what they did here.
     \\  knowledge           Show the knowledge under .workspace/, and what is overdue.
@@ -342,6 +345,7 @@ fn run(
         .trajectories => try writeTrajectories(arena, io, w, options),
         .eval => try compareAgainstBaseline(arena, io, w, options),
         .route => try routeToAModel(arena, io, w, options, environment),
+        .judge => try judgeRuns(arena, io, w, options, environment),
         .knowledge => try knowledgeIndex(arena, io, w, options),
         .term => try interactiveTerminal(arena, io, w, options, environment),
         .providers => try listProviders(arena, io, w, options, environment),
@@ -709,6 +713,208 @@ fn routeToAModel(
         choice.arm.connector,
         choice.arm.model,
     });
+    return 0;
+}
+
+/// Ask a model what it thinks of the runs this workspace has recorded.
+///
+/// The arithmetic in `ai/outcome.zig` scores a run from what the record
+/// states, and it is blind to the one question anybody actually asks: was the
+/// answer any good? A run can end cleanly, make eight successful calls, repeat
+/// nothing, and confidently say something false. That run scores 1.0.
+///
+/// So this is a second opinion, and the useful output is not its number. It is
+/// the disagreement: where arithmetic over the record and a model reading the
+/// same record reach different conclusions is the shortlist of runs worth
+/// reading by hand, and it is far shorter than the list of all runs.
+///
+/// Every verdict is written into the log as evidence — which model gave it,
+/// against which rubric, and the whole thing addressed by hash — so a run is
+/// judged once and the opinion can be checked later against the run it was
+/// about.
+fn judgeRuns(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+    environment: []const []const u8,
+) !u8 {
+    const chosen = if (options.provider.len > 0) options.provider else "ollama";
+    const connector = zag.ai.catalog.find(chosen) orelse {
+        try w.print("\"{s}\" is not a connector zag knows. Run \"zag providers\" to see them.\n", .{chosen});
+        return 2;
+    };
+    const model = if (options.model.len > 0) options.model else defaultModel(connector);
+
+    const loaded = try LoadedPolicy.fromWorkspace(arena, io, options.root);
+    if (loaded.problems.len > 0) {
+        try w.writeAll("This workspace's policy could not be read, so nothing was sent.\n");
+        return 1;
+    }
+
+    const opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.root,
+        .actor = workbenchActor(),
+        .now = wallClock(io),
+        .environment = environment,
+    }) catch {
+        try w.print("zag could not open the workspace in {s}.\n", .{options.root});
+        return 1;
+    };
+    var service = opened.service;
+
+    const runs = try zag.ai.trajectory.extract(arena, io, service.log, service.content);
+    if (runs.len == 0) {
+        try w.writeAll("No agent runs are recorded in this workspace.\n");
+        return 1;
+    }
+
+    const rubric = zag.ai.judge.default_rubric;
+
+    // A run is judged once. Re-running this after another day's work should
+    // cost one request per new run, not one per run ever recorded.
+    var already: std.ArrayList([]const u8) = .empty;
+    for (service.log.entries.items) |entry| {
+        const e = switch (entry.payload) {
+            .evidence_recorded => |x| x,
+            else => continue,
+        };
+        if (!std.mem.startsWith(u8, e.requirement, "judge:")) continue;
+        try already.append(arena, e.subject);
+    }
+
+    var engine = zag.ai.policy.Engine.init(arena, loaded.policy, @bitCast(wallClock(io).ns));
+    var identifiers = zag.core.id.Generator.init(@bitCast(wallClock(io).ns), 0);
+    const context: zag.ai.policy.Context = .{
+        .actor = identifiers.next(zag.core.id.ActorId),
+        .now = wallClock(io),
+    };
+
+    const view: Environment = .{ .entries = environment };
+    var client: std.http.Client = .{ .allocator = arena, .io = io };
+    defer client.deinit();
+    var http: zag.ai.transport.Http = .{ .client = &client };
+    var sleeper: zag.ai.transport.SleepingWaiter = .{ .io = io };
+    const transport: zag.ai.transport.Transport = .{
+        .arena = arena,
+        .engine = &engine,
+        .sender = http.sender(),
+        .credentials = view.credentials(),
+        .redactor = try zag.security.secrets.Redactor.init(io),
+        .guard = .{ .io = io },
+        .waiter = sleeper.waiter(),
+    };
+
+    var judged: usize = 0;
+    var disagreements: usize = 0;
+    var skipped: usize = 0;
+
+    for (runs) |trajectory| {
+        var identifier: [zag.core.id.AgentId.text_len]u8 = undefined;
+        const subject = trajectory.agent.toText(&identifier);
+
+        var seen = false;
+        for (already.items) |earlier| {
+            if (std.mem.eql(u8, earlier, subject)) seen = true;
+        }
+        if (seen) {
+            skipped += 1;
+            continue;
+        }
+
+        const prompt = try zag.ai.judge.writePrompt(arena, trajectory, rubric);
+        // The property the whole defence rests on, checked rather than
+        // trusted: the fence token appears only where this file put it.
+        std.debug.assert(std.mem.count(u8, prompt.text, prompt.fence) == 2);
+
+        var attempt: zag.ai.transport.Attempt = undefined;
+        const completion = transport.send(connector, .{
+            .model = model,
+            .system = zag.ai.judge.instructions,
+            .messages = &.{.{
+                .role = .user,
+                .blocks = &.{.{ .text = prompt.text }},
+            }},
+            // A judge that thinks for a page is a judge whose reasoning nobody
+            // reads. The rubric asks for one sentence per criterion.
+            .maxOutputTokens = 2000,
+        }, context, &attempt) catch |err| {
+            try w.print("The judge could not be reached: {s}.\n", .{@errorName(err)});
+            return 1;
+        };
+
+        var verdict = zag.ai.judge.parse(arena, rubric, try completion.text(arena)) catch |err| {
+            // A model that would not answer in the shape asked for is worth
+            // saying out loud rather than counting as a bad run: the run is
+            // not what failed.
+            try w.print("  {s}\n    the judge did not answer in the shape asked for ({s})\n", .{
+                trajectory.task,
+                @errorName(err),
+            });
+            continue;
+        };
+        verdict.model = model;
+        verdict.connector = connector.id;
+
+        const agreement = zag.ai.judge.compare(trajectory.score, verdict, rubric);
+        judged += 1;
+        if (agreement.disagrees()) disagreements += 1;
+
+        var line: std.Io.Writer.Allocating = .init(arena);
+        try zag.ai.judge.writeJsonLine(verdict, rubric, agreement, &line.writer);
+
+        if (options.json) {
+            try w.print("{s}\n", .{line.written()});
+        } else {
+            try w.print("{s}\n  ", .{trajectory.task});
+            try agreement.writeSentence(w);
+            try w.print("\n  {s}\n", .{verdict.summary});
+            for (verdict.marks) |mark| {
+                if (mark.unclear) {
+                    try w.print("    {s}: the record does not show it\n", .{mark.criterion});
+                } else {
+                    try w.print("    {s} {d:.2}  {s}\n", .{ mark.criterion, mark.score, mark.because });
+                }
+            }
+            try w.writeAll("\n");
+        }
+
+        // Into the log, as evidence about the run: which model said it,
+        // against which rubric, with the whole verdict addressed by hash. An
+        // opinion nobody can find again is an opinion nobody can check.
+        const hash = try service.content.put(line.written());
+        var sentence: std.Io.Writer.Allocating = .init(arena);
+        try agreement.writeSentence(&sentence.writer);
+        _ = service.record(.{ .evidence_recorded = .{
+            .requirement = try std.fmt.allocPrint(arena, "judge:{s}", .{rubric.id}),
+            .subject = try arena.dupe(u8, subject),
+            .method = try std.fmt.allocPrint(arena, "model judge ({s}/{s})", .{ connector.id, model }),
+            .result = sentence.written(),
+            .contentHash = hash,
+        } }, .{ .at = wallClock(io), .actor = workbenchActor() }) catch |err| {
+            try w.print("The verdict could not be recorded: {s}.\n", .{@errorName(err)});
+            return 1;
+        };
+    }
+
+    service.flush(io) catch |err| {
+        try w.print("The verdicts could not be committed: {s}.\n", .{@errorName(err)});
+        return 1;
+    };
+
+    if (!options.json) {
+        if (skipped > 0) {
+            try w.print("{d} run{s} already judged.\n", .{ skipped, if (skipped == 1) "" else "s" });
+        }
+        if (judged == 0) {
+            try w.writeAll("Nothing new to judge.\n");
+            return 0;
+        }
+        try w.print(
+            "\n{d} of {d} judged runs are worth reading: the record and the judge disagree\nby more than {d:.2} there, and agree everywhere else.\n",
+            .{ disagreements, judged, zag.ai.judge.Agreement.worth_reading },
+        );
+    }
     return 0;
 }
 
