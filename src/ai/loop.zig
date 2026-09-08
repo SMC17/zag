@@ -65,6 +65,7 @@ const hashing = @import("../core/hash.zig");
 const timeutil = @import("../core/time.zig");
 const notation = @import("../reports/notation.zig");
 const compaction_mod = @import("compaction.zig");
+const swarm = @import("swarm.zig");
 
 pub const Decision = policy_mod.Decision;
 pub const ToolRequest = tools.ToolRequest;
@@ -140,6 +141,12 @@ pub const Step = struct {
     /// The two must not be confused: "was refused" and "ran and failed" look
     /// alike in a summary and are opposites in an audit.
     executed: bool = false,
+    /// What a child agent came back with, when this step started one.
+    ///
+    /// Kept so the parent's run can account for what the child spent. A child
+    /// whose tokens went unrecorded would make "the budget is divided, not
+    /// copied" a claim about the grant and not about the bill.
+    spawned: ?swarm.Result = null,
 
     pub fn ran(self: Step) bool {
         return self.executed;
@@ -264,6 +271,134 @@ pub const Options = struct {
     showThinking: bool = false,
     effort: ?provider.Effort = null,
     maxOutputTokens: u32 = 16000,
+    /// What this run may hand to child agents, when it may hand out anything.
+    ///
+    /// None means `spawn_agent` is not offered and a model that asks for it
+    /// anyway is told this run has nothing to run a child on. That is the
+    /// default: fanning work out is worth doing when a caller has arranged for
+    /// it, not by accident.
+    spawning: ?Spawning = null,
+};
+
+/// How a run starts children, and how far it may go doing it.
+pub const Spawning = struct {
+    /// What actually runs a child. Supplied by the caller, because a loop that
+    /// could construct another loop would need a provider, a policy engine and
+    /// a journal of its own, and would be deciding for itself what a child
+    /// gets — which is the thing that must not be decided here.
+    spawner: swarm.Spawner,
+    bounds: swarm.Bounds = .{},
+    /// How deep this run already is. A child is started with its own depth,
+    /// which is how the bound survives the run being restarted.
+    depth: usize = 0,
+};
+
+/// What a child agent is told about being one.
+///
+/// Short on purpose. A child's whole advantage is that its context holds the
+/// question and nothing else, and spending two thousand tokens of instructions
+/// on that is spending the advantage. What it needs to know is what it cannot
+/// work out: that nobody will read its transcript, so the answer has to be in
+/// the last thing it says.
+pub const child_instructions =
+    \\You are a child agent. Another agent gave you one piece of work and is
+    \\waiting for the answer.
+    \\
+    \\Only your final message is passed back. Your reasoning, the files you
+    \\read and the commands you ran are not, so anything the other agent needs
+    \\has to be in that message: the finding, where you found it, and what you
+    \\could not establish. Quote the few lines that matter rather than
+    \\describing them.
+    \\
+    \\You have few turns. Do not plan, do not summarise what you are about to
+    \\do, and do not ask questions — there is nobody to answer them. Find the
+    \\answer and say it.
+;
+
+/// Runs children on the same loop, under the same policy engine.
+///
+/// This is the ordinary way to give a run `Spawning`, and the reason it is a
+/// separate type rather than a method is that a child needs one thing the
+/// parent's options do not hold: a record of its own. The `Runner` is copied
+/// with a child's journal in place of the parent's, so the two runs do not
+/// report into the same record keeper — see `Journal.forChild`.
+///
+/// Everything else is deliberately the same object: the same transport, the
+/// same executor and, most of all, the same `policy_mod.Engine`. A child that
+/// decided on a policy of its own would be a way to get a wider one, and there
+/// is no field here to give it one.
+pub const Children = struct {
+    /// The parent's runner. Copied, not called: only the journal differs.
+    runner: *const Runner,
+    connector: catalog.Connector,
+    model: []const u8,
+    /// Who the child acts as. The same actor as the parent, because it is the
+    /// same person's work.
+    acting: policy_mod.Context,
+    bounds: swarm.Bounds = .{},
+    /// The shape of the child's budget. Turns and tokens are replaced by what
+    /// the grant allows; the rest — time, repeats, calls per turn, when to
+    /// compact — is inherited, because those are properties of the machine and
+    /// the provider rather than of who asked.
+    budget: Budget = .{},
+    system: []const u8 = child_instructions,
+    maxOutputTokens: u32 = 16000,
+
+    // Two children never run at the same time, and not by luck: `agent.spawn`
+    // claims everything in `ai/schedule.zig`, so a spawn is a wave of its own.
+    // That is what makes one `Children` safe to share across a turn that asked
+    // for four of them.
+
+    pub fn spawner(self: *Children) swarm.Spawner {
+        return .{ .context = self, .spawnFn = start };
+    }
+
+    fn start(
+        context: *anyopaque,
+        request: tools.SpawnAgentRequest,
+        grant: swarm.Grant,
+    ) anyerror!swarm.Result {
+        const self: *Children = @ptrCast(@alignCast(context));
+
+        var budget = self.budget;
+        budget.turns = grant.turns;
+        budget.tokens = grant.tokens;
+
+        var runner = self.runner.*;
+        // A child never writes into its parent's record keeper. Where there is
+        // no child journal to be had, it writes nothing rather than writing
+        // into the parent's — a corrupted causal tree is worse than a missing
+        // one, because it reads as true.
+        runner.journal = if (self.runner.journal) |parent| parent.forChild() else null;
+        // The parent is the one showing an answer as it arrives. A child's
+        // deltas would interleave with it and read as one confused voice.
+        runner.watch = null;
+
+        const transcript = try runner.run(.{
+            .connector = self.connector,
+            .model = self.model,
+            .system = self.system,
+            .budget = budget,
+            .maxOutputTokens = self.maxOutputTokens,
+            // A child may spawn in turn where the bounds allow it, at its own
+            // depth. The bound survives because the depth is carried, not
+            // recomputed.
+            .spawning = .{
+                .spawner = self.spawner(),
+                .bounds = self.bounds,
+                .depth = grant.depth,
+            },
+        }, request.request, self.acting);
+
+        return .{
+            .answer = transcript.answer,
+            .ending = @tagName(transcript.ending),
+            .turns = transcript.turns.len,
+            .toolCalls = transcript.toolCallCount(),
+            .inputTokens = transcript.usage.inputTokens,
+            .outputTokens = transcript.usage.outputTokens,
+        };
+    }
 };
 
 /// A monotonic clock, passed in so a run can be timed in a test without one.
@@ -360,6 +495,26 @@ pub const Moment = union(enum) {
 pub const Journal = struct {
     context: *anyopaque,
     recordFn: *const fn (context: *anyopaque, moment: Moment) anyerror!void,
+    /// Make a journal for a child agent's run, whose record hangs under this
+    /// one.
+    ///
+    /// A child cannot share its parent's journal. A record keeper follows one
+    /// run — which turn is open, which tool call the next outcome belongs to —
+    /// and a second run reporting into the same one would attach the child's
+    /// tool calls to the parent's request and leave the parent's causal tree
+    /// pointing at the child's start. The child gets its own, caused by the
+    /// parent's, which is how `zag why` walks from one to the other.
+    ///
+    /// None means the caller keeps no separate record for children. The run
+    /// still happens and the parent's step still records what came back; what
+    /// is lost is the child's own working, and a caller that offers spawning
+    /// should offer this.
+    childFn: ?*const fn (context: *anyopaque) anyerror!Journal = null,
+
+    pub fn forChild(self: Journal) ?Journal {
+        const make = self.childFn orelse return null;
+        return make(self.context) catch null;
+    }
 
     pub fn record(self: Journal, moment: Moment) void {
         // A record that could not be written must not stop the work, and must
@@ -457,7 +612,18 @@ pub const Runner = struct {
         var turns: std.ArrayList(Turn) = .empty;
         var usage: provider.Usage = .{};
         var seen: std.ArrayList(Repeat) = .empty;
-        const declared = toolschema.declarations(self.arena) catch return error.OutOfMemory;
+        const declared = toolschema.declarations(self.arena, .{
+            // Offered only when there is something to run a child on. A tool
+            // advertised with nothing behind it is a promise broken after the
+            // model has already spent a turn deciding to use it.
+            .spawnAgent = options.spawning != null,
+        }) catch return error.OutOfMemory;
+
+        // Carried down the turn rather than held anywhere global, so two runs
+        // in the same process cannot exhaust each other's allowance.
+        var spawns: swarm.State = .{
+            .depth = if (options.spawning) |s| s.depth else 0,
+        };
 
         var ending: Ending = .out_of_turns;
         var answer: []const u8 = "";
@@ -468,6 +634,13 @@ pub const Runner = struct {
         var dropped: usize = 0;
         var number: usize = 1;
         while (number <= options.budget.turns) : (number += 1) {
+            // A child's share is taken from what the parent has left, and what
+            // the parent has left shrinks every turn. A late spawn is small,
+            // and at the end there is nothing to give.
+            spawns.newTurn();
+            spawns.parentTurnsLeft = options.budget.turns - number + 1;
+            spawns.parentTokensLeft = options.budget.tokens -| usage.total();
+
             var attempt: transport_mod.Attempt = undefined;
             const asked: provider.Request = .{
                 .model = options.model,
@@ -561,7 +734,7 @@ pub const Runner = struct {
             var prepared = try self.arena.alloc(Prepared, wanted);
             var claims = try self.arena.alloc(?schedule.Claim, wanted);
             for (calls[0..wanted], 0..) |call, index| {
-                prepared[index] = try self.prepare(call, context, &seen, options.budget.repeats);
+                prepared[index] = try self.prepare(call, context, &seen, options.budget.repeats, options.spawning, &spawns);
                 claims[index] = prepared[index].claim;
             }
 
@@ -581,6 +754,15 @@ pub const Runner = struct {
                     .content = step.reply,
                     .isError = step.refused or (step.result != null and !step.result.?.succeeded()),
                 } });
+
+                // A child's spend is the parent's spend. Added here rather
+                // than inside the spawn, because the token budget is checked
+                // at the end of this turn and a child that has just spent
+                // forty thousand tokens should be the reason the run stops.
+                if (step.spawned) |child| {
+                    usage.inputTokens += child.inputTokens;
+                    usage.outputTokens += child.outputTokens;
+                }
 
                 if (step.decision) |decision| {
                     if (decision.effect == .require_human) {
@@ -714,6 +896,16 @@ pub const Runner = struct {
         /// — refused, or never a typed request in the first place.
         pending: ?struct { decision: Decision, request: ToolRequest } = null,
         claim: ?schedule.Claim = null,
+        /// What a child was granted, for a `spawn_agent` that got past both the
+        /// policy and the bounds. Decided here rather than where the work
+        /// happens, because the counters it comes from are shared and the
+        /// deciding half of a turn is the half that runs serially.
+        spawn: ?Spawn = null,
+    };
+
+    const Spawn = struct {
+        spawning: Spawning,
+        grant: swarm.Grant,
     };
 
     /// Decide about one call. Never runs anything.
@@ -723,9 +915,11 @@ pub const Runner = struct {
         context: policy_mod.Context,
         seen: *std.ArrayList(Repeat),
         repeat_limit: usize,
+        spawning: ?Spawning,
+        spawns: *swarm.State,
     ) Error!Prepared {
         var out: Prepared = .{ .step = undefined };
-        out.step = try self.decideOne(call, context, seen, repeat_limit, &out);
+        out.step = try self.decideOne(call, context, seen, repeat_limit, spawning, spawns, &out);
         return out;
     }
 
@@ -735,6 +929,8 @@ pub const Runner = struct {
         context: policy_mod.Context,
         seen: *std.ArrayList(Repeat),
         repeat_limit: usize,
+        spawning: ?Spawning,
+        spawns: *swarm.State,
         out: *Prepared,
     ) Error!Step {
         var step: Step = .{
@@ -805,7 +1001,38 @@ pub const Runner = struct {
             }
         }
 
-        // 5. Everything is decided. What is left is the work itself, which is
+        // 5. Starting a child has a second set of bounds after the policy's.
+        //    The policy answers whether this agent may spawn at all; these
+        //    answer how deep, how many and how much — questions a capability
+        //    cannot express, because their answers depend on what this run has
+        //    already spent. Counted here, where turns are decided one at a
+        //    time and in the order the model asked.
+        if (request == .spawn_agent) {
+            const arranged = spawning orelse {
+                step.refused = true;
+                step.result = .{
+                    .outcome = .denied,
+                    .summary = "This run has nothing to run a child agent on. Do the work yourself.",
+                };
+                step.reply = try toolschema.resultText(self.arena, step.result.?);
+                return step;
+            };
+            switch (swarm.allow(arranged.bounds, spawns.*)) {
+                .refused => |refusal| {
+                    step.refused = true;
+                    step.result = .{ .outcome = .denied, .summary = refusal.text() };
+                    step.reply = try toolschema.resultText(self.arena, step.result.?);
+                    return step;
+                },
+                .allowed => |grant| {
+                    spawns.startedThisTurn += 1;
+                    spawns.startedInTotal += 1;
+                    out.spawn = .{ .spawning = arranged, .grant = grant };
+                },
+            }
+        }
+
+        // 6. Everything is decided. What is left is the work itself, which is
         //    the only part allowed to overlap with another call's, and only
         //    when nothing they touch is shared.
         out.pending = .{ .decision = decision, .request = request };
@@ -837,7 +1064,13 @@ pub const Runner = struct {
             var futures = try self.arena.alloc(std.Io.Future(Error!Step), wave.len());
             for (wave.members, 0..) |index, at| {
                 const held = prepared[index].pending.?;
-                futures[at] = io.async(runOne, .{ self, prepared[index].step, held.decision, held.request });
+                futures[at] = io.async(runOne, .{
+                    self,
+                    prepared[index].step,
+                    held.decision,
+                    held.request,
+                    prepared[index].spawn,
+                });
             }
             // Awaited in wave order, and each result stored at its own index.
             // Nothing here depends on which finished first.
@@ -850,14 +1083,28 @@ pub const Runner = struct {
 
     fn perform(self: Runner, item: *Prepared) Error!void {
         const held = item.pending orelse return;
-        item.step = try runOne(self, item.step, held.decision, held.request);
+        item.step = try runOne(self, item.step, held.decision, held.request, item.spawn);
         item.pending = null;
     }
 
     /// Spend a decision. Safe to call from more than one thread at once, on
     /// calls the scheduler has said touch nothing in common.
-    fn runOne(self: Runner, step: Step, decision: Decision, request: ToolRequest) Error!Step {
+    fn runOne(
+        self: Runner,
+        step: Step,
+        decision: Decision,
+        request: ToolRequest,
+        spawn: ?Spawn,
+    ) Error!Step {
         var out = step;
+        // Starting a child does not go through the executor, and cannot: the
+        // executor performs requests against a filesystem and a process table,
+        // and an agent is neither. It goes to the spawner the caller supplied,
+        // under the grant already decided, and comes back as an ordinary tool
+        // result — which is what makes it one more thing the record accounts
+        // for rather than a second way to do work.
+        if (spawn) |granted| return self.spawnChild(out, request.spawn_agent, granted);
+
         const result = self.executor.run(decision, request) catch |err| {
             // Some of these are refusals reached before anything happened, and
             // some are failures during the work. A person reading the record
@@ -892,6 +1139,58 @@ pub const Runner = struct {
         out.executed = true;
         out.result = result;
         out.reply = try toolschema.resultText(self.arena, result);
+        return out;
+    }
+
+    /// Run a child agent and bring back its answer.
+    ///
+    /// What crosses back is the answer and a line saying what it cost. The
+    /// transcript stays where it was made: the whole reason to hand work to a
+    /// child is that the parent's context gets a sentence where the child
+    /// spent fifty thousand tokens producing it, and copying the transcript
+    /// back would undo that exactly.
+    ///
+    /// A child that ends any way other than answering is still a result rather
+    /// than a failure. "It ran out of turns and here is how far it got" is
+    /// something a parent can act on; an error is not.
+    fn spawnChild(
+        self: Runner,
+        step: Step,
+        request: tools.SpawnAgentRequest,
+        granted: Spawn,
+    ) Error!Step {
+        var out = step;
+        const child = granted.spawning.spawner.spawn(request, granted.grant) catch |err| {
+            out.executed = true;
+            out.result = .{
+                .outcome = .failed,
+                .summary = std.fmt.allocPrint(
+                    self.arena,
+                    "The child agent could not be started: {s}.",
+                    .{@errorName(err)},
+                ) catch return error.OutOfMemory,
+            };
+            out.reply = try toolschema.resultText(self.arena, out.result.?);
+            return out;
+        };
+
+        out.executed = true;
+        out.spawned = child;
+        const summary = child.summary(self.arena) catch return error.OutOfMemory;
+        out.result = .{
+            // The child answered, or it did not. Either is an outcome the
+            // parent can work with, and the difference is one the model has to
+            // be told: an answer from a child that ran out of turns is
+            // partial, and treating it as complete is how a parent confidently
+            // reports half a finding.
+            .outcome = if (std.mem.eql(u8, child.ending, "answered")) .completed else .failed,
+            .summary = summary,
+            .content = child.answer,
+        };
+        out.reply = std.fmt.allocPrint(self.arena, "{s}\n\n{s}", .{
+            summary,
+            if (child.answer.len > 0) child.answer else "It produced no answer.",
+        }) catch return error.OutOfMemory;
         return out;
     }
 
@@ -1122,6 +1421,181 @@ test "the loop asks, runs a tool under a decision, and asks again with the resul
     try testing.expectEqualStrings("The file says twelve bytes.", transcript.answer);
     // Both turns' tokens are added up, not just the last.
     try testing.expectEqual(@as(u64, 18), transcript.usage.inputTokens);
+}
+
+const allow_models_reading_and_children = [_]policy_mod.Rule{
+    allow_models_and_reading[0],
+    allow_models_and_reading[1],
+    .{
+        .id = "children",
+        .capabilities = &.{.@"agent.spawn"},
+        .effect = .allow,
+        .reason = "This test's workspace allows handing work to children.",
+    },
+};
+
+test "a run hands work to a child and gets back an answer, not a transcript" {
+    const fixture = try Fixture.init(&allow_models_reading_and_children, &.{});
+    defer fixture.deinit();
+    const arena = fixture.arena();
+
+    try fixture.place("transport.zig", "firstDelay = 500ms, maxDelay = 8s");
+
+    fixture.recorded.responses = try arena.dupe(transport_mod.Response, &.{
+        // The parent decides the reading is not worth its own context.
+        try callResponse(arena, "spawn_agent",
+            \\{"label":"find the backoff","request":"Which file sets the retry backoff, and what are the numbers?"}
+        ),
+        // The child does the reading. Its turns come out of the same scripted
+        // transport, which is what makes this a real child run and not a stub.
+        try callResponse(arena, "read_file",
+            \\{"path":"transport.zig"}
+        ),
+        try textResponse(arena, "transport.zig sets firstDelay to 500ms and maxDelay to 8s."),
+        // And the parent answers holding the sentence rather than the file.
+        try textResponse(arena, "The backoff starts at 500ms and stops at 8s."),
+    });
+
+    const runner = fixture.runner(stopped_clock);
+    var children: Children = .{
+        .runner = &runner,
+        .connector = catalog.find("ollama").?,
+        .model = "test-model",
+        .acting = fixture.context(),
+    };
+
+    var options = fixture.options();
+    options.spawning = .{ .spawner = children.spawner() };
+
+    const transcript = try runner.run(options, "What is the retry backoff?", fixture.context());
+
+    try testing.expectEqual(Ending.answered, transcript.ending);
+    const step = transcript.turns[0].steps[0];
+    try testing.expectEqualStrings("spawn_agent", step.toolName);
+    try testing.expect(step.ran());
+    try testing.expectEqual(tools.Outcome.completed, step.result.?.outcome);
+
+    // What came back is the child's answer and what it cost, and nothing else.
+    const child = step.spawned.?;
+    try testing.expectEqualStrings("answered", child.ending);
+    try testing.expectEqual(@as(usize, 2), child.turns);
+    try testing.expectEqual(@as(usize, 1), child.toolCalls);
+    try testing.expect(std.mem.indexOf(u8, child.answer, "500ms") != null);
+
+    // The parent's context holds the sentence. It never held the file: the
+    // child read it, and the child's transcript stayed with the child.
+    try testing.expect(std.mem.indexOf(u8, step.reply, "500ms") != null);
+    try testing.expect(std.mem.indexOf(u8, step.reply, "A child agent answered") != null);
+
+    // And the child's spend is the parent's spend. A grant that was divided
+    // and a bill that was not is not a bound.
+    // Two turns of the parent's own (10 and 8) and the child's two (10 and 8).
+    try testing.expectEqual(@as(u64, 10 + 8 + 10 + 8), transcript.usage.inputTokens);
+    try testing.expectEqual(@as(u64, 10 + 8), child.inputTokens);
+}
+
+test "a run with nothing to start a child on says so rather than pretending" {
+    const fixture = try Fixture.init(&allow_models_reading_and_children, &.{});
+    defer fixture.deinit();
+    const arena = fixture.arena();
+
+    // The policy allows starting an agent. There is still nothing here to run
+    // one on, and those are different refusals: one is "you may not", the
+    // other is "there is no such thing here".
+    fixture.recorded.responses = try arena.dupe(transport_mod.Response, &.{
+        try callResponse(arena, "spawn_agent",
+            \\{"request":"Count the tests."}
+        ),
+        try textResponse(arena, "I will do it myself."),
+    });
+
+    const transcript = try fixture.runner(stopped_clock).run(
+        fixture.options(),
+        "How many tests are there?",
+        fixture.context(),
+    );
+
+    const step = transcript.turns[0].steps[0];
+    try testing.expect(step.refused);
+    try testing.expect(!step.ran());
+    try testing.expect(std.mem.indexOf(u8, step.reply, "nothing to run a child agent on") != null);
+    try testing.expectEqual(Ending.answered, transcript.ending);
+}
+
+test "the bound on children over a whole run is a bound, not a bound per turn" {
+    const fixture = try Fixture.init(&allow_models_reading_and_children, &.{});
+    defer fixture.deinit();
+    const arena = fixture.arena();
+
+    fixture.recorded.responses = try arena.dupe(transport_mod.Response, &.{
+        try callResponse(arena, "spawn_agent",
+            \\{"request":"The first piece."}
+        ),
+        try textResponse(arena, "The first answer."),
+        // A new turn clears the per-turn count. It does not clear the total,
+        // which is the whole reason the total exists: ten turns of four is
+        // forty children and nobody chose that.
+        try callResponse(arena, "spawn_agent",
+            \\{"request":"The second piece."}
+        ),
+        try textResponse(arena, "I did the rest myself."),
+    });
+
+    const runner = fixture.runner(stopped_clock);
+    var children: Children = .{
+        .runner = &runner,
+        .connector = catalog.find("ollama").?,
+        .model = "test-model",
+        .acting = fixture.context(),
+        .bounds = .{ .maxTotal = 1 },
+    };
+
+    var options = fixture.options();
+    options.spawning = .{ .spawner = children.spawner(), .bounds = children.bounds };
+
+    const transcript = try runner.run(options, "Do two things.", fixture.context());
+
+    try testing.expect(transcript.turns[0].steps[0].ran());
+
+    const refused = transcript.turns[1].steps[0];
+    try testing.expect(refused.refused);
+    try testing.expect(refused.spawned == null);
+    // And the refusal says what to do instead, or the model asks again.
+    try testing.expect(std.mem.indexOf(u8, refused.reply, "yourself") != null);
+    try testing.expectEqualStrings("I did the rest myself.", transcript.answer);
+}
+
+test "a child gets a share of what is left, and none when there is nothing left" {
+    const fixture = try Fixture.init(&allow_models_reading_and_children, &.{});
+    defer fixture.deinit();
+    const arena = fixture.arena();
+
+    fixture.recorded.responses = try arena.dupe(transport_mod.Response, &.{
+        try callResponse(arena, "spawn_agent",
+            \\{"request":"Something."}
+        ),
+        try textResponse(arena, "Nothing to report."),
+    });
+
+    const runner = fixture.runner(stopped_clock);
+    var children: Children = .{
+        .runner = &runner,
+        .connector = catalog.find("ollama").?,
+        .model = "test-model",
+        .acting = fixture.context(),
+    };
+
+    // Three turns, halved, is one — below the least a child can finish
+    // anything with. Starting it would spend a request to be told it ran out.
+    var options = fixture.options();
+    options.budget.turns = 3;
+    options.spawning = .{ .spawner = children.spawner() };
+
+    const transcript = try runner.run(options, "Do something.", fixture.context());
+
+    const step = transcript.turns[0].steps[0];
+    try testing.expect(step.refused);
+    try testing.expect(std.mem.indexOf(u8, step.reply, "not enough turns") != null);
 }
 
 test "a refused tool call is reported to the model, and nothing runs" {

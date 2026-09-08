@@ -78,6 +78,8 @@ zag workflow                   # this repository's own workflow, as a task graph
 zag history "status:failed zig" # search recorded work, not a text file
 zag show "kind:command zig build"  # what that command actually printed
 zag ask --resume               # carry on where the last run stopped
+zag ask --children "..."       # let the run hand parts of the work to child agents
+zag route                      # which model to use next, from what has worked here
 zag trajectories               # every recorded agent run, scored
 zag trajectories --json        # the same as JSON Lines, for training or eval
 zag eval baseline.jsonl        # did a change help? paired, and honest about noise
@@ -145,7 +147,45 @@ says which rule and why.
 Capabilities: `fs.read`, `fs.write`, `fs.delete`, `process.execute`,
 `process.signal`, `network.connect`, `network.listen`, `git.read`,
 `git.commit`, `git.push`, `credentials.use`, `credentials.read`, `mcp.invoke`,
-`container.start`, `remote.execute`, `model.infer`.
+`container.start`, `remote.execute`, `model.infer`, `agent.spawn`,
+`knowledge.write`.
+
+### Handing work to a child agent
+
+One context doing everything is the limit an agent hits first. Reading six
+files to find one answer spends six files' worth of context on a sentence, and
+the sentence is all the work needed.
+
+`zag ask --children` offers the run a `spawn_agent` tool. A child gets the
+question and nothing else, does the reading in its own context, and hands back
+its answer — not its transcript. The parent pays for the answer.
+
+```
+zag ask --children "why is the build slow?"
+zag ask --children --depth 3 "..."   # deeper trees, if you mean it
+```
+
+It is off by default, and the policy has the last word: nothing spawns unless
+a rule allows `agent.spawn`.
+
+```toml
+[[rule]]
+id = "children"
+allow = ["agent.spawn"]
+because = "Reading in a child's context is cheaper than reading in mine."
+```
+
+Four bounds hold whatever the policy says, and they are why this could be
+offered to a model at all. A child runs on the same policy engine as its
+parent, so it can never decide anything the parent could not. Depth is
+bounded, because a child that can spawn a child that can spawn is a fork bomb
+with a language model in it. Fan-out is bounded per turn *and* over the run,
+because ten turns of four is forty. And a child spends from what the parent has
+left — half of the remaining turns and tokens — rather than a copy of the
+budget, so four children in a row get a half, a quarter, an eighth.
+
+Each child's own work is in the record, under the parent, with its own agent
+identifier and in the same session. `zag why` walks from one to the other.
 
 `zag-audit` is the second binary. It checks a repository against the standards
 it claims to meet, and nothing it does is needed to record work:

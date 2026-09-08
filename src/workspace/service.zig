@@ -643,6 +643,13 @@ pub const Service = struct {
         failure: ?[]const u8 = null,
         /// The session event everything in the run is correlated to.
         correlation: ?event_mod.EventId = null,
+        /// The run that started this one, when this is a child agent.
+        ///
+        /// A child hangs under its parent rather than opening a session of its
+        /// own: it is the same person, in the same workspace, doing part of
+        /// the same piece of work, and a second session would make it look
+        /// like somebody else turned up.
+        parent: ?event_mod.EventId = null,
 
         pub fn init(service: *Service) AgentRecorder {
             return .{
@@ -656,7 +663,27 @@ pub const Service = struct {
         }
 
         pub fn journal(self: *AgentRecorder) loop_mod.Journal {
-            return .{ .context = self, .recordFn = write };
+            return .{ .context = self, .recordFn = write, .childFn = openChild };
+        }
+
+        /// A recorder for a child agent, whose run hangs under this one.
+        ///
+        /// Its own agent identifier and its own notion of which call is open,
+        /// so the child's tool calls do not attach themselves to the parent's
+        /// request; the parent's session and correlation, so one query still
+        /// returns the whole tree.
+        fn openChild(context: *anyopaque) anyerror!loop_mod.Journal {
+            const self: *AgentRecorder = @ptrCast(@alignCast(context));
+            const service = self.service;
+            const child = try service.arena.create(AgentRecorder);
+            child.* = .{
+                .service = service,
+                .session = self.session,
+                .agent = service.ids.next(idmod.AgentId),
+                .correlation = self.correlation,
+                .parent = self.started,
+            };
+            return child.journal();
         }
 
         fn write(context: *anyopaque, moment: loop_mod.Moment) anyerror!void {
@@ -675,10 +702,15 @@ pub const Service = struct {
 
             switch (moment) {
                 .started => |e| {
-                    const opened = try service.record(.{ .session_opened = .{
-                        .session = self.session,
-                        .workingDirectory = service.root,
-                    } }, .{ .at = at, .actor = actor });
+                    // A child joins the session its parent opened. Only a run
+                    // with no parent opens one.
+                    const opened: ?event_mod.EventId = if (self.parent) |_|
+                        self.correlation
+                    else
+                        (try service.record(.{ .session_opened = .{
+                            .session = self.session,
+                            .workingDirectory = service.root,
+                        } }, .{ .at = at, .actor = actor })).id;
                     const begun = try service.record(.{ .agent_started = .{
                         .agent = self.agent,
                         .session = self.session,
@@ -689,13 +721,16 @@ pub const Service = struct {
                     } }, .{
                         .at = at,
                         .actor = actor,
-                        .causedBy = opened.id,
-                        .correlation = opened.id,
+                        // What caused a child to start is the parent asking
+                        // for it, which is the link `zag why` walks back
+                        // along.
+                        .causedBy = self.parent orelse opened,
+                        .correlation = opened,
                     });
                     self.started = begun.id;
                     // The correlation for the whole run is the session, so one
-                    // query returns it all.
-                    self.correlation = opened.id;
+                    // query returns it all — the children included.
+                    self.correlation = opened;
                 },
                 .compacted => |e| {
                     // What the model was shown changed, so the record has to
@@ -1830,6 +1865,134 @@ test "a key a command prints never reaches the stored bytes or the log" {
 
     const reopened = try Service.open(arena, io, .{ .root = root, .actor = testActor(), .now = at });
     try testing.expect(reopened.report.isHealthy());
+}
+
+test "a child agent's run is recorded under its parent, in the same session" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var service = (try Service.open(arena, io, .{
+        .root = root,
+        .actor = testActor(),
+        .now = .{ .ns = 1_700_000_000 * timeutil.ns_per_s },
+    })).service;
+
+    var recorder = Service.AgentRecorder.init(&service);
+    const parent = recorder.journal();
+
+    parent.record(.{ .started = .{
+        .request = "what is the retry backoff?",
+        .provider = "ollama",
+        .model = "llama3.2",
+        .policy = "workspace",
+    } });
+    parent.record(.{ .asked = .{
+        .tool = "spawn_agent",
+        .capability = "agent.spawn",
+        .resource = "find the backoff",
+        .argumentsJson = "",
+        .decision = null,
+    } });
+
+    // The child keeps its own record. Sharing the parent's would attach the
+    // child's tool calls to the parent's request and leave the parent's tree
+    // pointing at the child's start — a record that reads as true and is not.
+    const child = parent.forChild().?;
+    child.record(.{ .started = .{
+        .request = "Which file sets the retry backoff?",
+        .provider = "ollama",
+        .model = "llama3.2",
+        .policy = "workspace",
+    } });
+    child.record(.{ .asked = .{
+        .tool = "read_file",
+        .capability = "fs.read",
+        .resource = "transport.zig",
+        .argumentsJson = "",
+        .decision = null,
+    } });
+    child.record(.{ .settled = .{
+        .tool = "read_file",
+        .outcome = .completed,
+        .summary = "Read 31 bytes from transport.zig.",
+        .resultHash = hashing.Hash.zero,
+    } });
+    child.record(.{ .finished = .{
+        .ending = .answered,
+        .elapsed = .{ .ns = 40 * timeutil.ns_per_ms },
+        .toolCalls = 1,
+        .refusedCalls = 0,
+        .usage = .{ .inputTokens = 40, .outputTokens = 12 },
+    } });
+
+    parent.record(.{ .settled = .{
+        .tool = "spawn_agent",
+        .outcome = .completed,
+        .summary = "A child agent answered after 2 turns and 1 tool call.",
+        .resultHash = hashing.Hash.zero,
+    } });
+    parent.record(.{ .finished = .{
+        .ending = .answered,
+        .elapsed = .{ .ns = 120 * timeutil.ns_per_ms },
+        .toolCalls = 1,
+        .refusedCalls = 0,
+        .usage = .{ .inputTokens = 60, .outputTokens = 18 },
+    } });
+
+    try testing.expect(recorder.failure == null);
+    try service.flush(io);
+
+    const path = try std.fmt.allocPrint(arena, "{s}/.workspace/events.jsonl", .{root});
+    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20));
+    const loaded = try log_mod.Log.loadJsonLines(arena, source, 1);
+    try testing.expect(try loaded.log.verify() == null);
+
+    // One session was opened, not two. It is the same person, in the same
+    // workspace, doing part of the same piece of work.
+    var sessions: usize = 0;
+    var agents: usize = 0;
+    var parent_start: ?usize = null;
+    var child_start: ?usize = null;
+    for (loaded.log.entries.items, 0..) |entry, index| {
+        switch (entry.payload) {
+            .session_opened => sessions += 1,
+            .agent_started => {
+                agents += 1;
+                if (parent_start == null) parent_start = index else child_start = index;
+            },
+            else => {},
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), sessions);
+    try testing.expectEqual(@as(usize, 2), agents);
+
+    // Two agents, and they are not the same agent. A child that reused its
+    // parent's identifier would make "which agent read that file?" unanswerable.
+    const parent_id = loaded.log.entries.items[parent_start.?].payload.agent_started.agent;
+    const child_id = loaded.log.entries.items[child_start.?].payload.agent_started.agent;
+    try testing.expect(!parent_id.eql(child_id));
+
+    // And the child hangs under the parent, which is the link "zag why" walks
+    // back along: still one root for the whole tree.
+    const graph = try graph_mod.Graph.build(arena, loaded.log);
+    const roots = try graph.roots();
+    try testing.expectEqual(@as(usize, 1), roots.items.len);
+    try testing.expectEqual(parent_start.?, graph.nodes[child_start.?].parent.?);
+
+    // The child's own tool call belongs to the child, not to the parent.
+    for (loaded.log.entries.items, 0..) |entry, index| {
+        if (entry.payload != .tool_requested) continue;
+        if (!std.mem.eql(u8, entry.payload.tool_requested.tool, "read_file")) continue;
+        try testing.expectEqual(child_start.?, graph.nodes[index].parent.?);
+    }
 }
 
 test "what an agent's tools produced is kept, redacted, and auditable" {
