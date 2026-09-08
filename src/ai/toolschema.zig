@@ -332,22 +332,6 @@ fn rawField(
 /// model can act on: "you may not" and "it did not work" lead to different next
 /// moves, and a model that cannot tell them apart will retry the one it should
 /// not.
-/// The most of one tool's output that is handed back to a model.
-///
-/// A cap is needed because a single `zig build` can produce megabytes and the
-/// model has a context to fit it in. The end is kept rather than the start: a
-/// compiler prints its errors after its progress, a test runner prints the
-/// failures after the passes, and the last thing a crashing program writes is
-/// why it crashed. Truncation says so in words, so a model reading a partial
-/// output knows it is partial and does not conclude the file was short.
-pub const result_content_limit: usize = 24 * 1024;
-
-/// What a model is told about one tool call.
-///
-/// The outcome, the summary sentence, and then what the tool actually
-/// produced. The last part is the one that matters: without it a model that
-/// asked to read a file learns its size, and an agent told to fix a failing
-/// test learns only that something exited non-zero.
 /// The defaults a run request takes when the model does not name them.
 ///
 /// Read from the type rather than restated, because restating them here is
@@ -356,6 +340,89 @@ pub const result_content_limit: usize = 24 * 1024;
 /// model asked for ran with no environment whatever the type claimed.
 const default_execute: tools.ExecuteRequest = .{ .argv = &.{} };
 
+/// The most of one tool's output that is handed back to a model.
+///
+/// A cap is needed because a single `zig build` can produce megabytes and the
+/// model has a context to fit it in. Which end is kept depends on what the
+/// content is; see `tools.ContentKind`.
+pub const result_content_limit: usize = 24 * 1024;
+
+/// Take a terminal's own control sequences out of captured output.
+///
+/// The executor runs programs on a pseudoterminal, so what comes back is what a
+/// terminal would have drawn: cursor moves, colour changes, synchronised-update
+/// brackets, alternate character sets. A model reading `zig build` output was
+/// spending about a tenth of its context on those, and they say nothing about
+/// the build.
+///
+/// Only the model's copy is cleaned. The record keeps the bytes the program
+/// actually wrote, because that is what happened.
+pub fn withoutControlSequences(arena: std.mem.Allocator, raw: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.ensureTotalCapacity(arena, raw.len);
+
+    var at: usize = 0;
+    while (at < raw.len) {
+        const byte = raw[at];
+        if (byte != 0x1b) {
+            // Carriage returns are how a progress line overwrites itself. Kept
+            // as newlines so the successive states stay readable rather than
+            // collapsing into one line of the last thing written.
+            if (byte == '\r') {
+                if (at + 1 < raw.len and raw[at + 1] == '\n') {
+                    at += 1;
+                    continue;
+                }
+                try out.append(arena, '\n');
+                at += 1;
+                continue;
+            }
+            try out.append(arena, byte);
+            at += 1;
+            continue;
+        }
+
+        // An escape sequence. Which kind decides where it ends.
+        if (at + 1 >= raw.len) break;
+        switch (raw[at + 1]) {
+            // CSI: parameters and intermediates, then one final byte.
+            '[' => {
+                var cursor = at + 2;
+                while (cursor < raw.len and raw[cursor] >= 0x20 and raw[cursor] <= 0x3f) cursor += 1;
+                while (cursor < raw.len and raw[cursor] >= 0x20 and raw[cursor] <= 0x2f) cursor += 1;
+                at = if (cursor < raw.len) cursor + 1 else raw.len;
+            },
+            // OSC: a string, ended by BEL or ST.
+            ']' => {
+                var cursor = at + 2;
+                while (cursor < raw.len) : (cursor += 1) {
+                    if (raw[cursor] == 0x07) {
+                        cursor += 1;
+                        break;
+                    }
+                    if (raw[cursor] == 0x1b and cursor + 1 < raw.len and raw[cursor + 1] == '\\') {
+                        cursor += 2;
+                        break;
+                    }
+                }
+                at = cursor;
+            },
+            // Character set selection: one intermediate, one final byte. This
+            // is what draws the box lines in a build summary.
+            '(', ')', '*', '+' => at = @min(at + 3, raw.len),
+            // Everything else two-byte: keypad modes, index, reset.
+            else => at = at + 2,
+        }
+    }
+    return out.items;
+}
+
+/// What a model is told about one tool call.
+///
+/// The outcome, the summary sentence, and then what the tool actually
+/// produced. The last part is the one that matters: without it a model that
+/// asked to read a file learns its size, and an agent told to fix a failing
+/// test learns only that something exited non-zero.
 pub fn resultText(
     arena: std.mem.Allocator,
     result: tools.ToolResult,
@@ -367,22 +434,34 @@ pub fn resultText(
         .cancelled => "This was stopped before it finished",
         .timed_out => "This ran out of time and was stopped",
     };
-
     const head = if (result.summary.len > 0)
         try std.fmt.allocPrint(arena, "{s}. {s}", .{ lead, result.summary })
     else
         lead;
     if (result.content.len == 0) return head;
 
-    if (result.content.len > result_content_limit) {
-        const kept = result.content[result.content.len - result_content_limit ..];
-        return std.fmt.allocPrint(
+    const body = switch (result.contentKind) {
+        .text => result.content,
+        .terminal_output => try withoutControlSequences(arena, result.content),
+    };
+    if (body.len <= result_content_limit) {
+        return std.fmt.allocPrint(arena, "{s}\n\n{s}", .{ head, body });
+    }
+
+    // Said in words either way, so a model reading part of something knows it
+    // is a part and does not conclude the file was short or the build quiet.
+    return switch (result.contentKind) {
+        .text => std.fmt.allocPrint(
+            arena,
+            "{s}\n\nThe first {d} bytes of {d}, because the whole of it does not fit:\n{s}",
+            .{ head, result_content_limit, body.len, body[0..result_content_limit] },
+        ),
+        .terminal_output => std.fmt.allocPrint(
             arena,
             "{s}\n\nThe last {d} bytes of {d}, because the whole of it does not fit:\n{s}",
-            .{ head, kept.len, result.content.len, kept },
-        );
-    }
-    return std.fmt.allocPrint(arena, "{s}\n\n{s}", .{ head, result.content });
+            .{ head, result_content_limit, body.len, body[body.len - result_content_limit ..] },
+        ),
+    };
 }
 
 const testing = std.testing;
@@ -651,22 +730,81 @@ test "what a tool produced reaches the model, not just how big it was" {
     try testing.expect(std.mem.indexOf(u8, text, "expected ';' after statement") != null);
 }
 
-test "a huge output is cut at the end, and says that it was" {
+test "which end of a big result is kept depends on what it is" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // The end is what matters: a compiler prints errors after progress, a test
-    // runner prints failures after passes, and the last thing a crashing
-    // program writes is why it crashed.
     const big = try arena.alloc(u8, result_content_limit * 2);
     @memset(big, 'x');
+    @memcpy(big[0..13], "THE REAL HEAD");
     @memcpy(big[big.len - 12 ..], "THE REAL END");
 
-    const text = try resultText(arena, .{ .outcome = .completed, .content = big });
-    try testing.expect(std.mem.endsWith(u8, text, "THE REAL END"));
-    try testing.expect(text.len < big.len);
-    // Said in words, so a model reading a partial output does not conclude the
-    // file was short.
-    try testing.expect(std.mem.indexOf(u8, text, "does not fit") != null);
+    // Command output: the end. A compiler prints errors after progress, a test
+    // runner prints failures after passes, and the last thing a crashing
+    // program writes is why it crashed.
+    const output = try resultText(arena, .{
+        .outcome = .completed,
+        .content = big,
+        .contentKind = .terminal_output,
+    });
+    try testing.expect(std.mem.endsWith(u8, output, "THE REAL END"));
+    try testing.expect(std.mem.indexOf(u8, output, "THE REAL HEAD") == null);
+    try testing.expect(std.mem.indexOf(u8, output, "does not fit") != null);
+
+    // A file: the beginning. One rule for both got this exactly wrong in the
+    // interesting case — a model asked to read a 54 KB source file to
+    // understand it was handed the last 24 KB, which was the tests at the
+    // bottom.
+    const file = try resultText(arena, .{
+        .outcome = .completed,
+        .content = big,
+        .contentKind = .text,
+    });
+    try testing.expect(std.mem.indexOf(u8, file, "THE REAL HEAD") != null);
+    try testing.expect(std.mem.indexOf(u8, file, "THE REAL END") == null);
+    try testing.expect(std.mem.indexOf(u8, file, "does not fit") != null);
+}
+
+test "a terminal's own control sequences do not reach the model" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Captured verbatim from a real `zig build` run through the executor's
+    // pseudoterminal. About a tenth of what the model was reading looked like
+    // this, and none of it says anything about the build.
+    const raw = "\x1b[?2026h\x1b[J[4/9] steps\n\x1b(0tq\x1b(B run test\n\x1b[31m\x1b[1merror\x1b[0m: expected ';'\n\x1b]9;4;1;44\x1b\\done\n";
+    const clean = try withoutControlSequences(arena, raw);
+
+    // What a person would have read stays.
+    try testing.expect(std.mem.indexOf(u8, clean, "[4/9] steps") != null);
+    try testing.expect(std.mem.indexOf(u8, clean, "run test") != null);
+    try testing.expect(std.mem.indexOf(u8, clean, "error: expected ';'") != null);
+    try testing.expect(std.mem.indexOf(u8, clean, "done") != null);
+
+    // Nothing that only a terminal understands does.
+    try testing.expect(std.mem.indexOfScalar(u8, clean, 0x1b) == null);
+    try testing.expect(std.mem.indexOf(u8, clean, "[?2026h") == null);
+    try testing.expect(std.mem.indexOf(u8, clean, "[31m") == null);
+    try testing.expect(std.mem.indexOf(u8, clean, "9;4;1;44") == null);
+
+    // And it is meaningfully smaller, which is the point.
+    try testing.expect(clean.len < raw.len);
+}
+
+test "a progress line that overwrites itself keeps every state it showed" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A carriage return is how a build redraws one line. Dropping it would
+    // fuse the states into one run-on line; treating it as a newline keeps
+    // them readable and in order.
+    const clean = try withoutControlSequences(arena, "1/3 done\r2/3 done\r3/3 done\n");
+    try testing.expect(std.mem.indexOf(u8, clean, "1/3 done\n2/3 done\n3/3 done") != null);
+
+    // A CRLF is one line ending, not two.
+    const crlf = try withoutControlSequences(arena, "one\r\ntwo\r\n");
+    try testing.expectEqualStrings("one\ntwo\n", crlf);
 }
