@@ -25,6 +25,7 @@ const Command = enum {
     workflow,
     history,
     show,
+    trajectories,
     knowledge,
     term,
     providers,
@@ -50,6 +51,7 @@ const Command = enum {
             .{ .name = "workflow", .command = .workflow },
             .{ .name = "history", .command = .history },
             .{ .name = "show", .command = .show },
+            .{ .name = "trajectories", .command = .trajectories },
             .{ .name = "knowledge", .command = .knowledge },
             .{ .name = "term", .command = .term },
             .{ .name = "providers", .command = .providers },
@@ -82,6 +84,7 @@ pub const help_text =
     \\  workflow            Show this repository's own workflow as a task graph.
     \\  history <query>     Search recorded work. For example: status:failed zig
     \\  show <query>        Show what a recorded command printed.
+    \\  trajectories        Write every recorded agent run as JSON Lines, with its score.
     \\  knowledge           Show the knowledge under .workspace/, and what is overdue.
     \\  term                Open a shell in a terminal that records what you do.
     \\  providers           List the model connectors and say which credentials are set.
@@ -306,6 +309,7 @@ fn run(
         .workflow => try workflowReport(arena, w, options),
         .history => try historySearch(arena, io, w, options),
         .show => try showOutput(arena, io, w, options),
+        .trajectories => try writeTrajectories(arena, io, w, options),
         .knowledge => try knowledgeIndex(arena, io, w, options),
         .term => try interactiveTerminal(arena, io, w, options, environment),
         .providers => try listProviders(arena, io, w, options, environment),
@@ -581,6 +585,56 @@ fn historySearch(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, option
     });
     try results.writeList(w);
     return if (incomplete) 1 else 0;
+}
+
+/// Write every recorded agent run as a trajectory.
+///
+/// A workspace used for a month holds hundreds of runs, each a task, a
+/// sequence of decisions, the result of every action and how it ended. That is
+/// what a trajectory is, and until now the most valuable thing this project
+/// accumulates could only be read one run at a time by a person.
+///
+/// JSON Lines to standard output, so it pipes into whatever reads datasets.
+fn writeTrajectories(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+) !u8 {
+    const opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.root,
+        .actor = workbenchActor(),
+        .now = wallClock(io),
+    }) catch {
+        try w.print("zag could not open the workspace in {s}.\n", .{options.root});
+        return 1;
+    };
+
+    const runs = try zag.ai.trajectory.extract(arena, io, opened.service.log, opened.service.content);
+    if (runs.len == 0) {
+        try w.writeAll("No agent runs are recorded in this workspace.\n");
+        return 1;
+    }
+
+    if (options.json) {
+        try zag.ai.trajectory.writeJsonLines(runs, w);
+        return 0;
+    }
+
+    // Without --json, what a person wants is the shape of the set rather than
+    // the set itself: which runs went well, and whether the whole is worth
+    // training or measuring against.
+    var scores: std.ArrayList(zag.ai.outcome.Score) = .empty;
+    for (runs) |trajectory| {
+        try scores.append(arena, trajectory.score);
+        try w.print("{d:.2}  ", .{trajectory.score.reward()});
+        try trajectory.score.writeSentence(w);
+        try w.print("  {s}\n", .{trajectory.task});
+    }
+    try w.writeAll("\n");
+    try zag.ai.outcome.summarise(scores.items).writeSentence(w);
+    try w.writeAll("\nRun with --json to write the trajectories themselves.\n");
+    return 0;
 }
 
 /// Show what a recorded command printed.
@@ -1154,6 +1208,14 @@ fn askAModel(
         var sentence: std.Io.Writer.Allocating = .init(arena);
         try rebuilt.writeSentence(&sentence.writer);
         try w.print("Carrying on: {s}\n", .{rebuilt.task});
+        // A resumed run with no new question would otherwise record an empty
+        // task, so the record — and every trajectory read out of it — would
+        // hold a run that appears to have been asked for nothing. It is
+        // continuing the earlier one, and says so.
+        if (question.items.len == 0) {
+            try question.appendSlice(arena, "Carrying on: ");
+            try question.appendSlice(arena, rebuilt.task);
+        }
         try w.print("{s}\n\n", .{sentence.written()});
         try w.flush();
         earlier = rebuilt.messages;
