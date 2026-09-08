@@ -93,7 +93,7 @@ pub const help_text =
     \\  trajectories        Write every recorded agent run as JSON Lines, with its score.
     \\  judge               Ask a model what it thinks of the recorded runs, and record it.
     \\  eval <baseline>     Compare this workspace's runs against an earlier export.
-    \\  route               Say which model to use next, from what they did here.
+    \\  route ["task"]      Which model to use next. With a task, a policy trained on the record.
     \\  knowledge           Show the knowledge under .workspace/, and what is overdue.
     \\  term                Open a shell in a terminal that records what you do.
     \\  providers           List the model connectors and say which credentials are set.
@@ -661,6 +661,7 @@ fn routeToAModel(
     const env: Environment = .{ .entries = environment };
     var candidates: std.ArrayList(zag.ai.bandit.Arm) = .empty;
     var untried: usize = 0;
+    var unnameable: usize = 0;
     for (zag.ai.catalog.connectors) |connector| {
         const has_key = connector.keyVariable.len > 0 and
             Environment.lookup(@constCast(&env), connector.keyVariable) != null;
@@ -670,11 +671,33 @@ fn routeToAModel(
             if (std.mem.eql(u8, arm.connector, connector.id)) used_here = true;
         }
         if (!options.explore and !has_key and !used_here) continue;
+
+        // A connector this build cannot name a model for is not a
+        // recommendation. It was being offered anyway, and the command printed
+        // at the end came out as `--model ""`, which cannot work — a router
+        // that ends in a command the person cannot run has not routed
+        // anything.
+        const model = defaultModel(connector);
+        if (model.len == 0 and !used_here) {
+            unnameable += 1;
+            continue;
+        }
+
         if (!used_here) untried += 1;
         try candidates.append(arena, .{
             .connector = connector.id,
-            .model = defaultModel(connector),
+            .model = model,
         });
+    }
+    if (unnameable > 0) {
+        try w.print(
+            "{d} connector{s} left out: this build knows how to reach {s} but not which\nmodel to ask for. Name one with --model and it joins the record.\n\n",
+            .{
+                unnameable,
+                if (unnameable == 1) "" else "s",
+                if (unnameable == 1) "it" else "them",
+            },
+        );
     }
 
     const arms = try zag.ai.bandit.withCandidates(arena, known, candidates.items);
@@ -705,7 +728,46 @@ fn routeToAModel(
     // would be a lookup table, not a sampler.
     var seed_bytes: [8]u8 = undefined;
     try io.randomSecure(&seed_bytes);
-    const choice = zag.ai.bandit.choose(arms, std.mem.readInt(u64, &seed_bytes, .little)).?;
+    const seed = std.mem.readInt(u64, &seed_bytes, .little);
+
+    // With a task in hand there is a second thing to try. The bandit has no
+    // idea what it is being asked — every task is the same task to it — so a
+    // model that reads code well and writes it badly gets one number that
+    // averages the two. A policy trained on the same runs, with the task as an
+    // input, can tell them apart. It is used only when it has shown, on runs
+    // it never saw, that it beats the best single arm; otherwise this says so
+    // and falls back.
+    var task: std.ArrayList(u8) = .empty;
+    for (options.positional, 0..) |word, index| {
+        if (index > 0) try task.append(arena, ' ');
+        try task.appendSlice(arena, word);
+    }
+    if (task.items.len > 0) {
+        const episodes = try zag.ai.policygradient.episodesIn(arena, opened.service.log);
+        const trained = try zag.ai.policygradient.train(arena, episodes, .{});
+        try w.writeAll("\nWith the task in hand\n");
+        try trained.writeReport(w);
+
+        if (trained.worthUsing()) {
+            const features = zag.ai.policygradient.featuresOf(task.items);
+            const chances = try arena.alloc(f64, trained.policy.arms.len);
+            const drawn = trained.policy.sample(features, chances, seed);
+            const arm = trained.policy.arms[drawn];
+            try w.print("\nUse next\n  {s}/{s}, drawn with probability {d:.2} for this task.\n", .{
+                arm.connector,
+                arm.model,
+                chances[drawn],
+            });
+            try w.print("\n  zag ask --provider {s} --model {s} \"{s}\"\n", .{
+                arm.connector,
+                arm.model,
+                task.items,
+            });
+            return 0;
+        }
+    }
+
+    const choice = zag.ai.bandit.choose(arms, seed).?;
 
     try w.writeAll("\nUse next\n  ");
     try choice.writeSentence(w);
@@ -1610,6 +1672,13 @@ fn askAModel(
     }
 
     const model = if (options.model.len > 0) options.model else defaultModel(connector);
+    if (model.len == 0) {
+        try w.print(
+            "zag knows how to reach {s} but not which model to ask it for.\nName one: zag ask --provider {s} --model <name> \"...\"\n",
+            .{ connector.id, connector.id },
+        );
+        return 2;
+    }
 
     // Handing self-contained work to children, when it was asked for. The
     // children run on this same runner and this same policy engine, so nothing
