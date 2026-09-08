@@ -164,6 +164,7 @@ its answer — not its transcript. The parent pays for the answer.
 
 ```
 zag ask --children "why is the build slow?"
+zag ask --together "..."             # a turn's children run at once
 zag ask --children --depth 3 "..."   # deeper trees, if you mean it
 ```
 
@@ -185,6 +186,15 @@ with a language model in it. Fan-out is bounded per turn *and* over the run,
 because ten turns of four is forty. And a child spends from what the parent has
 left — half of the remaining turns and tokens — rather than a copy of the
 budget, so four children in a row get a half, a quarter, an eighth.
+
+`--together` is what makes a fan-out worth doing: four children reading four
+parts of a repository take one child's wall clock rather than four. It is safe
+because it takes authority away rather than granting any — children that run
+side by side are narrowed to reading, so two of them cannot disagree about a
+file, and one of them cannot start a fan-out inside the fan-out. The narrowing
+is a deny rule appended to your policy, and the engine resolves deny over
+allow, so there is no policy it could widen. A child that needs to run the
+tests is a child to start on its own.
 
 Each child's own work is in the record, under the parent, with its own agent
 identifier and in the same session. `zag why` walks from one to the other.

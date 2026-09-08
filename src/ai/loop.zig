@@ -343,14 +343,51 @@ pub const Children = struct {
     budget: Budget = .{},
     system: []const u8 = child_instructions,
     maxOutputTokens: u32 = 16000,
-
-    // Two children never run at the same time, and not by luck: `agent.spawn`
-    // claims everything in `ai/schedule.zig`, so a spawn is a wave of its own.
-    // That is what makes one `Children` safe to share across a turn that asked
-    // for four of them.
+    /// Let children of one turn run at the same time.
+    ///
+    /// This is what makes a fan-out worth doing: four children reading four
+    /// parts of a repository take one child's wall clock rather than four.
+    /// `agent.spawn` claims `siblings` in `ai/schedule.zig`, so children share
+    /// a wave with each other and with nothing else.
+    ///
+    /// What makes that safe is not the scheduling. It is that a child which
+    /// runs beside other children is narrowed to reading — see
+    /// `swarm.readOnly` — so two of them cannot disagree about a file. Turning
+    /// this on therefore takes authority away from children rather than
+    /// granting any, which is why it needs no separate permission.
+    ///
+    /// Off without an `io` on the runner, because there would be nothing to
+    /// run them on and the narrowing would then be pure loss.
+    together: bool = false,
+    /// Built once, on the first concurrent spawn, and shared by every child
+    /// after it. Narrowing is a rule appended to a policy, and doing it per
+    /// child would allocate the same list on every fan-out.
+    narrowed: ?*policy_mod.Engine = null,
 
     pub fn spawner(self: *Children) swarm.Spawner {
         return .{ .context = self, .spawnFn = start };
+    }
+
+    /// The engine a child runs on: the parent's, or a narrowed one when
+    /// children are running together.
+    fn engineFor(self: *Children, arena: std.mem.Allocator) !*policy_mod.Engine {
+        if (!self.together or self.runner.io == null) return self.runner.engine;
+        if (self.narrowed) |engine| return engine;
+
+        const narrowed = try swarm.readOnly(arena, self.runner.engine.policy);
+        const engine = try arena.create(policy_mod.Engine);
+        engine.* = policy_mod.Engine.init(
+            arena,
+            narrowed,
+            // Its own identifier stream, derived from the narrowed policy's
+            // name. Two engines drawing from one seed would hand the same
+            // decision identifier to different decisions; drawing it from the
+            // clock would make a replay of the same run produce different
+            // identifiers, which is the thing the record cannot have.
+            std.hash.Wyhash.hash(0xC417D, narrowed.id),
+        );
+        self.narrowed = engine;
+        return engine;
     }
 
     fn start(
@@ -365,6 +402,12 @@ pub const Children = struct {
         budget.tokens = grant.tokens;
 
         var runner = self.runner.*;
+        // Narrowed when children run together, the parent's own otherwise.
+        // Standing grants are deliberately not carried over: a person allowing
+        // something once for the parent did not allow it for four children at
+        // the same time.
+        runner.engine = try self.engineFor(runner.arena);
+        runner.transport.engine = runner.engine;
         // A child never writes into its parent's record keeper. Where there is
         // no child journal to be had, it writes nothing rather than writing
         // into the parent's — a corrupted causal tree is worse than a missing
@@ -1492,6 +1535,88 @@ test "a run hands work to a child and gets back an answer, not a transcript" {
     // Two turns of the parent's own (10 and 8) and the child's two (10 and 8).
     try testing.expectEqual(@as(u64, 10 + 8 + 10 + 8), transcript.usage.inputTokens);
     try testing.expectEqual(@as(u64, 10 + 8), child.inputTokens);
+}
+
+test "children that run together may only read, whatever the parent may do" {
+    // A workspace that lets an agent write. Its children, running side by
+    // side, may not — because what two of them touch cannot be read off a
+    // request, and a race between two agents over one file would be recorded
+    // faithfully and be nobody's fault.
+    const wide = [_]policy_mod.Rule{
+        allow_models_and_reading[0],
+        allow_models_and_reading[1],
+        .{
+            .id = "writing",
+            .capabilities = &.{.@"fs.write"},
+            .effect = .allow,
+            .reason = "This workspace allows writing.",
+        },
+        .{
+            .id = "children",
+            .capabilities = &.{.@"agent.spawn"},
+            .effect = .allow,
+            .reason = "And starting children.",
+        },
+    };
+
+    const fixture = try Fixture.init(&wide, &.{});
+    defer fixture.deinit();
+    const arena = fixture.arena();
+
+    fixture.recorded.responses = try arena.dupe(transport_mod.Response, &.{
+        try callResponse(arena, "spawn_agent",
+            \\{"request":"Write notes.txt."}
+        ),
+        // The child tries to write, and is refused by its own engine.
+        try callResponse(arena, "write_file",
+            \\{"path":"notes.txt","contents":"hello"}
+        ),
+        try textResponse(arena, "I was not allowed to write."),
+        try textResponse(arena, "The child could not write."),
+    });
+
+    var runner = fixture.runner(stopped_clock);
+    // Concurrency is what the narrowing pays for, so there has to be something
+    // to run children on for it to apply at all.
+    runner.io = fixture.threaded.io();
+
+    var children: Children = .{
+        .runner = &runner,
+        .connector = catalog.find("ollama").?,
+        .model = "test-model",
+        .acting = fixture.context(),
+        .together = true,
+    };
+
+    var options = fixture.options();
+    options.spawning = .{ .spawner = children.spawner() };
+
+    const transcript = try runner.run(options, "Write some notes.", fixture.context());
+    try testing.expect(transcript.turns[0].steps[0].ran());
+
+    // The parent's own engine still allows writing. Only the children's does
+    // not, and the narrowing is a rule appended rather than a policy replaced.
+    try testing.expect(children.narrowed != null);
+    try testing.expect(children.narrowed.?.policy.rules.len > wide.len);
+    try testing.expect(std.mem.indexOf(u8, children.narrowed.?.policy.id, "reading-only") != null);
+
+    // The child made its call and was refused: the run has the call in it, and
+    // the engine it ran on says no to exactly that request.
+    const child = transcript.turns[0].steps[0].spawned.?;
+    try testing.expectEqual(@as(usize, 1), child.toolCalls);
+
+    const writing: policy_mod.Request = .{
+        .capability = .@"fs.write",
+        .resource = .{ .path = "notes.txt" },
+    };
+    try testing.expect(!(try children.narrowed.?.decide(writing, fixture.context())).isAllowed());
+    try testing.expect((try fixture.engine.decide(writing, fixture.context())).isAllowed());
+    // Reading survives, or a child would not be an agent.
+    const reading: policy_mod.Request = .{
+        .capability = .@"fs.read",
+        .resource = .{ .path = "notes.txt" },
+    };
+    try testing.expect((try children.narrowed.?.decide(reading, fixture.context())).isAllowed());
 }
 
 test "a run with nothing to start a child on says so rather than pretending" {
