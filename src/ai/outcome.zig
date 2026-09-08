@@ -239,14 +239,16 @@ pub fn summarise(scores: []const Score) Summary {
 
 const testing = std.testing;
 
-const Builder = struct {
+/// A log builder for tests, here rather than duplicated in every module that
+/// needs a recorded run to reason about.
+pub const Builder = struct {
     arena: std.mem.Allocator,
     log: log_mod.Log,
     agent: idmod.AgentId,
     session: idmod.SessionId,
     ids: idmod.Generator,
 
-    fn init(arena: std.mem.Allocator) Builder {
+    pub fn init(arena: std.mem.Allocator) Builder {
         var ids = idmod.Generator.init(5, 1_788_000_000_000);
         return .{
             .arena = arena,
@@ -261,18 +263,22 @@ const Builder = struct {
         return .{ .kind = .agent, .id = .{ .raw = .{ .bytes = @splat(4) } }, .label = "an agent" };
     }
 
-    fn started(self: *Builder, request: []const u8) !void {
+    pub fn nextAgent(self: *Builder) void {
+        self.agent = self.ids.next(idmod.AgentId);
+    }
+
+    pub fn started(self: *Builder, request: []const u8, connector: []const u8, model: []const u8) !void {
         _ = try self.log.append(.{ .agent_started = .{
             .agent = self.agent,
             .session = self.session,
             .request = request,
-            .provider = "anthropic",
-            .model = "claude-opus-5",
+            .provider = connector,
+            .model = model,
             .policy = "test",
         } }, .{ .at = .{ .ns = 0 }, .actor = actor() });
     }
 
-    fn call(self: *Builder, tool: []const u8, resource: []const u8, outcome: anytype) !void {
+    pub fn call(self: *Builder, tool: []const u8, resource: []const u8, outcome: anytype) !void {
         const id = self.ids.next(idmod.ToolCallId);
         _ = try self.log.append(.{ .tool_requested = .{
             .call = id,
@@ -293,7 +299,7 @@ const Builder = struct {
         } }, .{ .at = .{ .ns = 0 }, .actor = actor() });
     }
 
-    fn ended(self: *Builder, outcome: anytype) !void {
+    pub fn ended(self: *Builder, outcome: anytype) !void {
         _ = try self.log.append(.{ .agent_finished = .{
             .agent = self.agent,
             .session = self.session,
@@ -311,14 +317,14 @@ test "a run that did the job scores better than one that did not" {
     const arena = arena_state.allocator();
 
     var good = Builder.init(arena);
-    try good.started("fix the build");
+    try good.started("fix the build", "anthropic", "claude-opus-5");
     try good.call("run_command", "zig build", .completed);
     try good.call("write_file", "src/main.zig", .completed);
     try good.ended(.answered);
     const worked = (try scoreAll(arena, good.log))[0];
 
     var bad = Builder.init(arena);
-    try bad.started("fix the build");
+    try bad.started("fix the build", "anthropic", "claude-opus-5");
     try bad.call("run_command", "zig build", .failed);
     try bad.ended(.out_of_budget);
     const did_not = (try scoreAll(arena, bad.log))[0];
@@ -340,13 +346,13 @@ test "stopping to ask a person is not counted as a loss" {
     // anything learning from these numbers — the cheapest way to raise the
     // score would be to stop asking.
     var asked = Builder.init(arena);
-    try asked.started("delete the old branches");
+    try asked.started("delete the old branches", "anthropic", "claude-opus-5");
     try asked.call("git", "delete", .completed);
     try asked.ended(.waiting_for_a_person);
     const waiting = (try scoreAll(arena, asked.log))[0];
 
     var ploughed = Builder.init(arena);
-    try ploughed.started("delete the old branches");
+    try ploughed.started("delete the old branches", "anthropic", "claude-opus-5");
     try ploughed.call("git", "delete", .failed);
     try ploughed.ended(.out_of_budget);
     const ran_out = (try scoreAll(arena, ploughed.log))[0];
@@ -363,13 +369,13 @@ test "going in circles is caught, even when every step succeeds" {
     // The failure mode that otherwise scores perfectly: a stuck run makes many
     // calls, all of them succeed, and it achieves nothing.
     var circling = Builder.init(arena);
-    try circling.started("make the tests pass");
+    try circling.started("make the tests pass", "anthropic", "claude-opus-5");
     for (0..5) |_| try circling.call("read_file", "src/main.zig", .completed);
     try circling.ended(.out_of_budget);
     const stuck = (try scoreAll(arena, circling.log))[0];
 
     var direct = Builder.init(arena);
-    try direct.started("make the tests pass");
+    try direct.started("make the tests pass", "anthropic", "claude-opus-5");
     try direct.call("read_file", "src/main.zig", .completed);
     try direct.ended(.out_of_budget);
     const once = (try scoreAll(arena, direct.log))[0];
@@ -390,7 +396,7 @@ test "a refusal is counted apart from a failure" {
     // a failed one was not stopped by anything. Folding them together would
     // make a policy doing its job look like a model doing badly.
     var builder = Builder.init(arena);
-    try builder.started("do a mix of things");
+    try builder.started("do a mix of things", "anthropic", "claude-opus-5");
     try builder.call("read_file", "a", .completed);
     try builder.call("delete", "b", .denied);
     try builder.call("run_command", "c", .failed);
@@ -411,7 +417,7 @@ test "a run that never wrote its ending is unfinished, not answered" {
     // A crash, a kill, a full disk. Reading the absence of an ending as
     // success is how a dataset comes to be full of runs that never finished.
     var builder = Builder.init(arena);
-    try builder.started("something that was interrupted");
+    try builder.started("something that was interrupted", "anthropic", "claude-opus-5");
     try builder.call("read_file", "a", .completed);
 
     const score = (try scoreAll(arena, builder.log))[0];
@@ -423,7 +429,7 @@ test "a run that never wrote its ending is unfinished, not answered" {
     // ending as success is how a dataset fills up with runs that never
     // finished and a model learns that stopping early is fine.
     var completed = Builder.init(arena);
-    try completed.started("something that was interrupted");
+    try completed.started("something that was interrupted", "anthropic", "claude-opus-5");
     try completed.call("read_file", "a", .completed);
     try completed.ended(.answered);
     const finished = (try scoreAll(arena, completed.log))[0];
@@ -440,7 +446,7 @@ test "a run that used no tools is not scored as having failed at them" {
     // Zero out of zero is not a failure. Answering a question without needing
     // a tool is a perfectly good run.
     var builder = Builder.init(arena);
-    try builder.started("what does this build do?");
+    try builder.started("what does this build do?", "anthropic", "claude-opus-5");
     try builder.ended(.answered);
 
     const score = (try scoreAll(arena, builder.log))[0];
@@ -457,7 +463,7 @@ test "scores are arithmetic over the record, so the same log scores the same" {
     // disagrees with itself between runs, and cannot be checked; two people
     // who disagree about a number here can settle it by reading the log.
     var builder = Builder.init(arena);
-    try builder.started("a job");
+    try builder.started("a job", "anthropic", "claude-opus-5");
     try builder.call("read_file", "a", .completed);
     try builder.call("read_file", "a", .completed);
     try builder.ended(.answered);
@@ -474,12 +480,12 @@ test "many runs in one log summarise for comparing one thing with another" {
     const arena = arena_state.allocator();
 
     var builder = Builder.init(arena);
-    try builder.started("first");
+    try builder.started("first", "anthropic", "claude-opus-5");
     try builder.call("read_file", "a", .completed);
     try builder.ended(.answered);
 
     builder.agent = builder.ids.next(idmod.AgentId);
-    try builder.started("second");
+    try builder.started("second", "anthropic", "claude-opus-5");
     try builder.call("run_command", "b", .failed);
     try builder.ended(.out_of_budget);
 
@@ -495,4 +501,9 @@ test "many runs in one log summarise for comparing one thing with another" {
     try testing.expectEqual(@as(usize, 1), summary.settled);
     try testing.expectEqual(@as(u64, 2000), summary.totalTokens);
     try testing.expect(summary.meanReward > 0 and summary.meanReward < 1);
+}
+
+/// The builder above, for another module's tests.
+pub fn testBuilder(arena: std.mem.Allocator) Builder {
+    return Builder.init(arena);
 }
