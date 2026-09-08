@@ -116,6 +116,7 @@ pub const help_text =
     \\  --children          Let a run hand parts of the work to child agents.
     \\  --depth <n>         How many levels of agents a run may have. Default 2.
     \\  --together          Run a turn's child agents at once. They may then only read.
+    \\  --best-of <n>       Run the task n times, judge each, keep the best. Costs n times.
     \\  --raw               Start the shell with no added prompt marks.
     \\  --stream            Print a model's answer as it arrives, not when it finishes.
     \\  --init              Write a starter policy file. Used with "zag policy".
@@ -155,6 +156,8 @@ const Options = struct {
     children: bool = false,
     /// Levels of agents a run may have, counting itself. Empty means two.
     depth: []const u8 = "",
+    /// How many times to attempt the task, keeping the best. Empty means once.
+    best_of: []const u8 = "",
     /// Run a turn's children at the same time, narrowed to reading.
     ///
     /// This takes authority away rather than granting any — see
@@ -239,6 +242,7 @@ fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
             .{ .flag = "--model", .field = &options.model },
             .{ .flag = "--turns", .field = &options.turns },
             .{ .flag = "--depth", .field = &options.depth },
+            .{ .flag = "--best-of", .field = &options.best_of },
             .{ .flag = "--compact-at", .field = &options.compact_at },
         };
         var matched = false;
@@ -993,6 +997,137 @@ fn judgeRuns(
     return 0;
 }
 
+/// Run the same task several times and keep the one that worked.
+///
+/// The cheapest large improvement available to an agent system, and cheap only
+/// in engineering: it costs exactly as many times more as the number of
+/// attempts. So the cost is printed, next to whether it bought anything —
+/// `ai/bestof.zig` counts the distinct answers, and three copies of one answer
+/// is not a best of three.
+///
+/// Every attempt is a real run in the record with its own agent identifier.
+/// The losing ones are the interesting half: the same task, the same model and
+/// the same moment, which is the closest thing to a controlled experiment this
+/// system can produce.
+fn runSeveralTimes(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    service: *zag.workspace.service.Service,
+    recorder: *zag.workspace.service.Service.AgentRecorder,
+    runner: *zag.ai.loop.Runner,
+    asked: zag.ai.loop.Options,
+    question: []const u8,
+    context: zag.ai.policy.Context,
+    connector: zag.ai.catalog.Connector,
+    model: []const u8,
+    transport: zag.ai.transport.Transport,
+    wanted: usize,
+    options: Options,
+) !u8 {
+    const spread: zag.ai.bestof.Spread = .{ .attempts = wanted };
+    const rubric = zag.ai.judge.default_rubric;
+
+    // Nothing is streamed. Several attempts printing as they arrive is one
+    // confused voice, and the answer that matters is not known until the last
+    // of them has finished.
+    runner.watch = null;
+
+    var attempts: std.ArrayList(zag.ai.bestof.Attempt) = .empty;
+    var agents: std.ArrayList(zag.core.id.AgentId) = .empty;
+
+    var number: usize = 0;
+    while (number < wanted) : (number += 1) {
+        // Its own record keeper, so each attempt is its own run rather than
+        // three runs written on top of each other.
+        var attempt_recorder = zag.workspace.service.Service.AgentRecorder.init(service);
+        runner.journal = attempt_recorder.journal();
+
+        var round = asked;
+        round.temperature = spread.temperatureFor(number);
+
+        try w.print("Attempt {d} of {d}", .{ number + 1, wanted });
+        if (round.temperature) |t| {
+            try w.print(" at temperature {d:.1}...\n", .{t});
+        } else {
+            try w.writeAll(" at the provider's own setting...\n");
+        }
+        try w.flush();
+
+        const transcript = runner.run(round, question, context) catch |err| {
+            try attempts.append(arena, .{
+                .number = number,
+                .temperature = round.temperature,
+                .answer = "",
+                .measured = .{ .agent = attempt_recorder.agent },
+                .failed = @errorName(err),
+            });
+            try agents.append(arena, attempt_recorder.agent);
+            continue;
+        };
+        try attempts.append(arena, .{
+            .number = number,
+            .temperature = round.temperature,
+            .answer = transcript.answer,
+            // Filled in from the record below, which is the point: the score
+            // comes from what was written down, not from the value the loop
+            // happened to be holding.
+            .measured = .{ .agent = attempt_recorder.agent },
+        });
+        try agents.append(arena, attempt_recorder.agent);
+    }
+    // Put the parent's own recorder back, so anything after this belongs to
+    // the run the person started rather than to the last attempt.
+    runner.journal = recorder.journal();
+
+    service.flush(io) catch |err| {
+        try w.print("The attempts finished, but zag could not commit the record: {s}.\n", .{@errorName(err)});
+        return 1;
+    };
+
+    // Scored from the record, and judged from the trajectory the record makes.
+    // An attempt that was scored from anything else would be scored from
+    // something nobody can check afterwards.
+    const runs = try zag.ai.trajectory.extract(arena, io, service.log, service.content);
+    for (attempts.items, agents.items) |*attempt, agent| {
+        if (attempt.failed != null) continue;
+        for (runs) |trajectory| {
+            if (!trajectory.agent.eql(agent)) continue;
+            attempt.measured = trajectory.score;
+
+            const prompt = try zag.ai.judge.writePrompt(arena, trajectory, rubric);
+            var judged: zag.ai.transport.Attempt = undefined;
+            const completion = transport.send(connector, .{
+                .model = model,
+                .system = zag.ai.judge.instructions,
+                .messages = &.{.{ .role = .user, .blocks = &.{.{ .text = prompt.text }} }},
+                .maxOutputTokens = 2000,
+            }, context, &judged) catch break;
+            // A judge that could not be reached leaves the attempt ranked on
+            // the arithmetic alone, which is the half that cannot be talked
+            // into anything anyway.
+            attempt.judged = zag.ai.judge.parse(arena, rubric, completion.text(arena) catch break) catch break;
+            break;
+        }
+    }
+
+    const chosen = zag.ai.bestof.choose(attempts.items, rubric, .{});
+
+    try w.writeAll("\n");
+    try zag.ai.bestof.writeReport(chosen, rubric, .{}, w);
+    try w.writeAll("\n");
+
+    const best = chosen.best();
+    if (best.failed) |why| {
+        try w.print("No attempt produced an answer. The last problem was: {s}.\n", .{why});
+        return 1;
+    }
+    if (best.answer.len > 0) try w.print("{s}\n\n", .{best.answer});
+
+    try w.print("Every attempt is in the record. Read them with \"zag trajectories --root {s}\".\n", .{options.root});
+    return if (best.measured.ending.settled()) 0 else 1;
+}
+
 /// Compare this workspace's runs against an earlier export.
 ///
 /// The loop that makes a trajectory store worth keeping: export a baseline,
@@ -1625,7 +1760,7 @@ fn askAModel(
         }
     };
 
-    const runner: zag.ai.loop.Runner = .{
+    var runner: zag.ai.loop.Runner = .{
         .arena = arena,
         .transport = transport,
         .executor = executor,
@@ -1713,7 +1848,7 @@ fn askAModel(
         };
     }
 
-    const transcript = try runner.run(.{
+    const asked: zag.ai.loop.Options = .{
         .connector = connector,
         .model = model,
         .system = agent_instructions,
@@ -1723,7 +1858,37 @@ fn askAModel(
             .{ .spawner = children.spawner(), .bounds = children.bounds }
         else
             null,
-    }, question.items, context);
+    };
+
+    var wanted: usize = 1;
+    if (options.best_of.len > 0) {
+        wanted = std.fmt.parseInt(usize, options.best_of, 10) catch {
+            try w.print("\"{s}\" is not a number of attempts.\n", .{options.best_of});
+            return 2;
+        };
+        if (wanted == 0) wanted = 1;
+    }
+
+    if (wanted > 1) {
+        return runSeveralTimes(
+            arena,
+            io,
+            w,
+            &service,
+            &recorder,
+            &runner,
+            asked,
+            question.items,
+            context,
+            connector,
+            model,
+            transport,
+            wanted,
+            options,
+        );
+    }
+
+    const transcript = try runner.run(asked, question.items, context);
 
     // The record is committed before anything is printed, so what a person
     // reads on screen is what the log already holds.

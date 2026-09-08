@@ -270,6 +270,13 @@ pub const Options = struct {
     /// Ask for the model's reasoning where the provider offers it.
     showThinking: bool = false,
     effort: ?provider.Effort = null,
+    /// How much the model varies its answer. None leaves the provider's own
+    /// default alone, which is what a single run wants.
+    ///
+    /// It exists here for one reason: running the same task several times and
+    /// keeping the best is worth nothing if the attempts are the same attempt.
+    /// See `ai/bestof.zig`.
+    temperature: ?f32 = null,
     maxOutputTokens: u32 = 16000,
     /// What this run may hand to child agents, when it may hand out anything.
     ///
@@ -697,6 +704,7 @@ pub const Runner = struct {
                 // with no way to express this ignore the field.
                 .caching = if (options.connector.wire().supportsCaching()) .prefix else .none,
                 .effort = options.effort,
+                .temperature = options.temperature,
                 .showThinking = options.showThinking,
             };
             // Watched or not, the same gate and the same completion. Streaming
