@@ -122,7 +122,15 @@ pub const AgentStarted = struct {
 pub const AgentMessage = struct {
     agent: AgentId,
     session: SessionId,
-    role: enum { plan, progress, result, question, refusal },
+    /// Who said it.
+    ///
+    /// `workspace` is the odd one and the reason this is not just the model's
+    /// roles: some things on an agent's timeline are the workbench speaking
+    /// about the run rather than the model speaking in it. Room being made in
+    /// the conversation is the first of them. Filing that as `progress` would
+    /// put words in the model's mouth, and a record that misattributes who
+    /// said something is worse than one that does not mention it.
+    role: enum { plan, progress, result, question, refusal, workspace },
     text: []const u8,
 };
 
