@@ -26,6 +26,7 @@ const Command = enum {
     history,
     show,
     trajectories,
+    eval,
     knowledge,
     term,
     providers,
@@ -52,6 +53,7 @@ const Command = enum {
             .{ .name = "history", .command = .history },
             .{ .name = "show", .command = .show },
             .{ .name = "trajectories", .command = .trajectories },
+            .{ .name = "eval", .command = .eval },
             .{ .name = "knowledge", .command = .knowledge },
             .{ .name = "term", .command = .term },
             .{ .name = "providers", .command = .providers },
@@ -85,6 +87,7 @@ pub const help_text =
     \\  history <query>     Search recorded work. For example: status:failed zig
     \\  show <query>        Show what a recorded command printed.
     \\  trajectories        Write every recorded agent run as JSON Lines, with its score.
+    \\  eval <baseline>     Compare this workspace's runs against an earlier export.
     \\  knowledge           Show the knowledge under .workspace/, and what is overdue.
     \\  term                Open a shell in a terminal that records what you do.
     \\  providers           List the model connectors and say which credentials are set.
@@ -310,6 +313,7 @@ fn run(
         .history => try historySearch(arena, io, w, options),
         .show => try showOutput(arena, io, w, options),
         .trajectories => try writeTrajectories(arena, io, w, options),
+        .eval => try compareAgainstBaseline(arena, io, w, options),
         .knowledge => try knowledgeIndex(arena, io, w, options),
         .term => try interactiveTerminal(arena, io, w, options, environment),
         .providers => try listProviders(arena, io, w, options, environment),
@@ -585,6 +589,63 @@ fn historySearch(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, option
     });
     try results.writeList(w);
     return if (incomplete) 1 else 0;
+}
+
+/// Compare this workspace's runs against an earlier export.
+///
+/// The loop that makes a trajectory store worth keeping: export a baseline,
+/// change something — the prompt, the model, a tool description — run the same
+/// tasks again, and ask whether it helped.
+///
+/// The comparison is paired by task, because tasks differ from each other far
+/// more than a change usually moves any one of them, and it says plainly when
+/// the answer is "not enough evidence" rather than printing a mean and letting
+/// the reader assume.
+fn compareAgainstBaseline(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+) !u8 {
+    if (options.positional.len == 0) {
+        try w.writeAll("Name the baseline to compare against. For example: zag eval baseline.jsonl\n");
+        try w.writeAll("Write one with \"zag trajectories --json > baseline.jsonl\".\n");
+        return 2;
+    }
+
+    const path = options.positional[0];
+    const source = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(64 << 20)) catch {
+        try w.print("zag could not read {s}.\n", .{path});
+        return 1;
+    };
+    const before = try zag.ai.eval.fromJsonLines(arena, source);
+    if (before.len == 0) {
+        try w.print("{s} holds no scored runs. Write one with \"zag trajectories --json\".\n", .{path});
+        return 1;
+    }
+
+    const opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.root,
+        .actor = workbenchActor(),
+        .now = wallClock(io),
+    }) catch {
+        try w.print("zag could not open the workspace in {s}.\n", .{options.root});
+        return 1;
+    };
+    const after = try zag.ai.eval.fromScores(
+        arena,
+        try zag.ai.outcome.scoreAll(arena, opened.service.log),
+    );
+
+    const result = try zag.ai.eval.compare(arena, before, after);
+    try result.writeReport(w);
+
+    // Exit status says whether a change was shown to help, so this can gate a
+    // build. "Not shown" is not the same as "worse", and both are non-zero:
+    // shipping a change the evidence does not support is the thing this is
+    // here to prevent.
+    if (result.pairs.len == 0) return 1;
+    return if (result.worthActingOn() and result.meanChange > 0) 0 else 1;
 }
 
 /// Write every recorded agent run as a trajectory.
