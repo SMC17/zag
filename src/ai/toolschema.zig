@@ -417,6 +417,28 @@ pub fn withoutControlSequences(arena: std.mem.Allocator, raw: []const u8) ![]con
     return out.items;
 }
 
+/// Move a cut to the nearest character boundary, so a slice stays readable text.
+///
+/// Cutting a byte count out of the middle of a UTF-8 character leaves a
+/// fragment that is not text. It reaches the encoder, which replaces it, and a
+/// model reads a replacement character for no reason — or, before the encoder
+/// was fixed, the whole request went to the provider as an array of numbers.
+/// One accented letter or box-drawing character near the cut is enough, so
+/// this is the common case for any output that is not plain ASCII.
+fn boundaryAtOrBefore(text: []const u8, at: usize) usize {
+    var cut = @min(at, text.len);
+    // A continuation byte is 10xxxxxx. Walk back off any run of them to the
+    // start of the character they belong to.
+    while (cut > 0 and (text[cut] & 0xc0) == 0x80) cut -= 1;
+    return cut;
+}
+
+fn boundaryAtOrAfter(text: []const u8, at: usize) usize {
+    var cut = @min(at, text.len);
+    while (cut < text.len and (text[cut] & 0xc0) == 0x80) cut += 1;
+    return cut;
+}
+
 /// What a model is told about one tool call.
 ///
 /// The outcome, the summary sentence, and then what the tool actually
@@ -451,16 +473,22 @@ pub fn resultText(
     // Said in words either way, so a model reading part of something knows it
     // is a part and does not conclude the file was short or the build quiet.
     return switch (result.contentKind) {
-        .text => std.fmt.allocPrint(
-            arena,
-            "{s}\n\nThe first {d} bytes of {d}, because the whole of it does not fit:\n{s}",
-            .{ head, result_content_limit, body.len, body[0..result_content_limit] },
-        ),
-        .terminal_output => std.fmt.allocPrint(
-            arena,
-            "{s}\n\nThe last {d} bytes of {d}, because the whole of it does not fit:\n{s}",
-            .{ head, result_content_limit, body.len, body[body.len - result_content_limit ..] },
-        ),
+        .text => blk: {
+            const cut = boundaryAtOrBefore(body, result_content_limit);
+            break :blk std.fmt.allocPrint(
+                arena,
+                "{s}\n\nThe first {d} bytes of {d}, because the whole of it does not fit:\n{s}",
+                .{ head, cut, body.len, body[0..cut] },
+            );
+        },
+        .terminal_output => blk: {
+            const cut = boundaryAtOrAfter(body, body.len - result_content_limit);
+            break :blk std.fmt.allocPrint(
+                arena,
+                "{s}\n\nThe last {d} bytes of {d}, because the whole of it does not fit:\n{s}",
+                .{ head, body.len - cut, body.len, body[cut..] },
+            );
+        },
     };
 }
 
@@ -807,4 +835,32 @@ test "a progress line that overwrites itself keeps every state it showed" {
     // A CRLF is one line ending, not two.
     const crlf = try withoutControlSequences(arena, "one\r\ntwo\r\n");
     try testing.expectEqualStrings("one\ntwo\n", crlf);
+}
+
+test "a cut lands on a character boundary, from either end" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Box-drawing characters are what a build summary is made of, and each is
+    // three bytes. Cutting a byte count out of the middle of one leaves a
+    // fragment that is not text: the encoder has to replace it, and before it
+    // was fixed the whole request went to the provider as an array of numbers.
+    const glyph = "├";
+    try testing.expectEqual(@as(usize, 3), glyph.len);
+
+    const repeats = (result_content_limit / glyph.len) + 64;
+    var big: std.ArrayList(u8) = .empty;
+    for (0..repeats) |_| try big.appendSlice(arena, glyph);
+
+    for ([_]tools.ContentKind{ .text, .terminal_output }) |kind| {
+        const text = try resultText(arena, .{ .outcome = .completed, .content = big.items, .contentKind = kind });
+        // Whatever was kept is still text, which is the property that matters:
+        // it can be written as a JSON string without a replacement character
+        // appearing where a real character was.
+        try testing.expect(std.unicode.utf8ValidateSlice(text));
+        try testing.expect(std.mem.indexOf(u8, text, "does not fit") != null);
+        // And it really was cut, or the test is proving nothing.
+        try testing.expect(text.len < big.items.len);
+    }
 }
