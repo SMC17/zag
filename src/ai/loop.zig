@@ -64,6 +64,7 @@ const capability_mod = @import("capability.zig");
 const hashing = @import("../core/hash.zig");
 const timeutil = @import("../core/time.zig");
 const notation = @import("../reports/notation.zig");
+const compaction_mod = @import("compaction.zig");
 
 pub const Decision = policy_mod.Decision;
 pub const ToolRequest = tools.ToolRequest;
@@ -230,6 +231,13 @@ pub const Budget = struct {
     /// Tool calls the model may make in one turn. A model that asks for
     /// hundreds at once is not being helped by having them all run.
     callsPerTurn: usize = 16,
+    /// When to make room in the conversation, and how much to keep.
+    ///
+    /// Without this the messages only grow — every turn re-sends the whole
+    /// history, and one `zig build` adds twenty kilobytes to it — until the
+    /// token budget is spent and the run stops with the work unfinished. That
+    /// is a bound, not an answer.
+    compaction: compaction_mod.Budget = .{},
 };
 
 pub const Error = error{
@@ -304,12 +312,25 @@ pub const Moment = union(enum) {
         summary: []const u8,
         resultHash: hashing.Hash,
     },
+    /// Room was made in the conversation, and something the model had been
+    /// shown was taken away.
+    ///
+    /// Recorded because it changes what the model saw. A log that showed the
+    /// whole history when the model was sent a trimmed one would be
+    /// describing a different run, and the interesting question after a run
+    /// goes wrong — "did it still know about the thing from step two?" — would
+    /// have no answer in the record.
+    compacted: compaction_mod.Result,
     finished: struct {
         ending: Ending,
         elapsed: timeutil.Duration,
         toolCalls: usize,
         refusedCalls: usize,
         usage: provider.Usage,
+        /// How many times room had to be made, and how many tool results were
+        /// given up doing it.
+        compactions: usize = 0,
+        droppedResults: usize = 0,
     },
 };
 
@@ -412,6 +433,8 @@ pub const Runner = struct {
         var pending: ?ToolRequest = null;
         var pending_decision: ?Decision = null;
 
+        var compactions: usize = 0;
+        var dropped: usize = 0;
         var number: usize = 1;
         while (number <= options.budget.turns) : (number += 1) {
             var attempt: transport_mod.Attempt = undefined;
@@ -552,6 +575,19 @@ pub const Runner = struct {
             // provider expects.
             try messages.append(self.arena, .{ .role = .user, .blocks = results.items });
 
+            // Make room before the next turn rather than stopping when there
+            // is none. What goes is old tool output, whose value has already
+            // been taken; what stays is the task, the recent work, and
+            // everything the model itself concluded.
+            const made_room = try compaction_mod.compact(self.arena, messages.items, options.budget.compaction);
+            if (made_room.changedAnything()) {
+                messages.clearRetainingCapacity();
+                try messages.appendSlice(self.arena, made_room.messages);
+                compactions += 1;
+                dropped += made_room.replaced;
+                self.note(.{ .compacted = made_room });
+            }
+
             if (usage.total() >= options.budget.tokens) {
                 ending = .out_of_tokens;
                 break;
@@ -577,6 +613,8 @@ pub const Runner = struct {
             .toolCalls = calls,
             .refusedCalls = refusals,
             .usage = usage,
+            .compactions = compactions,
+            .droppedResults = dropped,
         } });
 
         return .{
