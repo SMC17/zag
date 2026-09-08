@@ -176,6 +176,13 @@ pub const ToolFinished = struct {
     outcome: enum { completed, failed, denied, cancelled, timed_out },
     duration: timeutil.Duration,
     resultHash: Hash,
+    /// How many bytes the result was.
+    ///
+    /// Beside the hash for the same reason `ProcessOutput` carries both: an
+    /// address with no size cannot be checked against what is on disk, and an
+    /// auditor that only compares hashes cannot tell a truncated object from
+    /// the right one.
+    resultBytes: usize = 0,
     /// Plain-language summary of what happened, for the person reading later.
     summary: []const u8 = "",
 };
