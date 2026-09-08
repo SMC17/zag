@@ -1733,6 +1733,10 @@
           "resultHash": {
             "type": "string"
           },
+          "resultBytes": {
+            "type": "integer",
+            "minimum": 0
+          },
           "summary": {
             "type": "string"
           }
