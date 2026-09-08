@@ -687,6 +687,25 @@ pub const Service = struct {
                     // query returns it all.
                     self.correlation = opened.id;
                 },
+                .compacted => |e| {
+                    // What the model was shown changed, so the record has to
+                    // say so. The interesting question after a run goes wrong
+                    // — "did it still know about the thing from step two?" —
+                    // has no answer otherwise.
+                    var sentence: std.Io.Writer.Allocating = .init(service.arena);
+                    try e.writeSentence(&sentence.writer);
+                    _ = try service.record(.{ .agent_message = .{
+                        .agent = self.agent,
+                        .session = self.session,
+                        .role = .workspace,
+                        .text = sentence.written(),
+                    } }, .{
+                        .at = at,
+                        .actor = actor,
+                        .causedBy = self.started,
+                        .correlation = self.started,
+                    });
+                },
                 .said => |e| {
                     _ = try service.record(.{ .agent_message = .{
                         .agent = self.agent,

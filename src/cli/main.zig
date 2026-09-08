@@ -97,6 +97,7 @@ pub const help_text =
     \\  --provider <name>   Which connector to use. Run "zag providers" to see them.
     \\  --model <name>      Which model to ask for.
     \\  --turns <count>     How many times a model may be asked in one run.
+    \\  --compact-at <n>    Make room in the conversation once it passes n bytes.
     \\  --raw               Start the shell with no added prompt marks.
     \\  --stream            Print a model's answer as it arrives, not when it finishes.
     \\  --init              Write a starter policy file. Used with "zag policy".
@@ -120,6 +121,8 @@ const Options = struct {
     approve_truncate: bool = false,
     /// Write a starter policy file rather than showing the policy in force.
     init: bool = false,
+    /// Bytes of conversation above which room is made. Empty means the default.
+    compact_at: []const u8 = "",
     provider: []const u8 = "",
     model: []const u8 = "",
     turns: []const u8 = "",
@@ -179,6 +182,7 @@ fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
             .{ .flag = "--provider", .field = &options.provider },
             .{ .flag = "--model", .field = &options.model },
             .{ .flag = "--turns", .field = &options.turns },
+            .{ .flag = "--compact-at", .field = &options.compact_at },
         };
         var matched = false;
         for (named) |entry| {
@@ -1114,6 +1118,12 @@ fn askAModel(
     if (options.turns.len > 0) {
         budget.turns = std.fmt.parseInt(usize, options.turns, 10) catch {
             try w.print("\"{s}\" is not a number of turns.\n", .{options.turns});
+            return 2;
+        };
+    }
+    if (options.compact_at.len > 0) {
+        budget.compaction.threshold = std.fmt.parseInt(usize, options.compact_at, 10) catch {
+            try w.print("\"{s}\" is not a number of bytes.\n", .{options.compact_at});
             return 2;
         };
     }

@@ -1596,7 +1596,7 @@
             "type": "string"
           },
           "role": {
-            "$ref": "#/components/schemas/AgentMessage__enum_3467fd78"
+            "$ref": "#/components/schemas/AgentMessage__enum_c127eadc"
           },
           "text": {
             "type": "string"
@@ -1610,14 +1610,15 @@
         ],
         "additionalProperties": false
       },
-      "AgentMessage__enum_3467fd78": {
+      "AgentMessage__enum_c127eadc": {
         "type": "string",
         "enum": [
           "plan",
           "progress",
           "result",
           "question",
-          "refusal"
+          "refusal",
+          "workspace"
         ]
       },
       "AgentFinished": {
