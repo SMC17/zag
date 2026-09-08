@@ -468,6 +468,16 @@ pub const Service = struct {
                 .hash = output.contentHash,
                 .byte_count = output.byteCount,
             }),
+            // What an agent's tools produced, audited the same way a command's
+            // output is. These were referenced by the log and checked by
+            // nothing, so a record that named an address for content it did
+            // not have looked clean.
+            .tool_finished => |finished| {
+                if (finished.resultBytes > 0) try references.append(self.arena, .{
+                    .hash = finished.resultHash,
+                    .byte_count = finished.resultBytes,
+                });
+            },
             else => {},
         };
         return self.content.audit(io, references.items);
@@ -767,6 +777,29 @@ pub const Service = struct {
                 },
                 .settled => |e| {
                     const call = self.pending_id orelse service.ids.next(idmod.ToolCallId);
+
+                    // Keep what the tool produced, addressed by its hash.
+                    //
+                    // The log has always written a `resultHash` and nothing
+                    // ever put the bytes anywhere, so the record asserted an
+                    // address for content that did not exist and the only
+                    // account of what an agent saw was a one-line summary. A
+                    // run could not be replayed, resumed faithfully, or read
+                    // back.
+                    //
+                    // Redacted first, on the same path and for the same reason
+                    // as captured command output: a tool that read a file with
+                    // a key in it must not put the key in the record.
+                    var stored = e.resultHash;
+                    var stored_bytes: usize = 0;
+                    if (e.content.len > 0) {
+                        const clean = try service.redactor.rewrite(service.arena, e.content);
+                        if (service.content.put(clean.text)) |hash| {
+                            stored = hash;
+                            stored_bytes = clean.text.len;
+                        } else |_| {}
+                    }
+
                     _ = try service.record(.{ .tool_finished = .{
                         .call = call,
                         .agent = self.agent,
@@ -779,7 +812,8 @@ pub const Service = struct {
                             .timed_out => .timed_out,
                         },
                         .duration = .{ .ns = 0 },
-                        .resultHash = e.resultHash,
+                        .resultHash = stored,
+                        .resultBytes = stored_bytes,
                         .summary = try service.arena.dupe(u8, e.summary),
                     } }, .{
                         .at = at,
@@ -1796,4 +1830,73 @@ test "a key a command prints never reaches the stored bytes or the log" {
 
     const reopened = try Service.open(arena, io, .{ .root = root, .actor = testActor(), .now = at });
     try testing.expect(reopened.report.isHealthy());
+}
+
+test "what an agent's tools produced is kept, redacted, and auditable" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var service = (try Service.open(arena, io, .{
+        .root = root,
+        .actor = testActor(),
+        .now = .{ .ns = 1_700_000_000 * timeutil.ns_per_s },
+    })).service;
+
+    var recorder = Service.AgentRecorder.init(&service);
+    const journal = recorder.journal();
+
+    journal.record(.{ .started = .{
+        .request = "read the config",
+        .provider = "ollama",
+        .model = "llama3.2",
+        .policy = "workspace",
+    } });
+    journal.record(.{ .asked = .{
+        .tool = "read_file",
+        .capability = "fs.read",
+        .resource = "config.env",
+        .argumentsJson = "{\"path\":\"config.env\"}",
+        .decision = null,
+    } });
+    // A tool that read a file with a key in it. The bytes are kept, so a run
+    // can be replayed and resumed — and the key is not, for the same reason a
+    // command's captured output is redacted before it is stored.
+    journal.record(.{ .settled = .{
+        .tool = "read_file",
+        .outcome = .completed,
+        .summary = "Read 64 bytes from config.env.",
+        .resultHash = hashing.Hash.zero,
+        .content = "PORT=8080\nANTHROPIC_API_KEY=sk-ant-api03-averyrealshapedsecretvalue\n",
+    } });
+    try service.flush(io);
+
+    // The log now names an address, and the store answers for it.
+    var found: ?event_mod.ToolFinished = null;
+    for (service.log.entries.items) |entry| switch (entry.payload) {
+        .tool_finished => |e| found = e,
+        else => {},
+    };
+    try testing.expect(found != null);
+    try testing.expect(found.?.resultBytes > 0);
+
+    const kept = try service.content.read(io, found.?.resultHash, 1 << 20);
+    try testing.expect(std.mem.indexOf(u8, kept, "PORT=8080") != null);
+    // The key is gone from what was stored. Before this the bytes were never
+    // stored at all, so there was nothing to redact and nothing to replay.
+    try testing.expect(std.mem.indexOf(u8, kept, "sk-ant-api03-averyrealshapedsecretvalue") == null);
+
+    // And the auditor checks it. The reference existed before and nothing
+    // looked at it, so a record naming an address for content it did not have
+    // came back clean.
+    const report = try service.auditContent(io);
+    try testing.expectEqual(@as(usize, 1), report.references);
+    try testing.expect(report.isHealthy());
 }

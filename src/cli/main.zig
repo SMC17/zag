@@ -86,7 +86,8 @@ pub const help_text =
     \\  term                Open a shell in a terminal that records what you do.
     \\  providers           List the model connectors and say which credentials are set.
     \\  policy [--init]     Show the policy in force, or write one to start from.
-    \\  ask <question>      Ask a model, through the policy. It can use tools, one decision each.
+    \\  ask [question]      Ask a model, through the policy. It can use tools, one decision each.
+    \\                      With --resume, carry on where the last run stopped.
     \\  why <file> [n]      Show what an event depended on, and what it went on to affect.
     \\  secrets <files>     Show what would be taken out of these files before recording them.
     \\
@@ -98,6 +99,7 @@ pub const help_text =
     \\  --model <name>      Which model to ask for.
     \\  --turns <count>     How many times a model may be asked in one run.
     \\  --compact-at <n>    Make room in the conversation once it passes n bytes.
+    \\  --resume            Carry on the last run in this workspace.
     \\  --raw               Start the shell with no added prompt marks.
     \\  --stream            Print a model's answer as it arrives, not when it finishes.
     \\  --init              Write a starter policy file. Used with "zag policy".
@@ -123,6 +125,8 @@ const Options = struct {
     init: bool = false,
     /// Bytes of conversation above which room is made. Empty means the default.
     compact_at: []const u8 = "",
+    /// Carry on the last run in this workspace rather than starting a new one.
+    resume_last: bool = false,
     provider: []const u8 = "",
     model: []const u8 = "",
     turns: []const u8 = "",
@@ -162,6 +166,10 @@ fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
         }
         if (std.mem.eql(u8, arg, "--init")) {
             options.init = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--resume")) {
+            options.resume_last = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--raw")) {
@@ -995,7 +1003,10 @@ fn askAModel(
     options: Options,
     environment: []const []const u8,
 ) !u8 {
-    if (options.positional.len == 0) {
+    // A resume needs no question: the run already has one, and carrying on is
+    // itself the instruction. A question with --resume is a person changing
+    // course, which is the other thing they might want.
+    if (options.positional.len == 0 and !options.resume_last) {
         try w.writeAll("Write the question after the command. For example: zag ask \"what does this build do?\"\n");
         return 2;
     }
@@ -1128,11 +1139,32 @@ fn askAModel(
         };
     }
 
+    // Continuing a run that stopped rather than starting again. The
+    // conversation is rebuilt from the log, which is the only complete account
+    // of what happened and the one that is hash-chained.
+    var earlier: ?[]const zag.ai.provider.Message = null;
+    if (options.resume_last) {
+        const rebuilt = zag.ai.@"resume".latest(arena, io, service.log, service.content) catch |err| switch (err) {
+            error.NoSuchRun => {
+                try w.writeAll("There is no earlier run in this workspace to carry on from.\n");
+                return 1;
+            },
+            else => return err,
+        };
+        var sentence: std.Io.Writer.Allocating = .init(arena);
+        try rebuilt.writeSentence(&sentence.writer);
+        try w.print("Carrying on: {s}\n", .{rebuilt.task});
+        try w.print("{s}\n\n", .{sentence.written()});
+        try w.flush();
+        earlier = rebuilt.messages;
+    }
+
     const transcript = try runner.run(.{
         .connector = connector,
         .model = if (options.model.len > 0) options.model else defaultModel(connector),
         .system = agent_instructions,
         .budget = budget,
+        .resuming = earlier,
     }, question.items, context);
 
     // The record is committed before anything is printed, so what a person

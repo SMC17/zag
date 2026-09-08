@@ -252,6 +252,14 @@ pub const Options = struct {
     /// behaviour and grants nothing.
     system: []const u8 = "",
     budget: Budget = .{},
+    /// A conversation to carry on from, rebuilt from the record.
+    ///
+    /// Set when continuing a run that stopped — out of turns, waiting for a
+    /// person, a provider that stayed down. The model picks up holding what it
+    /// held, rather than starting again and paying for the same work twice.
+    /// See `ai/resume.zig` for where these come from and what is faithful
+    /// about them.
+    resuming: ?[]const provider.Message = null,
     /// Ask for the model's reasoning where the provider offers it.
     showThinking: bool = false,
     effort: ?provider.Effort = null,
@@ -311,6 +319,13 @@ pub const Moment = union(enum) {
         outcome: tools.Outcome,
         summary: []const u8,
         resultHash: hashing.Hash,
+        /// What the tool produced.
+        ///
+        /// Carried so the recorder can keep it. The log records an address for
+        /// every tool result, and nothing was putting the bytes anywhere — so
+        /// the record asserted a content hash for content that did not exist,
+        /// and the only account of what an agent saw was a one-line summary.
+        content: []const u8 = "",
     },
     /// Room was made in the conversation, and something the model had been
     /// shown was taken away.
@@ -418,10 +433,26 @@ pub const Runner = struct {
         } });
 
         var messages: std.ArrayList(provider.Message) = .empty;
-        try messages.append(self.arena, .{
-            .role = .user,
-            .blocks = try self.arena.dupe(provider.Block, &.{.{ .text = question }}),
-        });
+        if (options.resuming) |earlier| {
+            // Continuing a run that stopped. The conversation was rebuilt from
+            // the record, so the model picks up holding what it held — rather
+            // than starting again and paying for the same work twice.
+            try messages.appendSlice(self.arena, earlier);
+            // A resumed run needs something to answer. Without a new turn the
+            // last message is the tool results, which is a request to keep
+            // going; with one, the person has said what to do differently.
+            if (question.len > 0) {
+                try messages.append(self.arena, .{
+                    .role = .user,
+                    .blocks = try self.arena.dupe(provider.Block, &.{.{ .text = question }}),
+                });
+            }
+        } else {
+            try messages.append(self.arena, .{
+                .role = .user,
+                .blocks = try self.arena.dupe(provider.Block, &.{.{ .text = question }}),
+            });
+        }
 
         var turns: std.ArrayList(Turn) = .empty;
         var usage: provider.Usage = .{};
@@ -665,6 +696,7 @@ pub const Runner = struct {
             .outcome = result.outcome,
             .summary = if (result.summary.len > 0) result.summary else step.reply,
             .resultHash = result.contentHash,
+            .content = result.content,
         } });
     }
 
