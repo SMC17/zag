@@ -83,6 +83,7 @@ zag route                      # which model to use next, from what has worked h
 zag trajectories               # every recorded agent run, scored
 zag trajectories --json        # the same as JSON Lines, for training or eval
 zag eval baseline.jsonl        # did a change help? paired, and honest about noise
+zag judge                      # a model's second opinion on those runs, recorded
 zag knowledge                  # the knowledge under .workspace/, and what is overdue
 zag objects --root .           # audit stored command output without changing it
 zag recover --root .           # inspect a damaged log and print a recovery plan
@@ -186,6 +187,40 @@ budget, so four children in a row get a half, a quarter, an eighth.
 
 Each child's own work is in the record, under the parent, with its own agent
 identifier and in the same session. `zag why` walks from one to the other.
+
+### Two opinions of a run
+
+`zag trajectories` scores every recorded run by arithmetic over the log: how it
+ended, whether its actions worked, whether it went in circles. That score is
+reproducible and can be checked by reading the log, and it is blind to the
+question everybody actually asks. A run can end cleanly, make eight successful
+tool calls, repeat nothing, and confidently say something false. Arithmetic
+scores that run 1.0.
+
+`zag judge` asks a model to read the same runs against a rubric and adds its
+opinion next to the arithmetic — never instead of it. The arithmetic stays
+underneath, because it does not drift and does not cost a request.
+
+```
+zag judge                      # judge every run not yet judged
+zag judge --json               # the verdicts as JSON Lines
+```
+
+The useful output is not the judge's number. It is the disagreement: where the
+two reach different conclusions is the shortlist of runs worth reading by hand,
+and which way the gap goes tells you what to expect. A judge scoring above the
+record usually means the run failed tidily; a judge scoring below it usually
+means the run did every step correctly and answered the wrong question.
+
+A trajectory contains file contents and command output — bytes an attacker may
+have written. They are fenced with a token derived from the run itself, and any
+occurrence of that token inside the quoted bytes is removed before fencing, so
+text inside the fence cannot get out to where instructions are read from. The
+judge is also told, in the instructions, that what is inside the fence is
+evidence and not instruction.
+
+Each verdict goes into the log as evidence: which model gave it, against which
+rubric, with the whole thing addressed by hash. A run is judged once.
 
 `zag-audit` is the second binary. It checks a repository against the standards
 it claims to meet, and nothing it does is needed to record work:
