@@ -131,6 +131,7 @@ pub const ai = struct {
     pub const bandit = @import("ai/bandit.zig");
     pub const swarm = @import("ai/swarm.zig");
     pub const judge = @import("ai/judge.zig");
+    pub const policygradient = @import("ai/policygradient.zig");
     pub const wire = struct {
         pub const anthropic = @import("ai/wire/anthropic.zig");
         pub const openai = @import("ai/wire/openai.zig");
