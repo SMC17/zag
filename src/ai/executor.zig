@@ -625,6 +625,7 @@ pub const Runner = struct {
             .byteCount = output.items.len,
             .exitStatus = status,
             .content = output.items,
+            .contentKind = .terminal_output,
             .summary = if (timed_out)
                 try std.fmt.allocPrint(self.arena, "{s} reached its deadline and was stopped.", .{request.argv[0]})
             else

@@ -224,6 +224,24 @@ pub const ToolRequest = union(enum) {
 
 pub const Outcome = enum { completed, failed, denied, cancelled, timed_out };
 
+/// What a tool produced, for the purpose of showing it to a model.
+///
+/// The distinction is which end matters when it will not all fit. A file read
+/// from the top is a file whose beginning explains it: the module comment, the
+/// imports, the types. Command output is the opposite — a compiler prints its
+/// errors after its progress, a test runner prints failures after passes, and
+/// the last thing a crashing program writes is why it crashed.
+///
+/// One rule for both got this exactly wrong in the interesting case: a model
+/// asked to read a 54 KB source file to understand it was handed the last 24 KB,
+/// which was the tests at the bottom.
+pub const ContentKind = enum {
+    /// Keep the beginning.
+    text,
+    /// Keep the end, and take the terminal's own control sequences out first.
+    terminal_output,
+};
+
 pub const ToolResult = struct {
     outcome: Outcome,
     /// Hash of whatever the tool produced.
@@ -246,6 +264,8 @@ pub const ToolResult = struct {
     /// Redacted before it reaches a provider, on the same path as everything
     /// else in a request.
     content: []const u8 = "",
+    /// What kind of thing `content` is, which decides how it is cut down.
+    contentKind: ContentKind = .text,
 
     pub fn succeeded(self: ToolResult) bool {
         return self.outcome == .completed;
