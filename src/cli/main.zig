@@ -1048,6 +1048,7 @@ fn askAModel(
     defer client.deinit();
     var http: zag.ai.transport.Http = .{ .client = &client };
 
+    var sleeper: zag.ai.transport.SleepingWaiter = .{ .io = io };
     const transport: zag.ai.transport.Transport = .{
         .arena = arena,
         .engine = &engine,
@@ -1061,6 +1062,9 @@ fn askAModel(
         // And nothing connects to a host whose name does not resolve to where
         // the connector said it lives.
         .guard = .{ .io = io },
+        // A 429 or a 503 is a shared service saying "not right now", not a
+        // reason to throw away everything the run has done.
+        .waiter = sleeper.waiter(),
     };
 
     // The loop, not a single question. A model that can read the workspace and
