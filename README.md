@@ -80,6 +80,7 @@ zag show "kind:command zig build"  # what that command actually printed
 zag ask --resume               # carry on where the last run stopped
 zag ask --children "..."       # let the run hand parts of the work to child agents
 zag route                      # which model to use next, from what has worked here
+zag route "fix the parser"     # the same, with the task in hand: a trained policy
 zag trajectories               # every recorded agent run, scored
 zag trajectories --json        # the same as JSON Lines, for training or eval
 zag eval baseline.jsonl        # did a change help? paired, and honest about noise
@@ -221,6 +222,42 @@ evidence and not instruction.
 
 Each verdict goes into the log as evidence: which model gave it, against which
 rubric, with the whole thing addressed by hash. A run is judged once.
+
+### Routing with the task in hand
+
+`zag route` samples each model's record of success. It works, and it has one
+blind spot: it has no idea what it is being asked. Every task is the same task
+to it, so a model that reads code well and writes it badly gets one number that
+averages the two.
+
+`zag route "why does the build fail?"` trains a linear policy over named
+features of the task — is it a question, does it ask for a change, does it name
+a failure — by REINFORCE with a baseline on the rewards already in the log.
+Same arms, same reward, same log; the only new thing is that the task is an
+input.
+
+Linear and few-featured on purpose. A workspace has tens or hundreds of runs,
+not millions, and anything with more parameters than that fits the noise
+perfectly and predicts nothing — invisibly. These weights are printed:
+
+```
+What it learned
+  local/reader
+    asks for an explanation      +0.71
+    asks for a change            -0.63
+```
+
+The episodes were not produced by this policy, so reporting its training reward
+as its expected reward would be measuring the behaviour that generated the
+data. Instead the runs are split, the policy is trained on one part and
+estimated on the other by self-normalised importance sampling, and the same
+estimate is computed for always using the single best arm — which is what the
+bandit converges to. The effective sample size is reported too, because
+importance sampling can rest a mean over thirty runs on two of them.
+
+`zag route` uses the trained policy only when it beats that incumbent on runs
+it never saw, with enough held-back runs and enough effective sample for the
+comparison to mean anything. Otherwise it says so and falls back to the bandit.
 
 `zag-audit` is the second binary. It checks a repository against the standards
 it claims to meet, and nothing it does is needed to record work:
