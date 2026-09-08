@@ -139,11 +139,20 @@ pub const McpRequest = struct {
 };
 
 pub const SpawnAgentRequest = struct {
-    label: []const u8,
+    /// A few words naming what the child is for. This is what appears in the
+    /// record and in the resource a decision is made about, so it is worth
+    /// being specific: "read the retry code" tells a person reading the log
+    /// what was started, and "child" does not.
+    label: []const u8 = "child",
+    /// The work, written for someone who has not read the parent's
+    /// conversation. The child starts fresh and knows only this.
     request: []const u8,
-    /// The policy the new agent runs under. It can never be wider than the
-    /// policy of the agent asking.
-    policy: []const u8,
+
+    // There is deliberately no field naming the policy the child runs under.
+    // A child runs on its parent's engine, so every decision it can reach is
+    // one the parent could have reached; a field saying otherwise would be
+    // exactly the escalation that kept this tool from being offered at all.
+    // See `ai/swarm.zig`.
 };
 
 pub const InferRequest = struct {
