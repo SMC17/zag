@@ -96,6 +96,28 @@ pub const Tool = struct {
 /// connector maps it or leaves it out.
 pub const Effort = enum { low, medium, high, xhigh, max };
 
+/// Whether to ask a provider to cache the part of this request that will be
+/// sent again.
+///
+/// Every turn re-sends the whole conversation, so by the tenth turn most of
+/// what goes over the wire is bytes the provider has already read. Where a
+/// wire format has a way to say "you have seen this prefix before", saying so
+/// costs one field and saves re-reading it.
+///
+/// Measured on this build: the fixed prefix — the system prompt and the tool
+/// schemas — is about 3,700 bytes, near enough 930 tokens. Anthropic will not
+/// cache a prefix below 1,024 tokens and does not say so when it declines, so
+/// a breakpoint on the tools alone earns nothing here today. The one that
+/// earns something is on the conversation, which passes that mark after a
+/// turn or two and keeps growing.
+pub const Caching = enum {
+    /// Send nothing about caching. The right answer for a format that has no
+    /// way to express it, and for a single request that will not be repeated.
+    none,
+    /// Mark the longest prefix that will be identical next turn.
+    prefix,
+};
+
 pub const Request = struct {
     model: []const u8,
     /// The system prompt. Sent wherever the provider puts it.
@@ -103,6 +125,8 @@ pub const Request = struct {
     messages: []const Message,
     tools: []const Tool = &.{},
     maxOutputTokens: u32 = 16000,
+    /// Whether to ask the provider to cache the repeated prefix.
+    caching: Caching = .none,
     /// Left unset for models that reject sampling parameters. A connector must
     /// omit it rather than substitute a default.
     temperature: ?f32 = null,
@@ -228,6 +252,18 @@ pub const Wire = struct {
     id: []const u8,
     encode: *const fn (arena: std.mem.Allocator, endpoint: Endpoint, request: Request) anyerror!HttpRequest,
     decode: *const fn (arena: std.mem.Allocator, body: []const u8) anyerror!Completion,
+
+    /// Whether this format has a way to say "you have read this prefix before".
+    ///
+    /// Only Anthropic's does, of the five here. OpenAI's caches automatically
+    /// with nothing to send; Gemini's is a separate endpoint that stores the
+    /// prefix ahead of time rather than a field on the request; Ollama and
+    /// Hugging Face have no notion of it. Asking anyway would be harmless and
+    /// dishonest — the field would go out and mean nothing — so the caller
+    /// asks first.
+    pub fn supportsCaching(self: Wire) bool {
+        return std.mem.eql(u8, self.id, "anthropic");
+    }
 };
 
 /// Where a connector sends, and what it sends to authenticate.
