@@ -444,6 +444,11 @@ pub const Runner = struct {
                 .messages = messages.items,
                 .tools = declared,
                 .maxOutputTokens = options.maxOutputTokens,
+                // Worth asking for on every turn of an agent run: the whole
+                // conversation goes out again each time, and by the tenth turn
+                // most of it is bytes the provider has already read. Formats
+                // with no way to express this ignore the field.
+                .caching = if (options.connector.wire().supportsCaching()) .prefix else .none,
                 .effort = options.effort,
                 .showThinking = options.showThinking,
             };

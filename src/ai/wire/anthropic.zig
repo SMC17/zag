@@ -41,8 +41,23 @@ pub fn encode(arena: std.mem.Allocator, endpoint: Endpoint, request: Request) an
     try w.print(",\"max_tokens\":{d}", .{request.maxOutputTokens});
 
     if (request.system.len > 0) {
-        try w.writeAll(",\"system\":");
-        try provider.writeJsonString(w, request.system);
+        // Sent as a block rather than a bare string when caching, because
+        // `cache_control` attaches to a block. The render order is tools, then
+        // system, then messages, so a marker here covers the tool schemas too.
+        //
+        // On this build that prefix is about 930 tokens and the minimum
+        // Anthropic will cache is 1,024, so this earns nothing yet and is not
+        // told that it did not. It is written anyway because it costs one
+        // field and starts paying the moment the tool list or the instructions
+        // grow past the line.
+        if (request.caching == .prefix) {
+            try w.writeAll(",\"system\":[{\"type\":\"text\",\"text\":");
+            try provider.writeJsonString(w, request.system);
+            try w.writeAll(",\"cache_control\":{\"type\":\"ephemeral\"}}]");
+        } else {
+            try w.writeAll(",\"system\":");
+            try provider.writeJsonString(w, request.system);
+        }
     }
 
     // Sampling is sent only when a caller asked for it. The current models
@@ -113,6 +128,25 @@ pub fn encode(arena: std.mem.Allocator, endpoint: Endpoint, request: Request) an
                     if (result.isError) try w.writeAll(",\"is_error\":true");
                     try w.writeAll("}");
                 },
+            }
+
+            // The marker that earns something. It sits on the last block of
+            // the last message, so the cached prefix is everything before it:
+            // the tools, the system prompt and the whole conversation so far.
+            // Next turn appends to that prefix rather than re-reading it.
+            //
+            // Deliberately not on every message. There are four breakpoints in
+            // a request and a marker on each turn would spend them all inside
+            // one conversation, so a long run would end up with markers only
+            // near its beginning — the opposite of what is wanted.
+            const last_message = i + 1 == request.messages.len;
+            const last_block = b + 1 == message.blocks.len;
+            if (request.caching == .prefix and last_message and last_block) {
+                // Written by rewinding over the closing brace, because
+                // `cache_control` belongs inside the block that was just
+                // finished and every arm above closes its own.
+                body.shrinkRetainingCapacity(body.written().len - 1);
+                try w.writeAll(",\"cache_control\":{\"type\":\"ephemeral\"}}");
             }
         }
         try w.writeAll("]}");
@@ -388,4 +422,82 @@ test "an empty thinking block is left out rather than kept as nothing" {
     const completion = try decode(arena, body);
     try testing.expectEqual(@as(usize, 1), completion.blocks.len);
     try testing.expectEqualStrings("Done.", try completion.text(arena));
+}
+
+test "the cached prefix is everything up to the newest turn" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const request: Request = .{
+        .model = "claude-opus-5",
+        .system = "You are working in a recorded workspace.",
+        .caching = .prefix,
+        .messages = &.{
+            .{ .role = .user, .blocks = &.{.{ .text = "fix the build" }} },
+            .{ .role = .assistant, .blocks = &.{.{ .text = "I will look." }} },
+            .{ .role = .user, .blocks = &.{.{ .text = "here is the output" }} },
+        },
+        .tools = &.{.{ .name = "read_file", .description = "Read a file.", .schemaJson = "{}" }},
+    };
+    const http = try encode(arena, .{ .baseUrl = "https://api.anthropic.com" }, request);
+
+    // The system prompt becomes a block, because `cache_control` attaches to a
+    // block and not to a bare string. Tools render before system, so this one
+    // marker covers the tool schemas too.
+    try testing.expect(std.mem.indexOf(u8, http.body, "\"system\":[{\"type\":\"text\"") != null);
+
+    // Exactly two breakpoints: the prefix, and the end of the conversation.
+    // There are four in a request, and spending one per turn would leave a
+    // long run with markers only near its beginning.
+    var count: usize = 0;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, http.body, at, "cache_control")) |found| {
+        count += 1;
+        at = found + 1;
+    }
+    try testing.expectEqual(@as(usize, 2), count);
+
+    // The conversation marker is on the last block of the last message, so
+    // the cached prefix is the tools, the system prompt and every earlier
+    // turn — and the next turn appends to it rather than re-reading it.
+    const marker = std.mem.lastIndexOf(u8, http.body, "cache_control").?;
+    const newest = std.mem.lastIndexOf(u8, http.body, "here is the output").?;
+    try testing.expect(marker > newest);
+
+    // Still valid JSON after rewinding over a closing brace to insert it.
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, http.body, .{});
+    defer parsed.deinit();
+    const messages = parsed.value.object.get("messages").?.array;
+    const last = messages.items[messages.items.len - 1].object.get("content").?.array;
+    const block = last.items[last.items.len - 1].object;
+    try testing.expectEqualStrings("ephemeral", block.get("cache_control").?.object.get("type").?.string);
+}
+
+test "asking for nothing sends nothing, and the body stays as it was" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const request: Request = .{
+        .model = "claude-opus-5",
+        .system = "You are working in a recorded workspace.",
+        .messages = &.{.{ .role = .user, .blocks = &.{.{ .text = "hello" }} }},
+    };
+    const http = try encode(arena, .{ .baseUrl = "https://api.anthropic.com" }, request);
+
+    try testing.expect(std.mem.indexOf(u8, http.body, "cache_control") == null);
+    // And the system prompt stays a plain string, so a request that does not
+    // ask for caching is byte-identical to what it was before this existed.
+    try testing.expect(std.mem.indexOf(u8, http.body, "\"system\":\"You are") != null);
+}
+
+test "only the format that can express caching is asked to" {
+    // Sending the field to a provider that has no notion of it would be
+    // harmless and dishonest: it would go out and mean nothing.
+    try testing.expect(wire.supportsCaching());
+    try testing.expect(!@import("openai.zig").wire.supportsCaching());
+    try testing.expect(!@import("ollama.zig").wire.supportsCaching());
+    try testing.expect(!@import("gemini.zig").wire.supportsCaching());
+    try testing.expect(!@import("huggingface.zig").wire.supportsCaching());
 }
