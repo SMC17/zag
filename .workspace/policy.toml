@@ -1,51 +1,15 @@
-# The policy this workspace enforces.
-#
-# This file is not read by a model and is never shown to one. Instruction files
-# such as AGENTS.md and everything under .workspace/rules/ are requests; this
-# file is the answer. Changing it is how permissions change. Nothing an agent
-# writes or reads can widen it.
-#
-# Run "zag policy" to see this in words, and "zag check" to have it verified.
-
-id = "zag-workbench"
-name = "Work on this repository, ask a model on this computer"
-description = "An agent working here may read and change files in this repository and run the build and the tests. It may use a model running on this computer. It may not reach anything else over the network, may not send commits anywhere, and may not use a saved credential."
+[[rule]]
+id = "explore"
+allow = ["model.infer", "fs.read", "process.execute"]
+because = "An agent may read this repository and run its build."
 
 [[rule]]
-id = "read-and-change-this-repository"
-allow = ["fs.read", "fs.write", "git.read"]
-paths = ["/home/user/zag"]
-because = "The work of this workspace is this repository."
-
-[[rule]]
-id = "run-the-build-and-the-tests"
-allow = ["process.execute"]
-commands = ["zig", "git", "sh"]
-because = "A change is not finished until the build and the tests have run."
-
-[[rule]]
-id = "deleting-asks-first"
-ask = ["fs.delete"]
-paths = ["/home/user/zag"]
-because = "Deleting a file cannot be undone from the log, so a person decides each time."
-
-[[rule]]
-id = "models-on-this-computer"
-allow = ["model.infer"]
-because = "Asking a model is part of the work here."
-
-[[rule]]
-id = "nothing-leaves-this-computer"
+id = "local-model"
 allow = ["network.connect"]
-hosts = ["localhost", "127.0.0.1", "::1"]
-because = "Only a model running on this computer may be reached. To use a hosted provider, add its host here, deliberately."
+hosts = ["localhost", "127.0.0.1"]
+because = "The model runs on this computer."
 
 [[rule]]
-id = "no-saved-credentials"
-deny = ["credentials.read", "credentials.use"]
-because = "Nothing in this workspace needs a saved credential, so none may be spent."
-
-[[rule]]
-id = "no-pushing"
-deny = ["git.push", "remote.execute", "agent.spawn"]
-because = "Sending commits, running things elsewhere and starting other agents are decisions for a person, not for an agent."
+id = "no-writes"
+deny = ["fs.write", "fs.delete", "git.commit", "git.push"]
+because = "This is a read-only look at a real repository."
