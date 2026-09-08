@@ -115,6 +115,7 @@ pub const help_text =
     \\  --explore           Let "zag route" consider connectors never used here.
     \\  --children          Let a run hand parts of the work to child agents.
     \\  --depth <n>         How many levels of agents a run may have. Default 2.
+    \\  --together          Run a turn's child agents at once. They may then only read.
     \\  --raw               Start the shell with no added prompt marks.
     \\  --stream            Print a model's answer as it arrives, not when it finishes.
     \\  --init              Write a starter policy file. Used with "zag policy".
@@ -154,6 +155,13 @@ const Options = struct {
     children: bool = false,
     /// Levels of agents a run may have, counting itself. Empty means two.
     depth: []const u8 = "",
+    /// Run a turn's children at the same time, narrowed to reading.
+    ///
+    /// This takes authority away rather than granting any — see
+    /// `ai/swarm.zig` — so it needs no permission of its own. It is off by
+    /// default because a child that cannot run the build is a surprise to
+    /// anybody who asked for one that could.
+    together: bool = false,
     provider: []const u8 = "",
     model: []const u8 = "",
     turns: []const u8 = "",
@@ -204,6 +212,11 @@ fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
             continue;
         }
         if (std.mem.eql(u8, arg, "--children")) {
+            options.children = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--together")) {
+            options.together = true;
             options.children = true;
             continue;
         }
@@ -1691,6 +1704,7 @@ fn askAModel(
         .model = model,
         .acting = context,
         .budget = budget,
+        .together = options.together,
     };
     if (options.depth.len > 0) {
         children.bounds.maxDepth = std.fmt.parseInt(usize, options.depth, 10) catch {
