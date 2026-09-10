@@ -313,15 +313,10 @@
         },
         "request": {
           "type": "string"
-        },
-        "policy": {
-          "type": "string"
         }
       },
       "required": [
-        "label",
-        "request",
-        "policy"
+        "request"
       ],
       "additionalProperties": false
     },
