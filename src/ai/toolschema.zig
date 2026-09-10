@@ -140,8 +140,7 @@ pub const offers = [_]Offer{
 pub const spawn_agent_offer: Offer = .{
     .name = "spawn_agent",
     .kind = .spawn_agent,
-    .description =
-    "Hand a self-contained piece of work to a child agent and get back its answer, not its transcript. " ++
+    .description = "Hand a self-contained piece of work to a child agent and get back its answer, not its transcript. " ++
         "Use it when finding something out would cost more reading than the answer is worth: \"which file defines the retry backoff, and what are the numbers\". " ++
         "The child starts fresh and knows only what \"request\" says, so write it as though for someone who has not read this conversation. " ++
         "It runs under the same permissions you do and can never be given more. It gets part of the turns you have left, so it is worth doing when the answer saves you more than it costs.",
