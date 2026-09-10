@@ -75,6 +75,21 @@ pub const Claim = union(enum) {
     nothing,
     /// A named resource, observed or changed.
     on: struct { resource: Resource, access: Access },
+    /// Effects this build cannot bound, except alongside its own kind.
+    ///
+    /// This exists for one case and it is worth naming: starting a child
+    /// agent. A child does arbitrary work, so it cannot overlap a write or a
+    /// command — but the whole reason to start four children is that they run
+    /// at the same time, and a claim of `.everything` makes four children into
+    /// four turns' worth of waiting. `siblings` says "runs alone, except
+    /// beside others in this group", which is exactly the shape a fan-out has
+    /// and which neither of the other two variants can express.
+    ///
+    /// It is only safe because of what the group guarantees about itself.
+    /// Children that run together are narrowed to reading — see
+    /// `swarm.readOnly` — so two of them cannot disagree about a file. A caller
+    /// that puts things in a group without that guarantee has written a race.
+    siblings: []const u8,
     /// Effects this build cannot bound. Runs alone.
     everything,
 
@@ -84,6 +99,13 @@ pub const Claim = union(enum) {
     /// a call is never asked whether it conflicts with itself.
     pub fn conflictsWith(self: Claim, other: Claim) bool {
         if (self == .everything or other == .everything) return true;
+        if (self == .siblings or other == .siblings) {
+            // Beside its own group and nothing else. A sibling next to a read
+            // is still a barrier: a child can do anything a policy allows it,
+            // and what that is cannot be read off the request.
+            if (self != .siblings or other != .siblings) return true;
+            return !std.mem.eql(u8, self.siblings, other.siblings);
+        }
         if (self == .nothing or other == .nothing) return false;
         const a = self.on;
         const b = other.on;
@@ -162,8 +184,12 @@ pub fn claimOf(arena: std.mem.Allocator, request: tools.ToolRequest) !Claim {
         // a container, another machine, or a write to the shared knowledge
         // base. None of these has effects this build can bound from the
         // request, so each runs alone.
+        // Children fan out together and wait for nothing else. What makes
+        // that safe is not this line: it is that children which run together
+        // are narrowed to reading. See `swarm.readOnly` and `loop.Children`.
+        .@"agent.spawn" => .{ .siblings = "agents" },
+
         .@"model.infer",
-        .@"agent.spawn",
         .@"mcp.invoke",
         .@"container.start",
         .@"remote.execute",
@@ -381,6 +407,40 @@ test "nothing conflicts with nothing" {
     try testing.expect(barrier.conflictsWith(barrier));
 }
 
+test "children fan out together and beside nothing else" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The whole reason to start four children is that they run at the same
+    // time. A claim of `.everything` would make four children into four turns'
+    // worth of waiting, which is the cost of the fan-out without the benefit.
+    const first = try claimOf(arena, .{ .spawn_agent = .{ .request = "Read the parser." } });
+    const second = try claimOf(arena, .{ .spawn_agent = .{ .request = "Read the lexer." } });
+    try testing.expect(first == .siblings);
+    try testing.expect(!first.conflictsWith(second));
+
+    // And beside nothing else, including a read. A child does whatever a model
+    // decides, and what that touches cannot be read off the request.
+    try testing.expect(first.conflictsWith(reads("src").?));
+    try testing.expect(reads("src").?.conflictsWith(first));
+    try testing.expect(first.conflictsWith(writes("src/a.zig").?));
+    try testing.expect(first.conflictsWith(barrier));
+    try testing.expect(first.conflictsWith(idle_claim));
+
+    // A different group is a different fan-out, and does not join this one.
+    const stranger: Claim = .{ .siblings = "something-else" };
+    try testing.expect(first.conflictsWith(stranger));
+
+    // Four children in one turn make one wave; a write among them makes three.
+    const together = try plan(arena, &.{ first, second, first, second });
+    try testing.expectEqual(@as(usize, 1), together.len);
+    try testing.expectEqual(@as(usize, 4), together[0].len());
+
+    const interrupted = try plan(arena, &.{ first, writes("src/a.zig").?, second });
+    try testing.expectEqual(@as(usize, 3), interrupted.len);
+}
+
 test "conflict is symmetric, whatever the pair" {
     // An asymmetric conflict test schedules a pair one way and not the other,
     // which shows up as a race that depends on the order the model listed its
@@ -395,6 +455,8 @@ test "conflict is symmetric, whatever the pair" {
         .{ .on = .{ .resource = .{ .host = "api.example.com" }, .access = .write } },
         .{ .on = .{ .resource = .{ .credential = "KEY" }, .access = .read } },
         .{ .on = .{ .resource = .none, .access = .read } },
+        .{ .siblings = "agents" },
+        .{ .siblings = "something-else" },
     };
     for (samples) |a| {
         for (samples) |b| {

@@ -172,6 +172,15 @@ pub const Options = struct {
     seed: ?u64 = null,
     /// When false, the service holds the log in memory only. Tests use this.
     persist: bool = true,
+    /// The environment a recorded command runs with, as `KEY=VALUE` pairs.
+    ///
+    /// This is the person's own environment. A command recorded with a made-up
+    /// one is not the command they would have run: without `HOME` the Zig
+    /// compiler cannot find its cache, `git` reads no configuration, and every
+    /// tool that keeps state under a home directory fails for a reason that has
+    /// nothing to do with the code being built. Left empty, a minimal
+    /// environment is used, which is right for a test and wrong for a person.
+    environment: []const []const u8 = &.{},
 };
 
 pub const Service = struct {
@@ -186,6 +195,7 @@ pub const Service = struct {
     policy: policy_mod.Engine,
     ids: idmod.Generator,
     persist: bool,
+    environment: []const []const u8,
     /// Set when the log on disk failed verification. While it is set, `append`
     /// refuses, so a damaged log is never extended.
     sealed: bool = false,
@@ -270,6 +280,7 @@ pub const Service = struct {
             .policy = policy_mod.Engine.init(arena, policy, seed),
             .ids = idmod.Generator.init(seed, @divFloor(options.now.ns, timeutil.ns_per_ms)),
             .persist = options.persist,
+            .environment = options.environment,
             .sealed = chain_break != null or torn_bytes > 0 or malformed != null,
             .persisted_bytes = persisted_bytes,
             .persisted_fingerprint = persisted_fingerprint,
@@ -457,6 +468,16 @@ pub const Service = struct {
                 .hash = output.contentHash,
                 .byte_count = output.byteCount,
             }),
+            // What an agent's tools produced, audited the same way a command's
+            // output is. These were referenced by the log and checked by
+            // nothing, so a record that named an address for content it did
+            // not have looked clean.
+            .tool_finished => |finished| {
+                if (finished.resultBytes > 0) try references.append(self.arena, .{
+                    .hash = finished.resultHash,
+                    .byte_count = finished.resultBytes,
+                });
+            },
             else => {},
         };
         return self.content.audit(io, references.items);
@@ -487,6 +508,52 @@ pub const Service = struct {
         blocks: []const block_mod.Block,
         exitStatus: ?u8,
     };
+
+    /// The three variables the boundary protocol uses. Anything arriving from
+    /// outside under one of these names is dropped rather than passed on.
+    const marker_variables = [_][]const u8{ "ZAG_MARKER_TOKEN", "ZAG_MARKER_COMMAND", "ZAG_EXEC_COMMAND" };
+
+    /// Build the environment a recorded command runs with.
+    ///
+    /// The person's own environment, plus the three variables the boundary
+    /// protocol needs. Those three are written first and filtered out of what
+    /// was inherited, so a variable already set under one of those names cannot
+    /// reach the shell: `execve` does not define which of two entries with the
+    /// same name wins, and the marker token is what stops a program forging a
+    /// command boundary in the record. Guessing it would be enough to break it.
+    ///
+    /// `TERM` and `PATH` are supplied only when the person has none, so a
+    /// command still runs somewhere with no environment at all.
+    fn commandEnvironment(
+        self: *Service,
+        marker_token: []const u8,
+        marker_command: []const u8,
+        command_text: []const u8,
+    ) ![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        try out.append(self.arena, try std.fmt.allocPrint(self.arena, "ZAG_MARKER_TOKEN={s}", .{marker_token}));
+        try out.append(self.arena, try std.fmt.allocPrint(self.arena, "ZAG_MARKER_COMMAND={s}", .{marker_command}));
+        try out.append(self.arena, try std.fmt.allocPrint(self.arena, "ZAG_EXEC_COMMAND={s}", .{command_text}));
+
+        var has_term = false;
+        var has_path = false;
+        for (self.environment) |entry| {
+            const equals = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
+            const name = entry[0..equals];
+            var reserved = false;
+            for (marker_variables) |taken| {
+                if (std.mem.eql(u8, name, taken)) reserved = true;
+            }
+            if (reserved) continue;
+            if (std.mem.eql(u8, name, "TERM")) has_term = true;
+            if (std.mem.eql(u8, name, "PATH")) has_path = true;
+            try out.append(self.arena, entry);
+        }
+
+        if (!has_term) try out.append(self.arena, "TERM=xterm-256color");
+        if (!has_path) try out.append(self.arena, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        return out.items;
+    }
 
     /// Run one command on a real pseudoterminal and record it in the log.
     ///
@@ -527,13 +594,7 @@ pub const Service = struct {
         try session.run(
             "/bin/sh",
             &.{ "/bin/sh", "-c", script },
-            &.{
-                try std.fmt.allocPrint(self.arena, "ZAG_MARKER_TOKEN={s}", .{marker_token}),
-                try std.fmt.allocPrint(self.arena, "ZAG_MARKER_COMMAND={s}", .{marker_command}),
-                try std.fmt.allocPrint(self.arena, "ZAG_EXEC_COMMAND={s}", .{command_text}),
-                "TERM=xterm-256color",
-                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            },
+            try self.commandEnvironment(marker_token, marker_command, command_text),
             self.root,
             timeout,
         );
@@ -582,6 +643,13 @@ pub const Service = struct {
         failure: ?[]const u8 = null,
         /// The session event everything in the run is correlated to.
         correlation: ?event_mod.EventId = null,
+        /// The run that started this one, when this is a child agent.
+        ///
+        /// A child hangs under its parent rather than opening a session of its
+        /// own: it is the same person, in the same workspace, doing part of
+        /// the same piece of work, and a second session would make it look
+        /// like somebody else turned up.
+        parent: ?event_mod.EventId = null,
 
         pub fn init(service: *Service) AgentRecorder {
             return .{
@@ -595,7 +663,27 @@ pub const Service = struct {
         }
 
         pub fn journal(self: *AgentRecorder) loop_mod.Journal {
-            return .{ .context = self, .recordFn = write };
+            return .{ .context = self, .recordFn = write, .childFn = openChild };
+        }
+
+        /// A recorder for a child agent, whose run hangs under this one.
+        ///
+        /// Its own agent identifier and its own notion of which call is open,
+        /// so the child's tool calls do not attach themselves to the parent's
+        /// request; the parent's session and correlation, so one query still
+        /// returns the whole tree.
+        fn openChild(context: *anyopaque) anyerror!loop_mod.Journal {
+            const self: *AgentRecorder = @ptrCast(@alignCast(context));
+            const service = self.service;
+            const child = try service.arena.create(AgentRecorder);
+            child.* = .{
+                .service = service,
+                .session = self.session,
+                .agent = service.ids.next(idmod.AgentId),
+                .correlation = self.correlation,
+                .parent = self.started,
+            };
+            return child.journal();
         }
 
         fn write(context: *anyopaque, moment: loop_mod.Moment) anyerror!void {
@@ -614,10 +702,15 @@ pub const Service = struct {
 
             switch (moment) {
                 .started => |e| {
-                    const opened = try service.record(.{ .session_opened = .{
-                        .session = self.session,
-                        .workingDirectory = service.root,
-                    } }, .{ .at = at, .actor = actor });
+                    // A child joins the session its parent opened. Only a run
+                    // with no parent opens one.
+                    const opened: ?event_mod.EventId = if (self.parent) |_|
+                        self.correlation
+                    else
+                        (try service.record(.{ .session_opened = .{
+                            .session = self.session,
+                            .workingDirectory = service.root,
+                        } }, .{ .at = at, .actor = actor })).id;
                     const begun = try service.record(.{ .agent_started = .{
                         .agent = self.agent,
                         .session = self.session,
@@ -628,13 +721,35 @@ pub const Service = struct {
                     } }, .{
                         .at = at,
                         .actor = actor,
-                        .causedBy = opened.id,
-                        .correlation = opened.id,
+                        // What caused a child to start is the parent asking
+                        // for it, which is the link `zag why` walks back
+                        // along.
+                        .causedBy = self.parent orelse opened,
+                        .correlation = opened,
                     });
                     self.started = begun.id;
                     // The correlation for the whole run is the session, so one
-                    // query returns it all.
-                    self.correlation = opened.id;
+                    // query returns it all — the children included.
+                    self.correlation = opened;
+                },
+                .compacted => |e| {
+                    // What the model was shown changed, so the record has to
+                    // say so. The interesting question after a run goes wrong
+                    // — "did it still know about the thing from step two?" —
+                    // has no answer otherwise.
+                    var sentence: std.Io.Writer.Allocating = .init(service.arena);
+                    try e.writeSentence(&sentence.writer);
+                    _ = try service.record(.{ .agent_message = .{
+                        .agent = self.agent,
+                        .session = self.session,
+                        .role = .workspace,
+                        .text = sentence.written(),
+                    } }, .{
+                        .at = at,
+                        .actor = actor,
+                        .causedBy = self.started,
+                        .correlation = self.started,
+                    });
                 },
                 .said => |e| {
                     _ = try service.record(.{ .agent_message = .{
@@ -697,6 +812,29 @@ pub const Service = struct {
                 },
                 .settled => |e| {
                     const call = self.pending_id orelse service.ids.next(idmod.ToolCallId);
+
+                    // Keep what the tool produced, addressed by its hash.
+                    //
+                    // The log has always written a `resultHash` and nothing
+                    // ever put the bytes anywhere, so the record asserted an
+                    // address for content that did not exist and the only
+                    // account of what an agent saw was a one-line summary. A
+                    // run could not be replayed, resumed faithfully, or read
+                    // back.
+                    //
+                    // Redacted first, on the same path and for the same reason
+                    // as captured command output: a tool that read a file with
+                    // a key in it must not put the key in the record.
+                    var stored = e.resultHash;
+                    var stored_bytes: usize = 0;
+                    if (e.content.len > 0) {
+                        const clean = try service.redactor.rewrite(service.arena, e.content);
+                        if (service.content.put(clean.text)) |hash| {
+                            stored = hash;
+                            stored_bytes = clean.text.len;
+                        } else |_| {}
+                    }
+
                     _ = try service.record(.{ .tool_finished = .{
                         .call = call,
                         .agent = self.agent,
@@ -709,7 +847,8 @@ pub const Service = struct {
                             .timed_out => .timed_out,
                         },
                         .duration = .{ .ns = 0 },
-                        .resultHash = e.resultHash,
+                        .resultHash = stored,
+                        .resultBytes = stored_bytes,
                         .summary = try service.arena.dupe(u8, e.summary),
                     } }, .{
                         .at = at,
@@ -1726,4 +1865,201 @@ test "a key a command prints never reaches the stored bytes or the log" {
 
     const reopened = try Service.open(arena, io, .{ .root = root, .actor = testActor(), .now = at });
     try testing.expect(reopened.report.isHealthy());
+}
+
+test "a child agent's run is recorded under its parent, in the same session" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var service = (try Service.open(arena, io, .{
+        .root = root,
+        .actor = testActor(),
+        .now = .{ .ns = 1_700_000_000 * timeutil.ns_per_s },
+    })).service;
+
+    var recorder = Service.AgentRecorder.init(&service);
+    const parent = recorder.journal();
+
+    parent.record(.{ .started = .{
+        .request = "what is the retry backoff?",
+        .provider = "ollama",
+        .model = "llama3.2",
+        .policy = "workspace",
+    } });
+    parent.record(.{ .asked = .{
+        .tool = "spawn_agent",
+        .capability = "agent.spawn",
+        .resource = "find the backoff",
+        .argumentsJson = "",
+        .decision = null,
+    } });
+
+    // The child keeps its own record. Sharing the parent's would attach the
+    // child's tool calls to the parent's request and leave the parent's tree
+    // pointing at the child's start — a record that reads as true and is not.
+    const child = parent.forChild().?;
+    child.record(.{ .started = .{
+        .request = "Which file sets the retry backoff?",
+        .provider = "ollama",
+        .model = "llama3.2",
+        .policy = "workspace",
+    } });
+    child.record(.{ .asked = .{
+        .tool = "read_file",
+        .capability = "fs.read",
+        .resource = "transport.zig",
+        .argumentsJson = "",
+        .decision = null,
+    } });
+    child.record(.{ .settled = .{
+        .tool = "read_file",
+        .outcome = .completed,
+        .summary = "Read 31 bytes from transport.zig.",
+        .resultHash = hashing.Hash.zero,
+    } });
+    child.record(.{ .finished = .{
+        .ending = .answered,
+        .elapsed = .{ .ns = 40 * timeutil.ns_per_ms },
+        .toolCalls = 1,
+        .refusedCalls = 0,
+        .usage = .{ .inputTokens = 40, .outputTokens = 12 },
+    } });
+
+    parent.record(.{ .settled = .{
+        .tool = "spawn_agent",
+        .outcome = .completed,
+        .summary = "A child agent answered after 2 turns and 1 tool call.",
+        .resultHash = hashing.Hash.zero,
+    } });
+    parent.record(.{ .finished = .{
+        .ending = .answered,
+        .elapsed = .{ .ns = 120 * timeutil.ns_per_ms },
+        .toolCalls = 1,
+        .refusedCalls = 0,
+        .usage = .{ .inputTokens = 60, .outputTokens = 18 },
+    } });
+
+    try testing.expect(recorder.failure == null);
+    try service.flush(io);
+
+    const path = try std.fmt.allocPrint(arena, "{s}/.workspace/events.jsonl", .{root});
+    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20));
+    const loaded = try log_mod.Log.loadJsonLines(arena, source, 1);
+    try testing.expect(try loaded.log.verify() == null);
+
+    // One session was opened, not two. It is the same person, in the same
+    // workspace, doing part of the same piece of work.
+    var sessions: usize = 0;
+    var agents: usize = 0;
+    var parent_start: ?usize = null;
+    var child_start: ?usize = null;
+    for (loaded.log.entries.items, 0..) |entry, index| {
+        switch (entry.payload) {
+            .session_opened => sessions += 1,
+            .agent_started => {
+                agents += 1;
+                if (parent_start == null) parent_start = index else child_start = index;
+            },
+            else => {},
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), sessions);
+    try testing.expectEqual(@as(usize, 2), agents);
+
+    // Two agents, and they are not the same agent. A child that reused its
+    // parent's identifier would make "which agent read that file?" unanswerable.
+    const parent_id = loaded.log.entries.items[parent_start.?].payload.agent_started.agent;
+    const child_id = loaded.log.entries.items[child_start.?].payload.agent_started.agent;
+    try testing.expect(!parent_id.eql(child_id));
+
+    // And the child hangs under the parent, which is the link "zag why" walks
+    // back along: still one root for the whole tree.
+    const graph = try graph_mod.Graph.build(arena, loaded.log);
+    const roots = try graph.roots();
+    try testing.expectEqual(@as(usize, 1), roots.items.len);
+    try testing.expectEqual(parent_start.?, graph.nodes[child_start.?].parent.?);
+
+    // The child's own tool call belongs to the child, not to the parent.
+    for (loaded.log.entries.items, 0..) |entry, index| {
+        if (entry.payload != .tool_requested) continue;
+        if (!std.mem.eql(u8, entry.payload.tool_requested.tool, "read_file")) continue;
+        try testing.expectEqual(child_start.?, graph.nodes[index].parent.?);
+    }
+}
+
+test "what an agent's tools produced is kept, redacted, and auditable" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var service = (try Service.open(arena, io, .{
+        .root = root,
+        .actor = testActor(),
+        .now = .{ .ns = 1_700_000_000 * timeutil.ns_per_s },
+    })).service;
+
+    var recorder = Service.AgentRecorder.init(&service);
+    const journal = recorder.journal();
+
+    journal.record(.{ .started = .{
+        .request = "read the config",
+        .provider = "ollama",
+        .model = "llama3.2",
+        .policy = "workspace",
+    } });
+    journal.record(.{ .asked = .{
+        .tool = "read_file",
+        .capability = "fs.read",
+        .resource = "config.env",
+        .argumentsJson = "{\"path\":\"config.env\"}",
+        .decision = null,
+    } });
+    // A tool that read a file with a key in it. The bytes are kept, so a run
+    // can be replayed and resumed — and the key is not, for the same reason a
+    // command's captured output is redacted before it is stored.
+    journal.record(.{ .settled = .{
+        .tool = "read_file",
+        .outcome = .completed,
+        .summary = "Read 64 bytes from config.env.",
+        .resultHash = hashing.Hash.zero,
+        .content = "PORT=8080\nANTHROPIC_API_KEY=sk-ant-api03-averyrealshapedsecretvalue\n",
+    } });
+    try service.flush(io);
+
+    // The log now names an address, and the store answers for it.
+    var found: ?event_mod.ToolFinished = null;
+    for (service.log.entries.items) |entry| switch (entry.payload) {
+        .tool_finished => |e| found = e,
+        else => {},
+    };
+    try testing.expect(found != null);
+    try testing.expect(found.?.resultBytes > 0);
+
+    const kept = try service.content.read(io, found.?.resultHash, 1 << 20);
+    try testing.expect(std.mem.indexOf(u8, kept, "PORT=8080") != null);
+    // The key is gone from what was stored. Before this the bytes were never
+    // stored at all, so there was nothing to redact and nothing to replay.
+    try testing.expect(std.mem.indexOf(u8, kept, "sk-ant-api03-averyrealshapedsecretvalue") == null);
+
+    // And the auditor checks it. The reference existed before and nothing
+    // looked at it, so a record naming an address for content it did not have
+    // came back clean.
+    const report = try service.auditContent(io);
+    try testing.expectEqual(@as(usize, 1), report.references);
+    try testing.expect(report.isHealthy());
 }

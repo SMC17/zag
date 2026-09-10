@@ -76,6 +76,16 @@ zag run -- zig build test      # run a command and record it as a block
 zag shell-hook bash            # the shell integration to add to your shell
 zag workflow                   # this repository's own workflow, as a task graph
 zag history "status:failed zig" # search recorded work, not a text file
+zag show "kind:command zig build"  # what that command actually printed
+zag ask --resume               # carry on where the last run stopped
+zag ask --children "..."       # let the run hand parts of the work to child agents
+zag ask --best-of 3 "..."      # run it three times, judge each, keep the best
+zag route                      # which model to use next, from what has worked here
+zag route "fix the parser"     # the same, with the task in hand: a trained policy
+zag trajectories               # every recorded agent run, scored
+zag trajectories --json        # the same as JSON Lines, for training or eval
+zag eval baseline.jsonl        # did a change help? paired, and honest about noise
+zag judge                      # a model's second opinion on those runs, recorded
 zag knowledge                  # the knowledge under .workspace/, and what is overdue
 zag objects --root .           # audit stored command output without changing it
 zag recover --root .           # inspect a damaged log and print a recovery plan
@@ -140,7 +150,153 @@ says which rule and why.
 Capabilities: `fs.read`, `fs.write`, `fs.delete`, `process.execute`,
 `process.signal`, `network.connect`, `network.listen`, `git.read`,
 `git.commit`, `git.push`, `credentials.use`, `credentials.read`, `mcp.invoke`,
-`container.start`, `remote.execute`, `model.infer`.
+`container.start`, `remote.execute`, `model.infer`, `agent.spawn`,
+`knowledge.write`.
+
+### Handing work to a child agent
+
+One context doing everything is the limit an agent hits first. Reading six
+files to find one answer spends six files' worth of context on a sentence, and
+the sentence is all the work needed.
+
+`zag ask --children` offers the run a `spawn_agent` tool. A child gets the
+question and nothing else, does the reading in its own context, and hands back
+its answer — not its transcript. The parent pays for the answer.
+
+```
+zag ask --children "why is the build slow?"
+zag ask --together "..."             # a turn's children run at once
+zag ask --children --depth 3 "..."   # deeper trees, if you mean it
+```
+
+It is off by default, and the policy has the last word: nothing spawns unless
+a rule allows `agent.spawn`.
+
+```toml
+[[rule]]
+id = "children"
+allow = ["agent.spawn"]
+because = "Reading in a child's context is cheaper than reading in mine."
+```
+
+Four bounds hold whatever the policy says. They are why this could be offered
+to a model at all.
+
+- **A child is no wider than its parent.** It runs on the same policy engine,
+  so every decision it reaches is one the parent could have reached.
+- **Depth is bounded.** A child that can spawn a child that can spawn is a fork
+  bomb with a language model in it.
+- **Fan-out is bounded per turn and over the whole run.** Ten turns of four is
+  forty.
+- **The budget is divided, not copied.** A child gets half of the parent's
+  remaining turns and tokens, so four children in a row get a half, a quarter,
+  an eighth. The child's spend is added back to the parent's.
+
+`--together` is what makes a fan-out worth doing. Four children reading four
+parts of a repository take one child's wall clock rather than four.
+
+It is safe because it takes authority away rather than granting any. Children
+that run side by side are narrowed to reading, so two of them stay out of each
+other's way, and the fan-out holds no second fan-out inside it. The narrowing
+is a deny rule appended to your policy. The engine resolves deny over allow, so
+there is no policy this could widen. Start a child on its own when it needs to
+run the tests.
+
+Each child's own work is in the record, under the parent, with its own agent
+identifier and in the same session. `zag why` walks from one to the other.
+
+### Two opinions of a run
+
+`zag trajectories` scores every recorded run by arithmetic over the log: how it
+ended, whether its actions worked, whether it went in circles. Anyone can check
+that score by reading the log. It is also blind to the question everybody
+actually asks. A run can end cleanly, make eight successful tool calls, repeat
+nothing, and confidently say something false. Arithmetic scores that run 1.0.
+
+`zag judge` asks a model to read the same runs against a rubric. Its opinion
+goes beside the arithmetic, and the arithmetic stays underneath: it holds
+steady between runs, and it costs no request.
+
+```
+zag judge                      # judge every run not yet judged
+zag judge --json               # the verdicts as JSON Lines
+```
+
+The useful output is the disagreement rather than the judge's number. The runs
+where the two reach different conclusions are the shortlist worth reading by
+hand. Which way the gap goes tells you what to expect. A judge scoring
+above the record usually means the run failed tidily. A judge scoring below it
+usually means the run did every step correctly and answered the wrong
+question.
+
+A trajectory contains file contents and command output — bytes an attacker may
+have written. A fence holds them, built from a token derived from the run
+itself. Any occurrence of that token inside the quoted bytes is stripped before
+fencing, so text inside the fence stays inside it. The instructions also tell
+the judge that fenced text is evidence and not instruction.
+
+Each verdict goes into the log as evidence: which model gave it, against which
+rubric, with the whole thing addressed by hash. A run is judged once.
+
+### Running it more than once
+
+`zag ask --best-of 3` runs the same task three times, scores each run, and
+gives you the one that worked. This is the cheapest large improvement available
+to an agent system. It is cheap only in engineering: it costs exactly three
+times as much, and that number is printed.
+
+Two things it does that most best-of-N does not:
+
+**It checks the tries were different.** Three runs of one prompt with nothing
+varied produce three near-identical answers and a bill three times the size.
+Each try gets a higher temperature than the last. The first is left at the
+provider's own setting, so this can only be as bad as one try plus the cost of
+the others. The report then counts the distinct answers, and says the extra
+tries bought nothing when there was only one.
+
+**The selector is not the thing being selected.** Ranking runs on arithmetic
+over the record first, weighted 0.6 against 0.4 for the judge. Asking a model
+which of its own answers it likes best selects for confidence. Arithmetic
+cannot be talked into anything.
+
+Every try is a real run in the record with its own agent identifier. The losing
+ones are the interesting half — same task, same model, same moment — so read
+them with `zag trajectories`.
+
+### Routing with the task in hand
+
+`zag route` samples each model's record of success. It works, and it has one
+blind spot: it has no idea what it is being asked. Every task is the same task
+to it. So a model that reads code well and writes it badly gets one number,
+averaging the two.
+
+`zag route "why does the build fail?"` trains a linear policy over named
+features of the task: is it a question, does it ask for a change, does it name
+a failure. The training is REINFORCE with a baseline, on the rewards already in
+the log. Same arms, same reward, same log. The task is the only new input.
+
+Linear and few-featured on purpose. A workspace has tens or hundreds of runs,
+not millions. Anything with more parameters than that fits the noise perfectly
+and predicts nothing, invisibly. These weights are printed:
+
+```
+What it learned
+  local/reader
+    asks for an explanation      +0.71
+    asks for a change            -0.63
+```
+
+The bandit produced these episodes, not this policy. So reporting the training
+reward as this policy's expected reward would measure the behaviour that
+generated the data. Instead the runs are split. The policy is trained on one
+part and estimated on the other by self-normalised importance sampling. The
+same estimate is computed for always using the single best arm, which is what
+the bandit converges to. The effective sample size is reported too, because
+importance sampling can rest a mean over thirty runs on two of them.
+
+`zag route` uses the trained policy only when it beats that incumbent on runs
+it never saw. It also wants enough held-back runs, and enough effective sample,
+for the comparison to mean anything. Otherwise it says so and uses the bandit.
 
 `zag-audit` is the second binary. It checks a repository against the standards
 it claims to meet, and nothing it does is needed to record work:

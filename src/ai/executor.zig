@@ -176,6 +176,53 @@ pub const Options = struct {
     /// that were reviewed.
     content: ?*content_store_mod.Store = null,
     io: ?std.Io = null,
+    /// The person's own environment, as `KEY=VALUE` pairs.
+    ///
+    /// What a model-issued command is allowed to see of it is decided by the
+    /// request's `environmentPolicy`, not here. Left empty, a command runs with
+    /// nothing but what it names, which is right for a test and means a real
+    /// program cannot be found at all.
+    environment: []const []const u8 = &.{},
+};
+
+/// The variables a model-issued command gets by default.
+///
+/// Enough to find and run a build tool, and nothing that carries a credential.
+/// `PATH` so a program can be found at all; `HOME` and the cache variables
+/// because the Zig compiler, cargo, npm and every other toolchain keep state
+/// under a home directory and fail confusingly without it; the locale and
+/// terminal variables so output is not mangled.
+///
+/// `ANTHROPIC_API_KEY` and its kind are deliberately absent. A command a model
+/// asked for should be able to compile the code and not to read the key that
+/// paid for the model. Anything else has to be named in the request, and is
+/// then visible in the record as part of what was asked for.
+pub const default_environment_allowlist = [_][]const u8{
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "TMPDIR",
+    "TZ",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "ZIG_GLOBAL_CACHE_DIR",
+    "ZIG_LOCAL_CACHE_DIR",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "GOPATH",
+    "GOCACHE",
+    "GOMODCACHE",
+    "NPM_CONFIG_CACHE",
+    "PYTHONPATH",
+    "VIRTUAL_ENV",
+    "JAVA_HOME",
+    "PKG_CONFIG_PATH",
 };
 
 /// Performs typed requests, one decision at a time.
@@ -203,10 +250,21 @@ pub const Runner = struct {
                 if (isShell(programOf(e))) break :blk error.NoShellForAgents;
                 break :blk self.execute(e);
             },
-            // The remaining request kinds have no executor in this build. They
-            // are named rather than silently treated as failures, because
-            // "not built" and "did not work" are different things.
-            .delete, .search, .git, .mcp, .spawn_agent, .infer => error.NoExecutor,
+            .search => |q| self.search(q),
+            .git => |g| self.git(g),
+            .delete => |d| self.delete(d),
+            // The remaining request kinds have no executor here, and are named
+            // rather than silently treated as failures, because "not built"
+            // and "did not work" are different things.
+            //
+            // No MCP client in this build, and `call_mcp_tool` is not offered
+            // to models, so nothing can reach that from a model. `spawn_agent`
+            // is offered, but it never arrives here: starting an agent is not
+            // work against a filesystem or a process table, and the loop sends
+            // it to the spawner its caller supplied. Reaching this line means
+            // a typed request was handed straight to the executor by something
+            // other than the loop.
+            .mcp, .spawn_agent, .infer => error.NoExecutor,
         };
     }
 
@@ -215,6 +273,234 @@ pub const Runner = struct {
             error.ContainmentUnavailable => error.ContainmentUnavailable,
             else => error.NoExecutor,
         };
+    }
+
+    /// Remove a file or an empty directory.
+    ///
+    /// Recursive deletion is refused rather than implemented. An agent that
+    /// can remove a tree in one decision is one mistaken path away from
+    /// removing the work, and the record would faithfully show that it was
+    /// allowed. Removing the entries one at a time costs a decision each,
+    /// which is the point.
+    fn delete(self: Runner, request: tools.DeleteRequest) Error!ToolResult {
+        if (request.recursive) {
+            return .{
+                .outcome = .failed,
+                .summary = "This build will not delete a directory tree in one step. Remove the entries one at a time, so each is decided on its own.",
+            };
+        }
+
+        var root_buffer: [4096]u8 = undefined;
+        const root = try self.openRoot(&root_buffer);
+        defer root.close();
+
+        // A file first, then an empty directory: the caller says a path, not
+        // which kind of thing is there.
+        root.remove(request.path, false) catch {
+            root.remove(request.path, true) catch |err| return failure(self.arena, err);
+        };
+        return .{
+            .outcome = .completed,
+            .summary = try std.fmt.allocPrint(self.arena, "Removed {s}.", .{request.path}),
+        };
+    }
+
+    /// Directories a search never descends into.
+    ///
+    /// Not a preference: a build cache holds more bytes than the source it was
+    /// built from, and a result from inside `.git` answers a question nobody
+    /// asked. Skipping them is the difference between a search that returns and
+    /// one that walks a hundred thousand object files.
+    const search_skips = [_][]const u8{ ".git", ".zig-cache", ".workspace", "zig-out", "node_modules", "target", ".venv", "__pycache__" };
+
+    /// Search the workspace for text.
+    ///
+    /// This was offered to models and not implemented, so a model asking to
+    /// look for something was told the build "cannot perform that kind of
+    /// request" — after spending a turn on it. Searching is the first thing
+    /// anything does in a codebase it does not know.
+    ///
+    /// Matching is literal and case-sensitive. A regular expression engine is
+    /// a bigger promise than this needs, and a model that wants a looser match
+    /// can search for a shorter string.
+    fn search(self: Runner, request: tools.SearchRequest) Error!ToolResult {
+        if (request.query.len == 0) {
+            return .{ .outcome = .failed, .summary = "A search needs something to search for." };
+        }
+        const io = self.options.io orelse return error.NoExecutor;
+
+        var found: std.ArrayList(u8) = .empty;
+        var matches: usize = 0;
+        var files_read: usize = 0;
+
+        var stack: std.ArrayList([]const u8) = .empty;
+        try stack.append(self.arena, self.options.root);
+
+        while (stack.pop()) |directory| {
+            if (matches >= request.maxResults) break;
+            var dir = std.Io.Dir.cwd().openDir(io, directory, .{ .iterate = true }) catch continue;
+            defer dir.close(io);
+
+            var it = dir.iterate();
+            while (it.next(io) catch null) |entry| {
+                if (matches >= request.maxResults) break;
+                if (entry.name.len > 0 and entry.name[0] == '.' and entry.kind == .directory) continue;
+
+                var skip = false;
+                for (search_skips) |name| {
+                    if (std.mem.eql(u8, entry.name, name)) skip = true;
+                }
+                if (skip) continue;
+
+                const path = std.fmt.allocPrint(self.arena, "{s}/{s}", .{ directory, entry.name }) catch continue;
+                if (entry.kind == .directory) {
+                    stack.append(self.arena, path) catch continue;
+                    continue;
+                }
+                if (entry.kind != .file) continue;
+
+                // A megabyte is more than any source file and less than any
+                // artefact that got past the skip list.
+                const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, self.arena, .limited(1 << 20)) catch continue;
+                files_read += 1;
+                if (std.mem.indexOfScalar(u8, bytes, 0) != null) continue; // not text
+
+                var line_number: usize = 1;
+                var lines = std.mem.splitScalar(u8, bytes, '\n');
+                while (lines.next()) |line| : (line_number += 1) {
+                    if (matches >= request.maxResults) break;
+                    if (std.mem.indexOf(u8, line, request.query) == null) continue;
+                    matches += 1;
+                    // Trimmed, because a matched line of leading whitespace
+                    // spends the model's context on indentation.
+                    const shown = std.mem.trim(u8, line, " \t\r");
+                    const relative = if (std.mem.startsWith(u8, path, self.options.root) and path.len > self.options.root.len)
+                        path[self.options.root.len + 1 ..]
+                    else
+                        path;
+                    found.print(self.arena, "{s}:{d}: {s}\n", .{ relative, line_number, shown }) catch break;
+                }
+            }
+        }
+
+        return .{
+            .outcome = .completed,
+            .contentHash = hashing.Hash.of(found.items),
+            .byteCount = found.items.len,
+            .summary = if (matches == 0)
+                try std.fmt.allocPrint(self.arena, "Nothing in {d} files matched \"{s}\".", .{ files_read, request.query })
+            else
+                try std.fmt.allocPrint(self.arena, "{d} matches for \"{s}\" in {d} files.", .{ matches, request.query, files_read }),
+            .content = found.items,
+        };
+    }
+
+    /// Read or change the repository, by running git.
+    ///
+    /// Also offered and not implemented. It runs the real program through the
+    /// same path as any other command, so the policy decides it, the output
+    /// comes back, and there is one place where a process is started.
+    fn git(self: Runner, request: tools.GitRequest) Error!ToolResult {
+        const argv: []const []const u8 = switch (request.operation) {
+            .status => &.{ "git", "status", "--short", "--branch" },
+            .log => &.{ "git", "log", "--oneline", "--max-count=20" },
+            .diff => &.{ "git", "diff" },
+            .branch => if (request.argument.len > 0)
+                &.{ "git", "branch", request.argument }
+            else
+                &.{ "git", "branch", "--show-current" },
+            .commit => if (request.argument.len > 0)
+                &.{ "git", "commit", "-m", request.argument }
+            else
+                return .{ .outcome = .failed, .summary = "A commit needs a message." },
+            .push => &.{ "git", "push" },
+            .worktree_add => if (request.argument.len > 0)
+                &.{ "git", "worktree", "add", request.argument }
+            else
+                return .{ .outcome = .failed, .summary = "Adding a worktree needs a path." },
+        };
+        return self.execute(.{ .argv = argv });
+    }
+
+    /// Find the program named in `argv[0]`.
+    ///
+    /// The executor spawns with `execve`, which takes a path and does no
+    /// searching, so a model asking to run `zig` was asking to run a file
+    /// called `zig` in the working directory. Every such call came back as
+    /// status 127 with no output, which reads exactly like a build failure and
+    /// is not one. `zag run` never showed this because it goes through
+    /// `/bin/sh`, which does its own lookup.
+    ///
+    /// Searching here rather than handing the command to a shell keeps the
+    /// property that makes the typed request worth having: there is still no
+    /// shell, so a semicolon or a `$(...)` in an argument stays an argument.
+    fn resolveProgram(self: Runner, name: []const u8, env: []const []const u8) ?[]const u8 {
+        if (name.len == 0) return null;
+        // A path is a path. Anything with a separator is used as given.
+        if (std.mem.indexOfScalar(u8, name, '/') != null) return name;
+
+        const path_value = blk: {
+            for (env) |entry| {
+                if (std.mem.startsWith(u8, entry, "PATH=")) break :blk entry["PATH=".len..];
+            }
+            break :blk "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+        };
+
+        var directories = std.mem.splitScalar(u8, path_value, ':');
+        while (directories.next()) |directory| {
+            if (directory.len == 0) continue;
+            const candidate = std.fmt.allocPrint(self.arena, "{s}/{s}", .{ directory, name }) catch return null;
+            // Executable by somebody. `access` with X_OK is the question being
+            // asked, and a directory that answers yes is caught by the spawn.
+            const zero = self.arena.dupeZ(u8, candidate) catch return null;
+            const x_ok: u32 = 1;
+            const rc = std.os.linux.access(zero.ptr, x_ok);
+            if (rc == 0) return candidate;
+        }
+        return null;
+    }
+
+    /// What one model-issued command is allowed to see of the environment.
+    ///
+    /// The request's `environmentPolicy` decides. It was declared with three
+    /// modes and read by nothing: every command ran with exactly the variables
+    /// it named, which is none by default, so no program could be found and
+    /// every run came back as status 127 with no output. A policy the code does
+    /// not consult is not a policy.
+    fn processEnvironment(self: Runner, request: tools.ExecuteRequest) ![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+
+        switch (request.environmentPolicy) {
+            // Only what the request names. Honest, and rarely what is wanted:
+            // a command with no PATH cannot start.
+            .none => {},
+            // The safe default: enough to run a build, nothing that pays for
+            // anything.
+            .allowlist => {
+                const names = if (request.environment.len > 0)
+                    request.environment
+                else
+                    &default_environment_allowlist;
+                for (names) |name| {
+                    for (self.options.environment) |entry| {
+                        const equals = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
+                        if (!std.mem.eql(u8, entry[0..equals], name)) continue;
+                        try out.append(self.arena, entry);
+                        break;
+                    }
+                }
+            },
+            // Everything, credentials included. The type says this is rarely
+            // correct and it means it.
+            .inherit_all => try out.appendSlice(self.arena, self.options.environment),
+        }
+
+        // Variables written as KEY=VALUE in the request are set outright, after
+        // the policy, so a request can override what it inherited.
+        for (request.environment) |entry| {
+            if (std.mem.indexOfScalar(u8, entry, '=') != null) try out.append(self.arena, entry);
+        }
+        return out.items;
     }
 
     fn readFile(self: Runner, request: tools.ReadFileRequest) Error!ToolResult {
@@ -230,13 +516,26 @@ pub const Runner = struct {
             .contentHash = hashing.Hash.of(bytes),
             .byteCount = bytes.len,
             .summary = try std.fmt.allocPrint(self.arena, "Read {d} bytes from {s}.", .{ bytes.len, request.path }),
+            .content = bytes,
         };
     }
 
     fn writeFile(self: Runner, request: tools.WriteFileRequest) Error!ToolResult {
         const store = self.options.content orelse return error.NoExecutor;
         const io = self.options.io orelse return error.NoExecutor;
-        const bytes = store.read(io, request.contentHash, self.options.outputLimit) catch {
+
+        // Two ways to say what to write. Inline content is stored on the way
+        // past so the record still addresses the bytes that landed; a bare
+        // hash is the reviewed path, where the bytes were looked at first.
+        const bytes = if (request.contents.len > 0) blk: {
+            _ = store.put(request.contents) catch {
+                return .{
+                    .outcome = .failed,
+                    .summary = "The content was too large to store, so nothing was written.",
+                };
+            };
+            break :blk request.contents;
+        } else store.read(io, request.contentHash, self.options.outputLimit) catch {
             return .{
                 .outcome = .failed,
                 .summary = "The content to write is not in the store, so nothing was written.",
@@ -252,7 +551,7 @@ pub const Runner = struct {
         };
         return .{
             .outcome = .completed,
-            .contentHash = request.contentHash,
+            .contentHash = hashing.Hash.of(bytes),
             .byteCount = bytes.len,
             .summary = try std.fmt.allocPrint(self.arena, "Wrote {d} bytes to {s}.", .{ bytes.len, request.path }),
         };
@@ -274,8 +573,21 @@ pub const Runner = struct {
         defer pty.close();
 
         const argv = pty_mod.buildArgv(self.arena, request.argv) catch return error.OutOfMemory;
-        const envp = pty_mod.buildEnvp(self.arena, request.environment) catch return error.OutOfMemory;
-        const path_z = self.arena.dupeZ(u8, request.argv[0]) catch return error.OutOfMemory;
+        const env = self.processEnvironment(request) catch return error.OutOfMemory;
+        const envp = pty_mod.buildEnvp(self.arena, env) catch return error.OutOfMemory;
+        const program = self.resolveProgram(request.argv[0], env) orelse {
+            // Said plainly, because "status 127" is what this looked like
+            // before and it reads like the program ran and failed.
+            return .{
+                .outcome = .failed,
+                .summary = try std.fmt.allocPrint(
+                    self.arena,
+                    "{s} was not found on the PATH, so nothing ran.",
+                    .{request.argv[0]},
+                ),
+            };
+        };
+        const path_z = self.arena.dupeZ(u8, program) catch return error.OutOfMemory;
         const cwd_z = self.arena.dupeZ(u8, self.options.root) catch return error.OutOfMemory;
 
         var child = pty.spawn(path_z.ptr, argv.ptr, envp.ptr, cwd_z.ptr) catch {
@@ -316,6 +628,8 @@ pub const Runner = struct {
             .contentHash = hashing.Hash.of(output.items),
             .byteCount = output.items.len,
             .exitStatus = status,
+            .content = output.items,
+            .contentKind = .terminal_output,
             .summary = if (timed_out)
                 try std.fmt.allocPrint(self.arena, "{s} reached its deadline and was stopped.", .{request.argv[0]})
             else
@@ -582,4 +896,287 @@ test "an agent may not run a shell" {
     // executor.
     try testing.expect(!isShell("zig"));
     try testing.expect(!isShell("cargo"));
+}
+
+test "a program named without a path is found, and its output comes back" {
+    if (!@import("../terminal/pty.zig").supported) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const root = ".zig-cache/tmp/executor-path-test";
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, root);
+
+    var store = content_store_mod.Store.init(arena, root);
+    const runner = Runner.init(arena, .{
+        .root = root,
+        .io = io,
+        .content = &store,
+        .environment = &.{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+    });
+
+    // `execve` does no searching, so this used to be a request to run a file
+    // called `echo` in the working directory. It failed with status 127 and no
+    // output, which reads like the program ran and failed.
+    const request: ToolRequest = .{ .execute = .{ .argv = &.{ "echo", "hello-from-the-path" } } };
+    const result = runner.run(
+        decisionFor(.@"process.execute", .{ .command = "echo hello-from-the-path" }, .allow),
+        request,
+    ) catch |err| switch (err) {
+        error.ContainmentUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    try testing.expectEqual(tools.Outcome.completed, result.outcome);
+    // And the output is carried back, not just measured.
+    try testing.expect(std.mem.indexOf(u8, result.content, "hello-from-the-path") != null);
+}
+
+test "a program that is not installed says so, rather than exiting 127" {
+    if (!@import("../terminal/pty.zig").supported) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    const runner = Runner.init(arena, .{
+        .root = ".",
+        .io = threaded.io(),
+        .environment = &.{"PATH=/usr/bin:/bin"},
+    });
+    const request: ToolRequest = .{ .execute = .{ .argv = &.{"definitely-not-installed-anywhere"} } };
+    const result = runner.run(
+        decisionFor(.@"process.execute", .{ .command = "definitely-not-installed-anywhere" }, .allow),
+        request,
+    ) catch |err| switch (err) {
+        error.ContainmentUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    try testing.expectEqual(tools.Outcome.failed, result.outcome);
+    try testing.expect(std.mem.indexOf(u8, result.summary, "not found on the PATH") != null);
+}
+
+test "a model can write a file by saying what should be in it" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const root = ".zig-cache/tmp/executor-write-test";
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, root);
+
+    var store = content_store_mod.Store.init(arena, root);
+    const runner = Runner.init(arena, .{ .root = root, .io = io, .content = &store });
+
+    // Before this, writing required the hash of bytes already in the store,
+    // and nothing a model could call put bytes there — so a model could read
+    // and run, and never produce anything.
+    const request: ToolRequest = .{ .write_file = .{
+        .path = "hello.txt",
+        .contents = "written by a model\n",
+    } };
+    const result = runner.run(
+        decisionFor(.@"fs.write", .{ .path = "hello.txt" }, .allow),
+        request,
+    ) catch |err| switch (err) {
+        error.ContainmentUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    try testing.expectEqual(tools.Outcome.completed, result.outcome);
+
+    const path = try std.fmt.allocPrint(arena, "{s}/hello.txt", .{root});
+    const back = try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20));
+    try testing.expectEqualStrings("written by a model\n", back);
+
+    // The record still addresses what landed by hash, so `zag objects` can
+    // still check it.
+    try testing.expect(result.contentHash.eql(hashing.Hash.of(back)));
+}
+
+test "the environment policy decides what a command sees, and is actually read" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const person = [_][]const u8{
+        "PATH=/usr/bin",
+        "HOME=/home/someone",
+        "ANTHROPIC_API_KEY=sk-ant-do-not-hand-this-over",
+    };
+    const runner = Runner.init(arena, .{ .root = ".", .environment = &person });
+
+    // The default: enough to run a build, and the key stays behind.
+    const allowed = try runner.processEnvironment(.{ .argv = &.{"zig"} });
+    var saw_path = false;
+    for (allowed) |entry| {
+        try testing.expect(std.mem.indexOf(u8, entry, "sk-ant-do-not-hand-this-over") == null);
+        if (std.mem.eql(u8, entry, "PATH=/usr/bin")) saw_path = true;
+    }
+    try testing.expect(saw_path);
+
+    // `.none` means what it says, which is why it is not the default: a
+    // command with no PATH cannot start.
+    const nothing = try runner.processEnvironment(.{ .argv = &.{"zig"}, .environmentPolicy = .none });
+    try testing.expectEqual(@as(usize, 0), nothing.len);
+
+    // `.inherit_all` hands over everything, key included. The type says this
+    // is rarely correct and the test holds it to that meaning.
+    const everything = try runner.processEnvironment(.{ .argv = &.{"zig"}, .environmentPolicy = .inherit_all });
+    var saw_key = false;
+    for (everything) |entry| {
+        if (std.mem.indexOf(u8, entry, "sk-ant-do-not-hand-this-over") != null) saw_key = true;
+    }
+    try testing.expect(saw_key);
+}
+
+test "search finds a line and says where it is" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const root = ".zig-cache/tmp/executor-search-test";
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, root);
+    try std.Io.Dir.cwd().createDirPath(io, try std.fmt.allocPrint(arena, "{s}/.zig-cache", .{root}));
+
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = try std.fmt.allocPrint(arena, "{s}/main.zig", .{root}),
+        .data = "const a = 1;\npub fn countLines() void {}\n",
+    });
+    // A build cache holds more bytes than the source, and a match from inside
+    // one answers a question nobody asked.
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = try std.fmt.allocPrint(arena, "{s}/.zig-cache/stale.zig", .{root}),
+        .data = "countLines from a cache\n",
+    });
+
+    const runner = Runner.init(arena, .{ .root = root, .io = io });
+    const result = try runner.run(
+        decisionFor(.@"fs.read", .{ .path = "." }, .allow),
+        .{ .search = .{ .query = "countLines" } },
+    );
+    try testing.expectEqual(tools.Outcome.completed, result.outcome);
+    // The path and the line number, because "it is somewhere in the project"
+    // is not an answer.
+    try testing.expect(std.mem.indexOf(u8, result.content, "main.zig:2:") != null);
+    try testing.expect(std.mem.indexOf(u8, result.content, "countLines") != null);
+    try testing.expect(std.mem.indexOf(u8, result.content, "from a cache") == null);
+}
+
+test "search that matches nothing says so, rather than looking like a failure" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    const io = threaded.io();
+    const root = ".zig-cache/tmp/executor-search-empty";
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, root);
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = try std.fmt.allocPrint(arena, "{s}/only.txt", .{root}),
+        .data = "nothing of interest here\n",
+    });
+
+    // Assembled rather than written as one literal: a needle spelled out in
+    // this file is a needle the search would find in this file.
+    const needle = try std.fmt.allocPrint(arena, "{s}-{s}", .{ "zzzabsent", "stringzzz" });
+    const runner = Runner.init(arena, .{ .root = root, .io = io });
+    const result = try runner.run(
+        decisionFor(.@"fs.read", .{ .path = "." }, .allow),
+        .{ .search = .{ .query = needle } },
+    );
+    // Completed, not failed: the search worked and the answer is "nothing".
+    try testing.expectEqual(tools.Outcome.completed, result.outcome);
+    try testing.expect(std.mem.indexOf(u8, result.summary, "Nothing") != null);
+}
+
+test "a directory tree is not deleted in one decision" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const root = ".zig-cache/tmp/executor-delete-test";
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, root);
+    const kept = try std.fmt.allocPrint(arena, "{s}/keep.txt", .{root});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = kept, .data = "still here" });
+
+    const runner = Runner.init(arena, .{ .root = root, .io = io });
+
+    // An agent that can remove a tree in one decision is one mistaken path away
+    // from removing the work, and the record would faithfully show it allowed.
+    const recursive = runner.run(
+        decisionFor(.@"fs.delete", .{ .path = "." }, .allow),
+        .{ .delete = .{ .path = ".", .recursive = true } },
+    ) catch |err| switch (err) {
+        error.ContainmentUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    try testing.expectEqual(tools.Outcome.failed, recursive.outcome);
+    try testing.expect(std.mem.indexOf(u8, recursive.summary, "one at a time") != null);
+
+    // The file it refused to take out with the tree is still there.
+    const back = try std.Io.Dir.cwd().readFileAlloc(io, kept, arena, .limited(1 << 20));
+    try testing.expectEqualStrings("still here", back);
+
+    // One file, one decision, and it goes.
+    const one = try runner.run(
+        decisionFor(.@"fs.delete", .{ .path = "keep.txt" }, .allow),
+        .{ .delete = .{ .path = "keep.txt" } },
+    );
+    try testing.expectEqual(tools.Outcome.completed, one.outcome);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().readFileAlloc(io, kept, arena, .limited(1 << 20)));
+}
+
+test "a delete cannot climb out of the workspace" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const root = ".zig-cache/tmp/executor-delete-escape";
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, root);
+
+    const outside = ".zig-cache/tmp/executor-delete-escape-neighbour.txt";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = outside, .data = "not yours" });
+    defer std.Io.Dir.cwd().deleteFile(io, outside) catch {};
+
+    const runner = Runner.init(arena, .{ .root = root, .io = io });
+    const result = runner.run(
+        decisionFor(.@"fs.delete", .{ .path = "../executor-delete-escape-neighbour.txt" }, .allow),
+        .{ .delete = .{ .path = "../executor-delete-escape-neighbour.txt" } },
+    ) catch |err| switch (err) {
+        error.ContainmentUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    try testing.expectEqual(tools.Outcome.failed, result.outcome);
+
+    // The neighbour survives. `unlinkat` resolves against the root's own
+    // handle, so the `..` reached nothing this root contains.
+    const back = try std.Io.Dir.cwd().readFileAlloc(io, outside, arena, .limited(1 << 20));
+    try testing.expectEqualStrings("not yours", back);
 }

@@ -122,7 +122,15 @@ pub const AgentStarted = struct {
 pub const AgentMessage = struct {
     agent: AgentId,
     session: SessionId,
-    role: enum { plan, progress, result, question, refusal },
+    /// Who said it.
+    ///
+    /// `workspace` is the odd one and the reason this is not just the model's
+    /// roles: some things on an agent's timeline are the workbench speaking
+    /// about the run rather than the model speaking in it. Room being made in
+    /// the conversation is the first of them. Filing that as `progress` would
+    /// put words in the model's mouth, and a record that misattributes who
+    /// said something is worse than one that does not mention it.
+    role: enum { plan, progress, result, question, refusal, workspace },
     text: []const u8,
 };
 
@@ -168,6 +176,13 @@ pub const ToolFinished = struct {
     outcome: enum { completed, failed, denied, cancelled, timed_out },
     duration: timeutil.Duration,
     resultHash: Hash,
+    /// How many bytes the result was.
+    ///
+    /// Beside the hash for the same reason `ProcessOutput` carries both: an
+    /// address with no size cannot be checked against what is on disk, and an
+    /// auditor that only compares hashes cannot tell a truncated object from
+    /// the right one.
+    resultBytes: usize = 0,
     /// Plain-language summary of what happened, for the person reading later.
     summary: []const u8 = "",
 };
