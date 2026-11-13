@@ -1,5 +1,7 @@
 # zag
 
+**[Status](STATUS.md) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/SMC17/zag/issues) · [All SMC17 work](https://github.com/users/SMC17/projects/16)**
+
 A workbench where people and agents do engineering work in one recorded
 workspace.
 
