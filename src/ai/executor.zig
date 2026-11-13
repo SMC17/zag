@@ -486,6 +486,7 @@ test "reading and writing stay beneath the workspace" {
 }
 
 test "a command runs from its argument vector, with no shell in between" {
+    if (comptime !pty_mod.supported) return error.SkipZigTest; // executor needs the Linux PTY
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();

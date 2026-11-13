@@ -51,6 +51,7 @@
 //! again.
 
 const std = @import("std");
+const pty_supported = @import("../terminal/pty.zig").supported;
 const provider = @import("provider.zig");
 const catalog = @import("catalog.zig");
 const transport_mod = @import("transport.zig");
@@ -1009,6 +1010,7 @@ const allow_models_and_reading = [_]policy_mod.Rule{
 };
 
 test "the loop asks, runs a tool under a decision, and asks again with the result" {
+    if (comptime !pty_supported) return error.SkipZigTest; // tool execution needs the Linux PTY
     var scratch = std.heap.ArenaAllocator.init(testing.allocator);
     defer scratch.deinit();
 
