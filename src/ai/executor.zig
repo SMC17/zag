@@ -1107,6 +1107,7 @@ test "search that matches nothing says so, rather than looking like a failure" {
 }
 
 test "a directory tree is not deleted in one decision" {
+    if (comptime !sandbox.supported) return error.SkipZigTest; // containment is Linux-only
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
