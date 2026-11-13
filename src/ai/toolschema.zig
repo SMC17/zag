@@ -25,13 +25,25 @@
 //! escalation: text can make a model *ask* for anything, and asking is all it
 //! can do.
 //!
-//! Two request kinds are deliberately absent from what a model is offered.
-//! `infer` would let a model spend the workspace's credential on a request
-//! nobody read, and `spawn_agent` would let it widen its own reach by creating
-//! something to act for it. Both exist as typed requests, for a person to make.
+//! **`infer` is deliberately absent from what a model is offered.** It would
+//! let a model spend the workspace's credential on a request nobody read. It
+//! exists as a typed request, for a person to make.
+//!
+//! `spawn_agent` was withheld on the same grounds — a model that can create
+//! something to act for it can widen its own reach — until that objection
+//! could be answered rather than avoided. It is answered in `ai/swarm.zig`: a
+//! child runs on the same policy engine as its parent and so can never decide
+//! anything the parent could not, its depth and fan-out are bounded, and it
+//! spends from the parent's remaining budget rather than a copy of it. The
+//! tool is therefore *offerable* rather than offered: `declarations` takes an
+//! `Offering`, and a caller with nothing to run a child on does not advertise
+//! it. Parsing it always works, because a request that is refused by the
+//! `agent.spawn` capability is refused by the policy engine, where every other
+//! refusal of this kind is decided.
 
 const std = @import("std");
 const tools = @import("tools.zig");
+const executor = @import("executor.zig");
 const provider = @import("provider.zig");
 const jsonschema = @import("../interop/jsonschema.zig");
 const hashing = @import("../core/hash.zig");
@@ -55,7 +67,7 @@ pub fn refusalText(err: Error) []const u8 {
     return switch (err) {
         error.UnknownTool => "The model asked for a tool this build does not have.",
         error.MalformedArguments => "The model's tool call was not readable, so nothing ran.",
-        error.ArgumentsDoNotFit => "The model's tool call was missing something it needs, so nothing ran.",
+        error.ArgumentsDoNotFit => "The model's tool call left out something the tool needs, or gave it the wrong type. The tool's own description says which fields it takes.",
         error.NotOfferedToModels => "That tool is for a person to use, not a model.",
         error.OutOfMemory => "There was not enough memory to read the tool call.",
     };
@@ -70,10 +82,20 @@ pub const Offer = struct {
     kind: std.meta.Tag(ToolRequest),
 };
 
-/// Every tool a model may ask for, in the order a person would read them.
+/// Every tool a model may always ask for, in the order a person would read
+/// them.
 ///
-/// `infer` and `spawn_agent` are not here, and their absence is enforced by a
-/// test rather than left to whoever edits this list next.
+/// `infer` is not here, and its absence is enforced by a test rather than left
+/// to whoever edits this list next. `spawn_agent` is not here either, because
+/// it is offered only when there is something to run a child on — see
+/// `spawn_agent_offer` and `Offering`.
+/// The tools a model is told about.
+///
+/// Only what the executor can actually perform. `call_mcp_tool` was
+/// offered here with nothing behind it, so a model that reached for
+/// either spent a turn to be told this build "cannot perform that kind of
+/// request" — which is a promise broken at the worst moment, after the model
+/// has already decided what to do. Offering a tool is a claim that it works.
 pub const offers = [_]Offer{
     .{
         .name = "read_file",
@@ -83,7 +105,7 @@ pub const offers = [_]Offer{
     .{
         .name = "write_file",
         .kind = .write_file,
-        .description = "Write bytes that are already in the content store to a file in the workspace. Give the hash of the content, not the content: the bytes that land are the bytes that were reviewed.",
+        .description = "Write a file in the workspace. Put the text in \"contents\". The path is relative to the workspace, and a path that leaves it is refused.",
     },
     .{
         .name = "run_command",
@@ -93,7 +115,7 @@ pub const offers = [_]Offer{
     .{
         .name = "delete",
         .kind = .delete,
-        .description = "Delete a file or directory in the workspace. This cannot be undone from the record, so it usually asks a person first.",
+        .description = "Delete a file or an empty directory in the workspace. This cannot be undone from the record, so it usually asks a person first. A directory tree is not removed in one step.",
     },
     .{
         .name = "search",
@@ -105,12 +127,43 @@ pub const offers = [_]Offer{
         .kind = .git,
         .description = "Read or change the repository: status, log, diff, branch, commit, push, or add a worktree. Each one is decided separately.",
     },
-    .{
-        .name = "call_mcp_tool",
-        .kind = .mcp,
-        .description = "Call a tool on a Model Context Protocol server that this workspace is connected to.",
-    },
 };
+
+/// The tool that starts a child agent, offered only when a caller has
+/// something to run one on.
+///
+/// The description tells the model the two things it has to know to use this
+/// well and cannot work out for itself: that it gets an answer rather than a
+/// transcript, and that the child cannot see anything it was not told. A model
+/// that thinks the child shares its context writes "look into that" and gets
+/// back a child asking what "that" is.
+pub const spawn_agent_offer: Offer = .{
+    .name = "spawn_agent",
+    .kind = .spawn_agent,
+    .description = "Hand a self-contained piece of work to a child agent and get back its answer, not its transcript. " ++
+        "Use it when finding something out would cost more reading than the answer is worth: \"which file defines the retry backoff, and what are the numbers\". " ++
+        "The child starts fresh and knows only what \"request\" says, so write it as though for someone who has not read this conversation. " ++
+        "It runs under the same permissions you do and can never be given more. It gets part of the turns you have left, so it is worth doing when the answer saves you more than it costs.",
+};
+
+/// Which of the optional tools this caller can actually perform.
+///
+/// Offering a tool is a claim that it works, so the caller that would have to
+/// do the work is the one that decides whether it is advertised.
+pub const Offering = struct {
+    /// Set when the caller has a `swarm.Spawner`. A loop with none would offer
+    /// a tool that answers "this build cannot do that" after the model has
+    /// already spent a turn deciding to use it.
+    spawnAgent: bool = false,
+};
+
+/// Every offer this offering advertises, in order.
+pub fn offersFor(arena: std.mem.Allocator, offering: Offering) ![]const Offer {
+    var out: std.ArrayList(Offer) = .empty;
+    try out.appendSlice(arena, &offers);
+    if (offering.spawnAgent) try out.append(arena, spawn_agent_offer);
+    return out.items;
+}
 
 /// The type behind one offer, as a comptime value.
 ///
@@ -123,10 +176,18 @@ pub fn Payload(comptime kind: std.meta.Tag(ToolRequest)) type {
     @compileError("no payload for " ++ @tagName(kind));
 }
 
+/// Look a name up among every offer that exists, offered or not.
+///
+/// Parsing does not depend on the offering, and deliberately so. Whether a
+/// model may start a child is a question about the `agent.spawn` capability,
+/// and it is answered by the policy engine along with every other question of
+/// that kind — not by whether a name was in a list. A model that asks for a
+/// tool it was not offered gets the policy's answer, which is the honest one.
 pub fn find(name: []const u8) ?Offer {
     for (offers) |offer| {
         if (std.mem.eql(u8, offer.name, name)) return offer;
     }
+    if (std.mem.eql(u8, spawn_agent_offer.name, name)) return spawn_agent_offer;
     return null;
 }
 
@@ -135,6 +196,7 @@ pub fn nameOf(kind: std.meta.Tag(ToolRequest)) ?[]const u8 {
     for (offers) |offer| {
         if (offer.kind == kind) return offer.name;
     }
+    if (spawn_agent_offer.kind == kind) return spawn_agent_offer.name;
     return null;
 }
 
@@ -142,21 +204,36 @@ pub fn nameOf(kind: std.meta.Tag(ToolRequest)) ?[]const u8 {
 ///
 /// Every schema is written inline, with nothing referenced, because a provider
 /// has no document to resolve a reference against.
-pub fn declarations(arena: std.mem.Allocator) ![]const provider.Tool {
+pub fn declarations(arena: std.mem.Allocator, offering: Offering) ![]const provider.Tool {
     var out: std.ArrayList(provider.Tool) = .empty;
     inline for (offers) |offer| {
-        var schema: std.Io.Writer.Allocating = .init(arena);
-        try jsonschema.writeInline(Payload(offer.kind), &schema.writer);
-        try out.append(arena, .{
-            .name = offer.name,
-            .description = offer.description,
-            .schemaJson = schema.written(),
-            // A provider that can hold a model to the schema should. It costs
-            // nothing here and removes a whole class of malformed call.
-            .strict = true,
-        });
+        try out.append(arena, try declarationOf(arena, offer, Payload(offer.kind)));
+    }
+    if (offering.spawnAgent) {
+        try out.append(arena, try declarationOf(
+            arena,
+            spawn_agent_offer,
+            Payload(spawn_agent_offer.kind),
+        ));
     }
     return out.items;
+}
+
+fn declarationOf(
+    arena: std.mem.Allocator,
+    offer: Offer,
+    comptime Request: type,
+) !provider.Tool {
+    var schema: std.Io.Writer.Allocating = .init(arena);
+    try jsonschema.writeInline(Request, &schema.writer);
+    return .{
+        .name = offer.name,
+        .description = offer.description,
+        .schemaJson = schema.written(),
+        // A provider that can hold a model to the schema should. It costs
+        // nothing here and removes a whole class of malformed call.
+        .strict = true,
+    };
 }
 
 /// Turn one tool call into a typed request, or refuse it.
@@ -171,9 +248,7 @@ pub fn parse(
     const offer = find(name) orelse {
         // Named but withheld reads differently from never existing, and a
         // person reading the record deserves the difference.
-        if (std.mem.eql(u8, name, "infer") or std.mem.eql(u8, name, "spawn_agent")) {
-            return error.NotOfferedToModels;
-        }
+        if (std.mem.eql(u8, name, "infer")) return error.NotOfferedToModels;
         return error.UnknownTool;
     };
 
@@ -191,25 +266,35 @@ pub fn parse(
             .path = try requiredString(object, "path"),
             .maxBytes = optionalUsize(object, "maxBytes") orelse 1 << 20,
         } },
-        .write_file => return .{ .write_file = .{
-            .path = try requiredString(object, "path"),
-            .contentHash = hashing.Hash.parse(try requiredString(object, "contentHash")) catch {
-                return error.ArgumentsDoNotFit;
-            },
-            .byteCount = optionalUsize(object, "byteCount") orelse 0,
-            .createIfMissing = optionalBool(object, "createIfMissing") orelse true,
-        } },
+        .write_file => {
+            // Either the bytes, or the address of bytes already stored. A
+            // model can produce the first and cannot compute the second, so
+            // requiring the hash made the tool impossible to call.
+            const contents = optionalString(object, "contents") orelse "";
+            const hash_text = optionalString(object, "contentHash") orelse "";
+            if (contents.len == 0 and hash_text.len == 0) return error.ArgumentsDoNotFit;
+            return .{ .write_file = .{
+                .path = try requiredString(object, "path"),
+                .contents = contents,
+                .contentHash = if (hash_text.len > 0)
+                    hashing.Hash.parse(hash_text) catch return error.ArgumentsDoNotFit
+                else
+                    hashing.Hash.zero,
+                .byteCount = optionalUsize(object, "byteCount") orelse contents.len,
+                .createIfMissing = optionalBool(object, "createIfMissing") orelse true,
+            } };
+        },
         .execute => {
             const argv = try stringArray(arena, object, "argv");
             if (argv.len == 0) return error.ArgumentsDoNotFit;
             return .{ .execute = .{
                 .argv = argv,
-                .workingDirectory = try requiredString(object, "workingDirectory"),
-                .environmentPolicy = optionalEnum(tools.EnvironmentPolicy, object, "environmentPolicy") orelse .none,
+                .workingDirectory = optionalString(object, "workingDirectory") orelse ".",
+                .environmentPolicy = optionalEnum(tools.EnvironmentPolicy, object, "environmentPolicy") orelse default_execute.environmentPolicy,
                 .environment = stringArray(arena, object, "environment") catch &.{},
-                .network = optionalEnum(tools.NetworkPolicy, object, "network") orelse .none,
+                .network = optionalEnum(tools.NetworkPolicy, object, "network") orelse default_execute.network,
                 .timeout = .{ .ns = @as(i64, @intCast(optionalUsize(object, "timeoutSeconds") orelse 120)) * timeutil.ns_per_s },
-                .approval = optionalEnum(tools.ApprovalPolicy, object, "approval") orelse .policy_only,
+                .approval = optionalEnum(tools.ApprovalPolicy, object, "approval") orelse default_execute.approval,
             } };
         },
         .delete => return .{ .delete = .{
@@ -218,14 +303,14 @@ pub fn parse(
         } },
         .search => return .{ .search = .{
             .query = try requiredString(object, "query"),
-            .root = try requiredString(object, "root"),
+            .root = optionalString(object, "root") orelse ".",
             .maxResults = optionalUsize(object, "maxResults") orelse 100,
             .includeHistory = optionalBool(object, "includeHistory") orelse false,
         } },
         .git => return .{ .git = .{
             .operation = optionalEnum(tools.GitOperation, object, "operation") orelse
                 return error.ArgumentsDoNotFit,
-            .repository = try requiredString(object, "repository"),
+            .repository = optionalString(object, "repository") orelse ".",
             .argument = optionalString(object, "argument") orelse "",
         } },
         .mcp => return .{ .mcp = .{
@@ -233,7 +318,18 @@ pub fn parse(
             .tool = try requiredString(object, "tool"),
             .argumentsJson = try rawField(arena, object, "argumentsJson"),
         } },
-        .infer, .spawn_agent => return error.NotOfferedToModels,
+        .spawn_agent => {
+            const request = try requiredString(object, "request");
+            // A child with no work to do spends a request to say so. Refused
+            // here rather than started, because an empty request is a model
+            // mistake and the message about it should name the field.
+            if (request.len == 0) return error.ArgumentsDoNotFit;
+            return .{ .spawn_agent = .{
+                .label = optionalString(object, "label") orelse "child",
+                .request = request,
+            } };
+        },
+        .infer => return error.NotOfferedToModels,
     }
 }
 
@@ -319,6 +415,119 @@ fn rawField(
 /// model can act on: "you may not" and "it did not work" lead to different next
 /// moves, and a model that cannot tell them apart will retry the one it should
 /// not.
+/// The defaults a run request takes when the model does not name them.
+///
+/// Read from the type rather than restated, because restating them here is
+/// exactly how the type's default and the wire's default came to disagree: the
+/// type said `.allowlist` and the decoder said `.none`, so every command a
+/// model asked for ran with no environment whatever the type claimed.
+const default_execute: tools.ExecuteRequest = .{ .argv = &.{} };
+
+/// The most of one tool's output that is handed back to a model.
+///
+/// A cap is needed because a single `zig build` can produce megabytes and the
+/// model has a context to fit it in. Which end is kept depends on what the
+/// content is; see `tools.ContentKind`.
+pub const result_content_limit: usize = 24 * 1024;
+
+/// Take a terminal's own control sequences out of captured output.
+///
+/// The executor runs programs on a pseudoterminal, so what comes back is what a
+/// terminal would have drawn: cursor moves, colour changes, synchronised-update
+/// brackets, alternate character sets. A model reading `zig build` output was
+/// spending about a tenth of its context on those, and they say nothing about
+/// the build.
+///
+/// Only the model's copy is cleaned. The record keeps the bytes the program
+/// actually wrote, because that is what happened.
+pub fn withoutControlSequences(arena: std.mem.Allocator, raw: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.ensureTotalCapacity(arena, raw.len);
+
+    var at: usize = 0;
+    while (at < raw.len) {
+        const byte = raw[at];
+        if (byte != 0x1b) {
+            // Carriage returns are how a progress line overwrites itself. Kept
+            // as newlines so the successive states stay readable rather than
+            // collapsing into one line of the last thing written.
+            if (byte == '\r') {
+                if (at + 1 < raw.len and raw[at + 1] == '\n') {
+                    at += 1;
+                    continue;
+                }
+                try out.append(arena, '\n');
+                at += 1;
+                continue;
+            }
+            try out.append(arena, byte);
+            at += 1;
+            continue;
+        }
+
+        // An escape sequence. Which kind decides where it ends.
+        if (at + 1 >= raw.len) break;
+        switch (raw[at + 1]) {
+            // CSI: parameters and intermediates, then one final byte.
+            '[' => {
+                var cursor = at + 2;
+                while (cursor < raw.len and raw[cursor] >= 0x20 and raw[cursor] <= 0x3f) cursor += 1;
+                while (cursor < raw.len and raw[cursor] >= 0x20 and raw[cursor] <= 0x2f) cursor += 1;
+                at = if (cursor < raw.len) cursor + 1 else raw.len;
+            },
+            // OSC: a string, ended by BEL or ST.
+            ']' => {
+                var cursor = at + 2;
+                while (cursor < raw.len) : (cursor += 1) {
+                    if (raw[cursor] == 0x07) {
+                        cursor += 1;
+                        break;
+                    }
+                    if (raw[cursor] == 0x1b and cursor + 1 < raw.len and raw[cursor + 1] == '\\') {
+                        cursor += 2;
+                        break;
+                    }
+                }
+                at = cursor;
+            },
+            // Character set selection: one intermediate, one final byte. This
+            // is what draws the box lines in a build summary.
+            '(', ')', '*', '+' => at = @min(at + 3, raw.len),
+            // Everything else two-byte: keypad modes, index, reset.
+            else => at = at + 2,
+        }
+    }
+    return out.items;
+}
+
+/// Move a cut to the nearest character boundary, so a slice stays readable text.
+///
+/// Cutting a byte count out of the middle of a UTF-8 character leaves a
+/// fragment that is not text. It reaches the encoder, which replaces it, and a
+/// model reads a replacement character for no reason — or, before the encoder
+/// was fixed, the whole request went to the provider as an array of numbers.
+/// One accented letter or box-drawing character near the cut is enough, so
+/// this is the common case for any output that is not plain ASCII.
+fn boundaryAtOrBefore(text: []const u8, at: usize) usize {
+    var cut = @min(at, text.len);
+    // A continuation byte is 10xxxxxx. Walk back off any run of them to the
+    // start of the character they belong to.
+    while (cut > 0 and (text[cut] & 0xc0) == 0x80) cut -= 1;
+    return cut;
+}
+
+fn boundaryAtOrAfter(text: []const u8, at: usize) usize {
+    var cut = @min(at, text.len);
+    while (cut < text.len and (text[cut] & 0xc0) == 0x80) cut += 1;
+    return cut;
+}
+
+/// What a model is told about one tool call.
+///
+/// The outcome, the summary sentence, and then what the tool actually
+/// produced. The last part is the one that matters: without it a model that
+/// asked to read a file learns its size, and an agent told to fix a failing
+/// test learns only that something exited non-zero.
 pub fn resultText(
     arena: std.mem.Allocator,
     result: tools.ToolResult,
@@ -330,8 +539,40 @@ pub fn resultText(
         .cancelled => "This was stopped before it finished",
         .timed_out => "This ran out of time and was stopped",
     };
-    if (result.summary.len == 0) return lead;
-    return std.fmt.allocPrint(arena, "{s}. {s}", .{ lead, result.summary });
+    const head = if (result.summary.len > 0)
+        try std.fmt.allocPrint(arena, "{s}. {s}", .{ lead, result.summary })
+    else
+        lead;
+    if (result.content.len == 0) return head;
+
+    const body = switch (result.contentKind) {
+        .text => result.content,
+        .terminal_output => try withoutControlSequences(arena, result.content),
+    };
+    if (body.len <= result_content_limit) {
+        return std.fmt.allocPrint(arena, "{s}\n\n{s}", .{ head, body });
+    }
+
+    // Said in words either way, so a model reading part of something knows it
+    // is a part and does not conclude the file was short or the build quiet.
+    return switch (result.contentKind) {
+        .text => blk: {
+            const cut = boundaryAtOrBefore(body, result_content_limit);
+            break :blk std.fmt.allocPrint(
+                arena,
+                "{s}\n\nThe first {d} bytes of {d}, because the whole of it does not fit:\n{s}",
+                .{ head, cut, body.len, body[0..cut] },
+            );
+        },
+        .terminal_output => blk: {
+            const cut = boundaryAtOrAfter(body, body.len - result_content_limit);
+            break :blk std.fmt.allocPrint(
+                arena,
+                "{s}\n\nThe last {d} bytes of {d}, because the whole of it does not fit:\n{s}",
+                .{ head, body.len - cut, body.len, body[cut..] },
+            );
+        },
+    };
 }
 
 const testing = std.testing;
@@ -341,7 +582,7 @@ test "the declarations carry every field of the type behind them" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const declared = try declarations(arena);
+    const declared = try declarations(arena, .{});
     try testing.expectEqual(offers.len, declared.len);
 
     inline for (offers, 0..) |offer, index| {
@@ -367,25 +608,89 @@ test "the declarations carry every field of the type behind them" {
     }
 }
 
-test "a model is never offered the tools that would widen its own reach" {
+test "a model is never offered the tool that would spend the workspace's credential" {
+    // `infer` would let a model ask a model on a request nobody read, paid for
+    // by whoever owns the key. It stays a typed request for a person to make.
     for (offers) |offer| {
         try testing.expect(offer.kind != .infer);
-        try testing.expect(offer.kind != .spawn_agent);
     }
     try testing.expect(nameOf(.infer) == null);
-    try testing.expect(nameOf(.spawn_agent) == null);
 
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // Asking for one by name is refused, and the refusal says which kind of no
+    // Asking for it by name is refused, and the refusal says which kind of no
     // it is: withheld, not missing.
     try testing.expectError(error.NotOfferedToModels, parse(arena, "infer",
         \\{"provider":"anthropic","model":"claude-opus-5"}
     ));
-    try testing.expectError(error.NotOfferedToModels, parse(arena, "spawn_agent", "{}"));
     try testing.expectError(error.UnknownTool, parse(arena, "sudo", "{}"));
+}
+
+test "starting a child is offered only when there is something to run one on" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Not in the always-offered list, because a caller with no spawner would
+    // be advertising a tool that answers "this build cannot do that" after the
+    // model has already spent a turn deciding to use it.
+    for (offers) |offer| {
+        try testing.expect(offer.kind != .spawn_agent);
+    }
+
+    const without = try declarations(arena, .{});
+    for (without) |tool| {
+        try testing.expect(!std.mem.eql(u8, tool.name, "spawn_agent"));
+    }
+
+    const with = try declarations(arena, .{ .spawnAgent = true });
+    try testing.expectEqual(offers.len + 1, with.len);
+    try testing.expectEqualStrings("spawn_agent", with[with.len - 1].name);
+
+    // The schema is generated from the same type the loop hands to the
+    // spawner, like every other tool's.
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, with[with.len - 1].schemaJson, .{});
+    const properties = parsed.value.object.get("properties").?.object;
+    inline for (std.meta.fields(tools.SpawnAgentRequest)) |field| {
+        try testing.expect(properties.contains(field.name));
+    }
+
+    // And a model cannot name the policy its child runs under, because there
+    // is no such field to name. That absence is the whole reason this tool
+    // could be offered at all.
+    try testing.expect(!properties.contains("policy"));
+    try testing.expect(!@hasField(tools.SpawnAgentRequest, "policy"));
+}
+
+test "a spawn request becomes typed whether or not it was offered" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Parsing does not depend on the offering. Whether this run may start a
+    // child is a question about the `agent.spawn` capability, and it gets the
+    // policy engine's answer along with every other question of that kind — a
+    // refusal a person can find in the record, rather than a name missing from
+    // a list.
+    const request = try parse(arena, "spawn_agent",
+        \\{"label":"read the retry code","request":"Which file sets the retry backoff, and what are the numbers?"}
+    );
+    try testing.expectEqual(tools.Capability.@"agent.spawn", request.capability());
+    try testing.expectEqualStrings("read the retry code", request.spawn_agent.label);
+
+    // A label is not something a model has to think of; work to do is.
+    const unlabelled = try parse(arena, "spawn_agent",
+        \\{"request":"Count the tests."}
+    );
+    try testing.expectEqualStrings("child", unlabelled.spawn_agent.label);
+
+    // A child with nothing to do spends a request to say so.
+    try testing.expectError(error.ArgumentsDoNotFit, parse(arena, "spawn_agent", "{}"));
+    try testing.expectError(error.ArgumentsDoNotFit, parse(arena, "spawn_agent",
+        \\{"request":""}
+    ));
 }
 
 test "a tool call becomes a typed request, and the capability comes from the kind" {
@@ -456,24 +761,50 @@ test "an unknown enum value falls to the safe default rather than being obeyed" 
     const request = try parse(arena, "run_command",
         \\{"argv":["curl"],"workingDirectory":"/tmp","network":"everything","environmentPolicy":"give_me_it_all"}
     );
+    // A name this build does not know is never obeyed. Both fall back to the
+    // type's own default, which is the one place either is written down.
+    try testing.expectEqual(default_execute.network, request.execute.network);
+    try testing.expectEqual(default_execute.environmentPolicy, request.execute.environmentPolicy);
+
+    // And the one that matters for safety is still the closed one: a model
+    // cannot talk its way onto the network by naming a policy that sounds
+    // permissive.
     try testing.expectEqual(tools.NetworkPolicy.none, request.execute.network);
-    try testing.expectEqual(tools.EnvironmentPolicy.none, request.execute.environmentPolicy);
+    // The environment default is open enough to run a build and closed to
+    // credentials, which is a different question from the network one.
+    try testing.expectEqual(tools.EnvironmentPolicy.allowlist, request.execute.environmentPolicy);
 }
 
-test "another server's arguments pass through as text, in either shape" {
+test "a tool with no executor behind it is not offered at all" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const as_object = try parse(arena, "call_mcp_tool",
+    // There is no MCP client in this build. Offering the tool anyway meant a
+    // model spent a turn deciding to call it and was then told the build could
+    // not do it — a promise broken after the decision was already made. The
+    // request kind stays, because the type is what a client would fill in; it
+    // is simply not advertised.
+    try testing.expectError(error.UnknownTool, parse(arena, "call_mcp_tool",
         \\{"server":"docs","tool":"lookup","argumentsJson":{"term":"block"}}
-    );
-    try testing.expect(std.mem.indexOf(u8, as_object.mcp.argumentsJson, "\"term\"") != null);
+    ));
 
-    const as_text = try parse(arena, "call_mcp_tool",
-        \\{"server":"docs","tool":"lookup","argumentsJson":"{\"term\":\"block\"}"}
-    );
-    try testing.expect(std.mem.indexOf(u8, as_text.mcp.argumentsJson, "\"term\"") != null);
+    // Everything that is offered has an executor behind it. This is the claim
+    // the offer list makes, so it is the claim under test.
+    const declared = try declarations(arena, .{});
+    try testing.expectEqual(offers.len, declared.len);
+    for (offers) |offer| {
+        switch (offer.kind) {
+            .read_file, .write_file, .execute, .delete, .search, .git => {},
+            // `spawn_agent` is not in this list either: it has something behind
+            // it only when a caller supplied a spawner, which is exactly why it
+            // is offered separately rather than always.
+            .mcp, .spawn_agent, .infer => {
+                std.debug.print("{s} is offered and has no executor\n", .{offer.name});
+                return error.TestUnexpectedResult;
+            },
+        }
+    }
 }
 
 test "a refusal tells the model which kind of no it was" {
@@ -492,4 +823,194 @@ test "a refusal tells the model which kind of no it was" {
 
     const done = try resultText(arena, .{ .outcome = .completed, .summary = "Read 12 bytes from a.txt." });
     try testing.expect(std.mem.startsWith(u8, done, "Done."));
+}
+
+test "a model can call every tool without knowing anything it cannot know" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Each of these was a required field, and each named something a model is
+    // never told: the workspace's absolute path, or the hash of bytes it has
+    // not stored yet. A tool that cannot be called is not a tool, and the
+    // symptom was a refusal that blamed the model for leaving something out.
+    const minimal = [_]struct { tool: []const u8, arguments: []const u8 }{
+        .{ .tool = "read_file", .arguments =
+        \\{"path":"README.md"}
+        },
+        .{ .tool = "write_file", .arguments =
+        \\{"path":"src/main.zig","contents":"hello"}
+        },
+        .{ .tool = "run_command", .arguments =
+        \\{"argv":["zig","build"]}
+        },
+        .{ .tool = "search", .arguments =
+        \\{"query":"countLines"}
+        },
+        .{ .tool = "git", .arguments =
+        \\{"operation":"status"}
+        },
+    };
+    for (minimal) |case| {
+        _ = parse(arena, case.tool, case.arguments) catch |err| {
+            std.debug.print("{s} could not be called with {s}: {s}\n", .{ case.tool, case.arguments, @errorName(err) });
+            return err;
+        };
+    }
+}
+
+test "a run request inherits enough to find a program, and no credential" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The decoder used to hardcode `.none` here while the type said
+    // `.allowlist`, so every command a model asked for ran with an empty
+    // environment and came back as status 127 with no output — which reads
+    // exactly like a build failure and is not one.
+    const request = try parse(arena, "run_command",
+        \\{"argv":["zig","build","test"]}
+    );
+    try testing.expectEqual(tools.EnvironmentPolicy.allowlist, request.execute.environmentPolicy);
+    try testing.expectEqualStrings(".", request.execute.workingDirectory);
+
+    // The allowlist is the security claim, so it is asserted rather than
+    // described: what a build needs is there, and what pays for the model is not.
+    const list = executor.default_environment_allowlist;
+    var has_path = false;
+    var has_home = false;
+    for (list) |name| {
+        if (std.mem.eql(u8, name, "PATH")) has_path = true;
+        if (std.mem.eql(u8, name, "HOME")) has_home = true;
+        try testing.expect(std.mem.indexOf(u8, name, "API_KEY") == null);
+        try testing.expect(std.mem.indexOf(u8, name, "TOKEN") == null);
+        try testing.expect(std.mem.indexOf(u8, name, "SECRET") == null);
+        try testing.expect(std.mem.indexOf(u8, name, "PASSWORD") == null);
+    }
+    try testing.expect(has_path);
+    try testing.expect(has_home);
+}
+
+test "what a tool produced reaches the model, not just how big it was" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The whole reason an agent can do anything. Before this a model that read
+    // a file was told its size, and one that ran a failing build was told it
+    // exited non-zero, so it could act and never learn.
+    const text = try resultText(arena, .{
+        .outcome = .failed,
+        .summary = "zig finished with status 1.",
+        .content = "src/main.zig:4:35: error: expected ';' after statement",
+    });
+    try testing.expect(std.mem.indexOf(u8, text, "status 1") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "expected ';' after statement") != null);
+}
+
+test "which end of a big result is kept depends on what it is" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const big = try arena.alloc(u8, result_content_limit * 2);
+    @memset(big, 'x');
+    @memcpy(big[0..13], "THE REAL HEAD");
+    @memcpy(big[big.len - 12 ..], "THE REAL END");
+
+    // Command output: the end. A compiler prints errors after progress, a test
+    // runner prints failures after passes, and the last thing a crashing
+    // program writes is why it crashed.
+    const output = try resultText(arena, .{
+        .outcome = .completed,
+        .content = big,
+        .contentKind = .terminal_output,
+    });
+    try testing.expect(std.mem.endsWith(u8, output, "THE REAL END"));
+    try testing.expect(std.mem.indexOf(u8, output, "THE REAL HEAD") == null);
+    try testing.expect(std.mem.indexOf(u8, output, "does not fit") != null);
+
+    // A file: the beginning. One rule for both got this exactly wrong in the
+    // interesting case — a model asked to read a 54 KB source file to
+    // understand it was handed the last 24 KB, which was the tests at the
+    // bottom.
+    const file = try resultText(arena, .{
+        .outcome = .completed,
+        .content = big,
+        .contentKind = .text,
+    });
+    try testing.expect(std.mem.indexOf(u8, file, "THE REAL HEAD") != null);
+    try testing.expect(std.mem.indexOf(u8, file, "THE REAL END") == null);
+    try testing.expect(std.mem.indexOf(u8, file, "does not fit") != null);
+}
+
+test "a terminal's own control sequences do not reach the model" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Captured verbatim from a real `zig build` run through the executor's
+    // pseudoterminal. About a tenth of what the model was reading looked like
+    // this, and none of it says anything about the build.
+    const raw = "\x1b[?2026h\x1b[J[4/9] steps\n\x1b(0tq\x1b(B run test\n\x1b[31m\x1b[1merror\x1b[0m: expected ';'\n\x1b]9;4;1;44\x1b\\done\n";
+    const clean = try withoutControlSequences(arena, raw);
+
+    // What a person would have read stays.
+    try testing.expect(std.mem.indexOf(u8, clean, "[4/9] steps") != null);
+    try testing.expect(std.mem.indexOf(u8, clean, "run test") != null);
+    try testing.expect(std.mem.indexOf(u8, clean, "error: expected ';'") != null);
+    try testing.expect(std.mem.indexOf(u8, clean, "done") != null);
+
+    // Nothing that only a terminal understands does.
+    try testing.expect(std.mem.indexOfScalar(u8, clean, 0x1b) == null);
+    try testing.expect(std.mem.indexOf(u8, clean, "[?2026h") == null);
+    try testing.expect(std.mem.indexOf(u8, clean, "[31m") == null);
+    try testing.expect(std.mem.indexOf(u8, clean, "9;4;1;44") == null);
+
+    // And it is meaningfully smaller, which is the point.
+    try testing.expect(clean.len < raw.len);
+}
+
+test "a progress line that overwrites itself keeps every state it showed" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A carriage return is how a build redraws one line. Dropping it would
+    // fuse the states into one run-on line; treating it as a newline keeps
+    // them readable and in order.
+    const clean = try withoutControlSequences(arena, "1/3 done\r2/3 done\r3/3 done\n");
+    try testing.expect(std.mem.indexOf(u8, clean, "1/3 done\n2/3 done\n3/3 done") != null);
+
+    // A CRLF is one line ending, not two.
+    const crlf = try withoutControlSequences(arena, "one\r\ntwo\r\n");
+    try testing.expectEqualStrings("one\ntwo\n", crlf);
+}
+
+test "a cut lands on a character boundary, from either end" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Box-drawing characters are what a build summary is made of, and each is
+    // three bytes. Cutting a byte count out of the middle of one leaves a
+    // fragment that is not text: the encoder has to replace it, and before it
+    // was fixed the whole request went to the provider as an array of numbers.
+    const glyph = "├";
+    try testing.expectEqual(@as(usize, 3), glyph.len);
+
+    const repeats = (result_content_limit / glyph.len) + 64;
+    var big: std.ArrayList(u8) = .empty;
+    for (0..repeats) |_| try big.appendSlice(arena, glyph);
+
+    for ([_]tools.ContentKind{ .text, .terminal_output }) |kind| {
+        const text = try resultText(arena, .{ .outcome = .completed, .content = big.items, .contentKind = kind });
+        // Whatever was kept is still text, which is the property that matters:
+        // it can be written as a JSON string without a replacement character
+        // appearing where a real character was.
+        try testing.expect(std.unicode.utf8ValidateSlice(text));
+        try testing.expect(std.mem.indexOf(u8, text, "does not fit") != null);
+        // And it really was cut, or the test is proving nothing.
+        try testing.expect(text.len < big.items.len);
+    }
 }

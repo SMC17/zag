@@ -96,6 +96,28 @@ pub const Tool = struct {
 /// connector maps it or leaves it out.
 pub const Effort = enum { low, medium, high, xhigh, max };
 
+/// Whether to ask a provider to cache the part of this request that will be
+/// sent again.
+///
+/// Every turn re-sends the whole conversation, so by the tenth turn most of
+/// what goes over the wire is bytes the provider has already read. Where a
+/// wire format has a way to say "you have seen this prefix before", saying so
+/// costs one field and saves re-reading it.
+///
+/// Measured on this build: the fixed prefix — the system prompt and the tool
+/// schemas — is about 3,700 bytes, near enough 930 tokens. Anthropic will not
+/// cache a prefix below 1,024 tokens and does not say so when it declines, so
+/// a breakpoint on the tools alone earns nothing here today. The one that
+/// earns something is on the conversation, which passes that mark after a
+/// turn or two and keeps growing.
+pub const Caching = enum {
+    /// Send nothing about caching. The right answer for a format that has no
+    /// way to express it, and for a single request that will not be repeated.
+    none,
+    /// Mark the longest prefix that will be identical next turn.
+    prefix,
+};
+
 pub const Request = struct {
     model: []const u8,
     /// The system prompt. Sent wherever the provider puts it.
@@ -103,6 +125,8 @@ pub const Request = struct {
     messages: []const Message,
     tools: []const Tool = &.{},
     maxOutputTokens: u32 = 16000,
+    /// Whether to ask the provider to cache the repeated prefix.
+    caching: Caching = .none,
     /// Left unset for models that reject sampling parameters. A connector must
     /// omit it rather than substitute a default.
     temperature: ?f32 = null,
@@ -228,6 +252,18 @@ pub const Wire = struct {
     id: []const u8,
     encode: *const fn (arena: std.mem.Allocator, endpoint: Endpoint, request: Request) anyerror!HttpRequest,
     decode: *const fn (arena: std.mem.Allocator, body: []const u8) anyerror!Completion,
+
+    /// Whether this format has a way to say "you have read this prefix before".
+    ///
+    /// Only Anthropic's does, of the five here. OpenAI's caches automatically
+    /// with nothing to send; Gemini's is a separate endpoint that stores the
+    /// prefix ahead of time rather than a field on the request; Ollama and
+    /// Hugging Face have no notion of it. Asking anyway would be harmless and
+    /// dishonest — the field would go out and mean nothing — so the caller
+    /// asks first.
+    pub fn supportsCaching(self: Wire) bool {
+        return std.mem.eql(u8, self.id, "anthropic");
+    }
 };
 
 /// Where a connector sends, and what it sends to authenticate.
@@ -296,9 +332,103 @@ pub const Endpoint = struct {
 /// Write a JSON string, escaped. Connectors build their bodies with this
 /// rather than by pasting text into a template, because a model's output is
 /// arbitrary and a template is how it becomes an injection.
+/// Write text as a JSON string, whatever bytes it holds.
+///
+/// `std.json.Stringify.value` on a `[]const u8` writes a JSON string when the
+/// bytes are valid UTF-8 and, when they are not, silently writes an array of
+/// numbers instead: `[237,160,128]`. A provider handed that where its schema
+/// says string rejects the whole request, and an agent run ends for a reason
+/// that has nothing to do with the work being done.
+///
+/// It is not a rare case. A tool's output is whatever the program wrote —
+/// `head -c 3000 /dev/urandom` is a thing an agent can be asked to run — and
+/// the cap on a tool result can *create* invalid UTF-8 out of ordinary text by
+/// cutting through the middle of a character. One accented letter or box
+/// drawing character near the cut is enough.
+///
+/// So the string is written here rather than delegated: escaped as JSON
+/// requires, and any byte that is not part of a valid UTF-8 sequence replaced
+/// with U+FFFD, which is what the replacement character is for. The result is
+/// always a JSON string.
 pub fn writeJsonString(w: *std.Io.Writer, text: []const u8) !void {
-    try std.json.Stringify.value(text, .{}, w);
+    try w.writeByte('"');
+    var at: usize = 0;
+    while (at < text.len) {
+        const byte = text[at];
+
+        // The escapes JSON names, then the general control-character form.
+        // A raw control character inside a string is not valid JSON.
+        switch (byte) {
+            '"' => {
+                try w.writeAll("\\\"");
+                at += 1;
+                continue;
+            },
+            '\\' => {
+                try w.writeAll("\\\\");
+                at += 1;
+                continue;
+            },
+            0x08 => {
+                try w.writeAll("\\b");
+                at += 1;
+                continue;
+            },
+            0x09 => {
+                try w.writeAll("\\t");
+                at += 1;
+                continue;
+            },
+            0x0a => {
+                try w.writeAll("\\n");
+                at += 1;
+                continue;
+            },
+            0x0c => {
+                try w.writeAll("\\f");
+                at += 1;
+                continue;
+            },
+            0x0d => {
+                try w.writeAll("\\r");
+                at += 1;
+                continue;
+            },
+            0x00...0x07, 0x0b, 0x0e...0x1f => {
+                try w.print("\\u{x:0>4}", .{byte});
+                at += 1;
+                continue;
+            },
+            else => {},
+        }
+
+        if (byte < 0x80) {
+            try w.writeByte(byte);
+            at += 1;
+            continue;
+        }
+
+        // A multi-byte sequence is passed through only if the whole of it is
+        // there and valid. One bad byte costs one replacement character, not
+        // the rest of the string.
+        const length = std.unicode.utf8ByteSequenceLength(byte) catch {
+            try w.writeAll(replacement_character);
+            at += 1;
+            continue;
+        };
+        if (at + length > text.len or !std.unicode.utf8ValidateSlice(text[at .. at + length])) {
+            try w.writeAll(replacement_character);
+            at += 1;
+            continue;
+        }
+        try w.writeAll(text[at .. at + length]);
+        at += length;
+    }
+    try w.writeByte('"');
 }
+
+/// U+FFFD, the character that stands for one that could not be read.
+const replacement_character = "\u{fffd}";
 
 const testing = std.testing;
 
@@ -364,4 +494,103 @@ test "a message flattens to text for a provider with no blocks" {
         },
     };
     try testing.expectEqualStrings("first part. second part.", try message.plainText(arena));
+}
+
+test "arbitrary bytes from a tool become valid UTF-8 on the wire" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A tool's output is whatever the program wrote. `head -c 3000
+    // /dev/urandom` is a real thing an agent can be asked to run, and a
+    // provider that is handed invalid UTF-8 inside a JSON string rejects the
+    // whole request — which would end the run for a reason that has nothing to
+    // do with what was being done.
+    //
+    // This holds today because the encoder escapes what it cannot pass
+    // through. It is asserted here rather than assumed, because it is a
+    // property of somebody else's library that this code now depends on.
+    var raw: [768]u8 = undefined;
+    for (&raw, 0..) |*byte, at| byte.* = @truncate(at * 7 + 13);
+    // The sequences that are specifically not valid UTF-8: a lone continuation
+    // byte, a truncated multi-byte start, and a surrogate encoding.
+    const nasty = [_][]const u8{ "\x80", "\xc3", "\xed\xa0\x80", "\xff\xfe", &raw };
+
+    for (nasty) |bytes| {
+        var out: std.Io.Writer.Allocating = .init(arena);
+        try writeJsonString(&out.writer, bytes);
+        const written = out.written();
+        try testing.expect(std.unicode.utf8ValidateSlice(written));
+
+        // And it is still a JSON string: quoted at both ends, and parseable.
+        try testing.expect(written.len >= 2);
+        try testing.expectEqual(@as(u8, '"'), written[0]);
+        try testing.expectEqual(@as(u8, '"'), written[written.len - 1]);
+        const parsed = try std.json.parseFromSlice(std.json.Value, arena, written, .{});
+        defer parsed.deinit();
+        try testing.expect(parsed.value == .string);
+    }
+}
+
+test "a tool result is always a JSON string, never a list of numbers" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // `std.json.Stringify.value` writes `[237,160,128]` for these, which is
+    // valid JSON and the wrong type: a provider whose schema says string
+    // rejects the request, and the run ends for a reason unrelated to the work.
+    const cases = [_][]const u8{
+        "\x80", // a lone continuation byte
+        "\xc3", // a two-byte start with nothing after it
+        "\xed\xa0\x80", // a surrogate, which UTF-8 forbids
+        "\xff\xfe", // never valid anywhere in UTF-8
+        "before\x80after", // one bad byte costs one character, not the rest
+    };
+
+    for (cases) |bytes| {
+        var out: std.Io.Writer.Allocating = .init(arena);
+        try writeJsonString(&out.writer, bytes);
+        const written = out.written();
+
+        try testing.expect(std.unicode.utf8ValidateSlice(written));
+        try testing.expectEqual(@as(u8, '"'), written[0]);
+        try testing.expectEqual(@as(u8, '"'), written[written.len - 1]);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, arena, written, .{});
+        defer parsed.deinit();
+        try testing.expect(parsed.value == .string);
+    }
+
+    // The readable part of a mixed string survives, so a program that printed
+    // one stray byte in a page of output is still read.
+    var mixed: std.Io.Writer.Allocating = .init(arena);
+    try writeJsonString(&mixed.writer, "before\x80after");
+    try testing.expect(std.mem.indexOf(u8, mixed.written(), "before") != null);
+    try testing.expect(std.mem.indexOf(u8, mixed.written(), "after") != null);
+}
+
+test "a JSON string escapes what JSON requires" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Writing the string by hand means owning the escaping, so it is tested
+    // rather than assumed: a raw control character inside a JSON string is not
+    // valid JSON, and an unescaped quote ends the string early.
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try writeJsonString(&out.writer, "a \"quote\", a \\ slash, a\ttab, a\nnewline, and \x01 control");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, out.written(), .{});
+    defer parsed.deinit();
+    // Round-tripped, which is the whole claim.
+    try testing.expectEqualStrings(
+        "a \"quote\", a \\ slash, a\ttab, a\nnewline, and \x01 control",
+        parsed.value.string,
+    );
+
+    // And ordinary text is left alone rather than escaped into noise.
+    var plain: std.Io.Writer.Allocating = .init(arena);
+    try writeJsonString(&plain.writer, "héllo ├ world");
+    try testing.expectEqualStrings("\"héllo ├ world\"", plain.written());
 }

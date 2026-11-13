@@ -24,6 +24,11 @@ const Command = enum {
     shell_hook,
     workflow,
     history,
+    show,
+    trajectories,
+    eval,
+    route,
+    judge,
     knowledge,
     term,
     providers,
@@ -48,6 +53,11 @@ const Command = enum {
             .{ .name = "shell-hook", .command = .shell_hook },
             .{ .name = "workflow", .command = .workflow },
             .{ .name = "history", .command = .history },
+            .{ .name = "show", .command = .show },
+            .{ .name = "trajectories", .command = .trajectories },
+            .{ .name = "eval", .command = .eval },
+            .{ .name = "route", .command = .route },
+            .{ .name = "judge", .command = .judge },
             .{ .name = "knowledge", .command = .knowledge },
             .{ .name = "term", .command = .term },
             .{ .name = "providers", .command = .providers },
@@ -79,11 +89,17 @@ pub const help_text =
     \\  shell-hook <shell>  Print the shell integration for bash, zsh, fish or pwsh.
     \\  workflow            Show this repository's own workflow as a task graph.
     \\  history <query>     Search recorded work. For example: status:failed zig
+    \\  show <query>        Show what a recorded command printed.
+    \\  trajectories        Write every recorded agent run as JSON Lines, with its score.
+    \\  judge               Ask a model what it thinks of the recorded runs, and record it.
+    \\  eval <baseline>     Compare this workspace's runs against an earlier export.
+    \\  route ["task"]      Which model to use next. With a task, a policy trained on the record.
     \\  knowledge           Show the knowledge under .workspace/, and what is overdue.
     \\  term                Open a shell in a terminal that records what you do.
     \\  providers           List the model connectors and say which credentials are set.
     \\  policy [--init]     Show the policy in force, or write one to start from.
-    \\  ask <question>      Ask a model, through the policy. It can use tools, one decision each.
+    \\  ask [question]      Ask a model, through the policy. It can use tools, one decision each.
+    \\                      With --resume, carry on where the last run stopped.
     \\  why <file> [n]      Show what an event depended on, and what it went on to affect.
     \\  secrets <files>     Show what would be taken out of these files before recording them.
     \\
@@ -94,6 +110,13 @@ pub const help_text =
     \\  --provider <name>   Which connector to use. Run "zag providers" to see them.
     \\  --model <name>      Which model to ask for.
     \\  --turns <count>     How many times a model may be asked in one run.
+    \\  --compact-at <n>    Make room in the conversation once it passes n bytes.
+    \\  --resume            Carry on the last run in this workspace.
+    \\  --explore           Let "zag route" consider connectors never used here.
+    \\  --children          Let a run hand parts of the work to child agents.
+    \\  --depth <n>         How many levels of agents a run may have. Default 2.
+    \\  --together          Run a turn's child agents at once. They may then only read.
+    \\  --best-of <n>       Run the task n times, judge each, keep the best. Costs n times.
     \\  --raw               Start the shell with no added prompt marks.
     \\  --stream            Print a model's answer as it arrives, not when it finishes.
     \\  --init              Write a starter policy file. Used with "zag policy".
@@ -117,6 +140,31 @@ const Options = struct {
     approve_truncate: bool = false,
     /// Write a starter policy file rather than showing the policy in force.
     init: bool = false,
+    /// Bytes of conversation above which room is made. Empty means the default.
+    compact_at: []const u8 = "",
+    /// Carry on the last run in this workspace rather than starting a new one.
+    resume_last: bool = false,
+    /// Put every connector this build knows into the routing draw, including
+    /// ones that may not be installed.
+    explore: bool = false,
+    /// Offer `spawn_agent`, so a run may hand self-contained work to children.
+    ///
+    /// Off by default, and deliberately: the bounds in `ai/swarm.zig` make
+    /// spawning safe to offer, not right to offer. A run that fans work out
+    /// spends more and produces a record with a tree in it, and that is worth
+    /// asking for rather than getting by surprise.
+    children: bool = false,
+    /// Levels of agents a run may have, counting itself. Empty means two.
+    depth: []const u8 = "",
+    /// How many times to attempt the task, keeping the best. Empty means once.
+    best_of: []const u8 = "",
+    /// Run a turn's children at the same time, narrowed to reading.
+    ///
+    /// This takes authority away rather than granting any — see
+    /// `ai/swarm.zig` — so it needs no permission of its own. It is off by
+    /// default because a child that cannot run the build is a surprise to
+    /// anybody who asked for one that could.
+    together: bool = false,
     provider: []const u8 = "",
     model: []const u8 = "",
     turns: []const u8 = "",
@@ -158,6 +206,23 @@ fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
             options.init = true;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--resume")) {
+            options.resume_last = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--explore")) {
+            options.explore = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--children")) {
+            options.children = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--together")) {
+            options.together = true;
+            options.children = true;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--raw")) {
             options.raw = true;
             continue;
@@ -176,6 +241,9 @@ fn parseOptions(arena: std.mem.Allocator, args: []const []const u8) !Options {
             .{ .flag = "--provider", .field = &options.provider },
             .{ .flag = "--model", .field = &options.model },
             .{ .flag = "--turns", .field = &options.turns },
+            .{ .flag = "--depth", .field = &options.depth },
+            .{ .flag = "--best-of", .field = &options.best_of },
+            .{ .flag = "--compact-at", .field = &options.compact_at },
         };
         var matched = false;
         for (named) |entry| {
@@ -290,6 +358,11 @@ fn run(
         .shell_hook => try shellHook(w, options),
         .workflow => try workflowReport(arena, w, options),
         .history => try historySearch(arena, io, w, options),
+        .show => try showOutput(arena, io, w, options),
+        .trajectories => try writeTrajectories(arena, io, w, options),
+        .eval => try compareAgainstBaseline(arena, io, w, options),
+        .route => try routeToAModel(arena, io, w, options, environment),
+        .judge => try judgeRuns(arena, io, w, options, environment),
         .knowledge => try knowledgeIndex(arena, io, w, options),
         .term => try interactiveTerminal(arena, io, w, options, environment),
         .providers => try listProviders(arena, io, w, options, environment),
@@ -564,6 +637,689 @@ fn historySearch(arena: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, option
         .limit = 20,
     });
     try results.writeList(w);
+    return if (incomplete) 1 else 0;
+}
+
+/// Say which model to use next, from what the models did here.
+///
+/// Thompson sampling over the recorded runs. The posteriors are derived from
+/// the log every time rather than kept in a table, so they cannot drift from
+/// the record and cannot be edited to make a model look good.
+fn routeToAModel(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+    environment: []const []const u8,
+) !u8 {
+    const opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.root,
+        .actor = workbenchActor(),
+        .now = wallClock(io),
+    }) catch {
+        try w.print("zag could not open the workspace in {s}.\n", .{options.root});
+        return 1;
+    };
+
+    const known = try zag.ai.bandit.armsIn(arena, opened.service.log);
+
+    // Which connectors are worth putting in the draw.
+    //
+    // Not all of them. This build knows ten ways to reach a model on this
+    // computer, and offering every one as an untried arm is how a router
+    // explores for ever: nine uniform draws produce something above 0.9 nearly
+    // every round, which beats any real record. The arithmetic is in
+    // `bandit.crowdingFrom`, and the fix is the candidate list rather than a
+    // fudge factor on the sampler.
+    //
+    // So the default is what is demonstrably usable: a hosted connector whose
+    // credential is set, and anything this workspace has actually run. Local
+    // runtimes that may not even be installed are behind --explore.
+    const env: Environment = .{ .entries = environment };
+    var candidates: std.ArrayList(zag.ai.bandit.Arm) = .empty;
+    var untried: usize = 0;
+    var unnameable: usize = 0;
+    for (zag.ai.catalog.connectors) |connector| {
+        const has_key = connector.keyVariable.len > 0 and
+            Environment.lookup(@constCast(&env), connector.keyVariable) != null;
+
+        var used_here = false;
+        for (known) |arm| {
+            if (std.mem.eql(u8, arm.connector, connector.id)) used_here = true;
+        }
+        if (!options.explore and !has_key and !used_here) continue;
+
+        // A connector this build cannot name a model for is not a
+        // recommendation. It was being offered anyway, and the command printed
+        // at the end came out as `--model ""`, which cannot work — a router
+        // that ends in a command the person cannot run has not routed
+        // anything.
+        const model = defaultModel(connector);
+        if (model.len == 0 and !used_here) {
+            unnameable += 1;
+            continue;
+        }
+
+        if (!used_here) untried += 1;
+        try candidates.append(arena, .{
+            .connector = connector.id,
+            .model = model,
+        });
+    }
+    if (unnameable > 0) {
+        try w.print(
+            "{d} connector{s} left out: this build knows how to reach {s} but not which\nmodel to ask for. Name one with --model and it joins the record.\n\n",
+            .{
+                unnameable,
+                if (unnameable == 1) "" else "s",
+                if (unnameable == 1) "it" else "them",
+            },
+        );
+    }
+
+    const arms = try zag.ai.bandit.withCandidates(arena, known, candidates.items);
+    if (arms.len == 0) {
+        try w.writeAll("No connector is reachable from here, so there is nothing to choose between.\n");
+        try w.writeAll("Run \"zag providers\" to see what this build knows and which credentials are set.\n");
+        return 1;
+    }
+
+    try w.writeAll("What the record says\n");
+    for (arms) |arm| {
+        try w.writeAll("  ");
+        try arm.writeSentence(w);
+        try w.writeAll("\n");
+    }
+
+    // Said out loud when it matters, because a router that is really just
+    // exploring looks exactly like one that is working.
+    const crowding = zag.ai.bandit.crowdingFrom(untried);
+    if (untried > 2 and known.len > 0) {
+        try w.print(
+            "\n{d} of these have never been used here. Untried arms draw from an even\nchance, so the best of {d} of them clears {d:.2} most rounds and will usually\nbeat a real record. Expect exploration rather than a recommendation.\n",
+            .{ untried, untried, crowding },
+        );
+    }
+
+    // Drawn from a real seed: a router that picked the same arm every time
+    // would be a lookup table, not a sampler.
+    var seed_bytes: [8]u8 = undefined;
+    try io.randomSecure(&seed_bytes);
+    const seed = std.mem.readInt(u64, &seed_bytes, .little);
+
+    // With a task in hand there is a second thing to try. The bandit has no
+    // idea what it is being asked — every task is the same task to it — so a
+    // model that reads code well and writes it badly gets one number that
+    // averages the two. A policy trained on the same runs, with the task as an
+    // input, can tell them apart. It is used only when it has shown, on runs
+    // it never saw, that it beats the best single arm; otherwise this says so
+    // and falls back.
+    var task: std.ArrayList(u8) = .empty;
+    for (options.positional, 0..) |word, index| {
+        if (index > 0) try task.append(arena, ' ');
+        try task.appendSlice(arena, word);
+    }
+    if (task.items.len > 0) {
+        const episodes = try zag.ai.policygradient.episodesIn(arena, opened.service.log);
+        const trained = try zag.ai.policygradient.train(arena, episodes, .{});
+        try w.writeAll("\nWith the task in hand\n");
+        try trained.writeReport(w);
+
+        if (trained.worthUsing()) {
+            const features = zag.ai.policygradient.featuresOf(task.items);
+            const chances = try arena.alloc(f64, trained.policy.arms.len);
+            const drawn = trained.policy.sample(features, chances, seed);
+            const arm = trained.policy.arms[drawn];
+            try w.print("\nUse next\n  {s}/{s}, drawn with probability {d:.2} for this task.\n", .{
+                arm.connector,
+                arm.model,
+                chances[drawn],
+            });
+            try w.print("\n  zag ask --provider {s} --model {s} \"{s}\"\n", .{
+                arm.connector,
+                arm.model,
+                task.items,
+            });
+            return 0;
+        }
+    }
+
+    const choice = zag.ai.bandit.choose(arms, seed).?;
+
+    try w.writeAll("\nUse next\n  ");
+    try choice.writeSentence(w);
+    try w.print("\n\n  zag ask --provider {s} --model {s} \"...\"\n", .{
+        choice.arm.connector,
+        choice.arm.model,
+    });
+    return 0;
+}
+
+/// Ask a model what it thinks of the runs this workspace has recorded.
+///
+/// The arithmetic in `ai/outcome.zig` scores a run from what the record
+/// states, and it is blind to the one question anybody actually asks: was the
+/// answer any good? A run can end cleanly, make eight successful calls, repeat
+/// nothing, and confidently say something false. That run scores 1.0.
+///
+/// So this is a second opinion, and the useful output is not its number. It is
+/// the disagreement: where arithmetic over the record and a model reading the
+/// same record reach different conclusions is the shortlist of runs worth
+/// reading by hand, and it is far shorter than the list of all runs.
+///
+/// Every verdict is written into the log as evidence — which model gave it,
+/// against which rubric, and the whole thing addressed by hash — so a run is
+/// judged once and the opinion can be checked later against the run it was
+/// about.
+fn judgeRuns(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+    environment: []const []const u8,
+) !u8 {
+    const chosen = if (options.provider.len > 0) options.provider else "ollama";
+    const connector = zag.ai.catalog.find(chosen) orelse {
+        try w.print("\"{s}\" is not a connector zag knows. Run \"zag providers\" to see them.\n", .{chosen});
+        return 2;
+    };
+    const model = if (options.model.len > 0) options.model else defaultModel(connector);
+
+    const loaded = try LoadedPolicy.fromWorkspace(arena, io, options.root);
+    if (loaded.problems.len > 0) {
+        try w.writeAll("This workspace's policy could not be read, so nothing was sent.\n");
+        return 1;
+    }
+
+    const opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.root,
+        .actor = workbenchActor(),
+        .now = wallClock(io),
+        .environment = environment,
+    }) catch {
+        try w.print("zag could not open the workspace in {s}.\n", .{options.root});
+        return 1;
+    };
+    var service = opened.service;
+
+    const runs = try zag.ai.trajectory.extract(arena, io, service.log, service.content);
+    if (runs.len == 0) {
+        try w.writeAll("No agent runs are recorded in this workspace.\n");
+        return 1;
+    }
+
+    const rubric = zag.ai.judge.default_rubric;
+
+    // A run is judged once. Re-running this after another day's work should
+    // cost one request per new run, not one per run ever recorded.
+    var already: std.ArrayList([]const u8) = .empty;
+    for (service.log.entries.items) |entry| {
+        const e = switch (entry.payload) {
+            .evidence_recorded => |x| x,
+            else => continue,
+        };
+        if (!std.mem.startsWith(u8, e.requirement, "judge:")) continue;
+        try already.append(arena, e.subject);
+    }
+
+    var engine = zag.ai.policy.Engine.init(arena, loaded.policy, @bitCast(wallClock(io).ns));
+    var identifiers = zag.core.id.Generator.init(@bitCast(wallClock(io).ns), 0);
+    const context: zag.ai.policy.Context = .{
+        .actor = identifiers.next(zag.core.id.ActorId),
+        .now = wallClock(io),
+    };
+
+    const view: Environment = .{ .entries = environment };
+    var client: std.http.Client = .{ .allocator = arena, .io = io };
+    defer client.deinit();
+    var http: zag.ai.transport.Http = .{ .client = &client };
+    var sleeper: zag.ai.transport.SleepingWaiter = .{ .io = io };
+    const transport: zag.ai.transport.Transport = .{
+        .arena = arena,
+        .engine = &engine,
+        .sender = http.sender(),
+        .credentials = view.credentials(),
+        .redactor = try zag.security.secrets.Redactor.init(io),
+        .guard = .{ .io = io },
+        .waiter = sleeper.waiter(),
+    };
+
+    var judged: usize = 0;
+    var disagreements: usize = 0;
+    var skipped: usize = 0;
+
+    for (runs) |trajectory| {
+        var identifier: [zag.core.id.AgentId.text_len]u8 = undefined;
+        const subject = trajectory.agent.toText(&identifier);
+
+        var seen = false;
+        for (already.items) |earlier| {
+            if (std.mem.eql(u8, earlier, subject)) seen = true;
+        }
+        if (seen) {
+            skipped += 1;
+            continue;
+        }
+
+        const prompt = try zag.ai.judge.writePrompt(arena, trajectory, rubric);
+        // The property the whole defence rests on, checked rather than
+        // trusted: the fence token appears only where this file put it.
+        std.debug.assert(std.mem.count(u8, prompt.text, prompt.fence) == 2);
+
+        var attempt: zag.ai.transport.Attempt = undefined;
+        const completion = transport.send(connector, .{
+            .model = model,
+            .system = zag.ai.judge.instructions,
+            .messages = &.{.{
+                .role = .user,
+                .blocks = &.{.{ .text = prompt.text }},
+            }},
+            // A judge that thinks for a page is a judge whose reasoning nobody
+            // reads. The rubric asks for one sentence per criterion.
+            .maxOutputTokens = 2000,
+        }, context, &attempt) catch |err| {
+            try w.print("The judge could not be reached: {s}.\n", .{@errorName(err)});
+            return 1;
+        };
+
+        var verdict = zag.ai.judge.parse(arena, rubric, try completion.text(arena)) catch |err| {
+            // A model that would not answer in the shape asked for is worth
+            // saying out loud rather than counting as a bad run: the run is
+            // not what failed.
+            try w.print("  {s}\n    the judge did not answer in the shape asked for ({s})\n", .{
+                trajectory.task,
+                @errorName(err),
+            });
+            continue;
+        };
+        verdict.model = model;
+        verdict.connector = connector.id;
+
+        const agreement = zag.ai.judge.compare(trajectory.score, verdict, rubric);
+        judged += 1;
+        if (agreement.disagrees()) disagreements += 1;
+
+        var line: std.Io.Writer.Allocating = .init(arena);
+        try zag.ai.judge.writeJsonLine(verdict, rubric, agreement, &line.writer);
+
+        if (options.json) {
+            try w.print("{s}\n", .{line.written()});
+        } else {
+            try w.print("{s}\n  ", .{trajectory.task});
+            try agreement.writeSentence(w);
+            try w.print("\n  {s}\n", .{verdict.summary});
+            for (verdict.marks) |mark| {
+                if (mark.unclear) {
+                    try w.print("    {s}: the record does not show it\n", .{mark.criterion});
+                } else {
+                    try w.print("    {s} {d:.2}  {s}\n", .{ mark.criterion, mark.score, mark.because });
+                }
+            }
+            try w.writeAll("\n");
+        }
+
+        // Into the log, as evidence about the run: which model said it,
+        // against which rubric, with the whole verdict addressed by hash. An
+        // opinion nobody can find again is an opinion nobody can check.
+        const hash = try service.content.put(line.written());
+        var sentence: std.Io.Writer.Allocating = .init(arena);
+        try agreement.writeSentence(&sentence.writer);
+        _ = service.record(.{ .evidence_recorded = .{
+            .requirement = try std.fmt.allocPrint(arena, "judge:{s}", .{rubric.id}),
+            .subject = try arena.dupe(u8, subject),
+            .method = try std.fmt.allocPrint(arena, "model judge ({s}/{s})", .{ connector.id, model }),
+            .result = sentence.written(),
+            .contentHash = hash,
+        } }, .{ .at = wallClock(io), .actor = workbenchActor() }) catch |err| {
+            try w.print("The verdict could not be recorded: {s}.\n", .{@errorName(err)});
+            return 1;
+        };
+    }
+
+    service.flush(io) catch |err| {
+        try w.print("The verdicts could not be committed: {s}.\n", .{@errorName(err)});
+        return 1;
+    };
+
+    if (!options.json) {
+        if (skipped > 0) {
+            try w.print("{d} run{s} already judged.\n", .{ skipped, if (skipped == 1) "" else "s" });
+        }
+        if (judged == 0) {
+            try w.writeAll("Nothing new to judge.\n");
+            return 0;
+        }
+        try w.print(
+            "\n{d} of {d} judged runs are worth reading: the record and the judge disagree\nby more than {d:.2} there, and agree everywhere else.\n",
+            .{ disagreements, judged, zag.ai.judge.Agreement.worth_reading },
+        );
+    }
+    return 0;
+}
+
+/// Run the same task several times and keep the one that worked.
+///
+/// The cheapest large improvement available to an agent system, and cheap only
+/// in engineering: it costs exactly as many times more as the number of
+/// attempts. So the cost is printed, next to whether it bought anything —
+/// `ai/bestof.zig` counts the distinct answers, and three copies of one answer
+/// is not a best of three.
+///
+/// Every attempt is a real run in the record with its own agent identifier.
+/// The losing ones are the interesting half: the same task, the same model and
+/// the same moment, which is the closest thing to a controlled experiment this
+/// system can produce.
+fn runSeveralTimes(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    service: *zag.workspace.service.Service,
+    recorder: *zag.workspace.service.Service.AgentRecorder,
+    runner: *zag.ai.loop.Runner,
+    asked: zag.ai.loop.Options,
+    question: []const u8,
+    context: zag.ai.policy.Context,
+    connector: zag.ai.catalog.Connector,
+    model: []const u8,
+    transport: zag.ai.transport.Transport,
+    wanted: usize,
+    options: Options,
+) !u8 {
+    const spread: zag.ai.bestof.Spread = .{ .attempts = wanted };
+    const rubric = zag.ai.judge.default_rubric;
+
+    // Nothing is streamed. Several attempts printing as they arrive is one
+    // confused voice, and the answer that matters is not known until the last
+    // of them has finished.
+    runner.watch = null;
+
+    var attempts: std.ArrayList(zag.ai.bestof.Attempt) = .empty;
+    var agents: std.ArrayList(zag.core.id.AgentId) = .empty;
+
+    var number: usize = 0;
+    while (number < wanted) : (number += 1) {
+        // Its own record keeper, so each attempt is its own run rather than
+        // three runs written on top of each other.
+        var attempt_recorder = zag.workspace.service.Service.AgentRecorder.init(service);
+        runner.journal = attempt_recorder.journal();
+
+        var round = asked;
+        round.temperature = spread.temperatureFor(number);
+
+        try w.print("Attempt {d} of {d}", .{ number + 1, wanted });
+        if (round.temperature) |t| {
+            try w.print(" at temperature {d:.1}...\n", .{t});
+        } else {
+            try w.writeAll(" at the provider's own setting...\n");
+        }
+        try w.flush();
+
+        const transcript = runner.run(round, question, context) catch |err| {
+            try attempts.append(arena, .{
+                .number = number,
+                .temperature = round.temperature,
+                .answer = "",
+                .measured = .{ .agent = attempt_recorder.agent },
+                .failed = @errorName(err),
+            });
+            try agents.append(arena, attempt_recorder.agent);
+            continue;
+        };
+        try attempts.append(arena, .{
+            .number = number,
+            .temperature = round.temperature,
+            .answer = transcript.answer,
+            // Filled in from the record below, which is the point: the score
+            // comes from what was written down, not from the value the loop
+            // happened to be holding.
+            .measured = .{ .agent = attempt_recorder.agent },
+        });
+        try agents.append(arena, attempt_recorder.agent);
+    }
+    // Put the parent's own recorder back, so anything after this belongs to
+    // the run the person started rather than to the last attempt.
+    runner.journal = recorder.journal();
+
+    service.flush(io) catch |err| {
+        try w.print("The attempts finished, but zag could not commit the record: {s}.\n", .{@errorName(err)});
+        return 1;
+    };
+
+    // Scored from the record, and judged from the trajectory the record makes.
+    // An attempt that was scored from anything else would be scored from
+    // something nobody can check afterwards.
+    const runs = try zag.ai.trajectory.extract(arena, io, service.log, service.content);
+    for (attempts.items, agents.items) |*attempt, agent| {
+        if (attempt.failed != null) continue;
+        for (runs) |trajectory| {
+            if (!trajectory.agent.eql(agent)) continue;
+            attempt.measured = trajectory.score;
+
+            const prompt = try zag.ai.judge.writePrompt(arena, trajectory, rubric);
+            var judged: zag.ai.transport.Attempt = undefined;
+            const completion = transport.send(connector, .{
+                .model = model,
+                .system = zag.ai.judge.instructions,
+                .messages = &.{.{ .role = .user, .blocks = &.{.{ .text = prompt.text }} }},
+                .maxOutputTokens = 2000,
+            }, context, &judged) catch break;
+            // A judge that could not be reached leaves the attempt ranked on
+            // the arithmetic alone, which is the half that cannot be talked
+            // into anything anyway.
+            attempt.judged = zag.ai.judge.parse(arena, rubric, completion.text(arena) catch break) catch break;
+            break;
+        }
+    }
+
+    const chosen = zag.ai.bestof.choose(attempts.items, rubric, .{});
+
+    try w.writeAll("\n");
+    try zag.ai.bestof.writeReport(chosen, rubric, .{}, w);
+    try w.writeAll("\n");
+
+    const best = chosen.best();
+    if (best.failed) |why| {
+        try w.print("No attempt produced an answer. The last problem was: {s}.\n", .{why});
+        return 1;
+    }
+    if (best.answer.len > 0) try w.print("{s}\n\n", .{best.answer});
+
+    try w.print("Every attempt is in the record. Read them with \"zag trajectories --root {s}\".\n", .{options.root});
+    return if (best.measured.ending.settled()) 0 else 1;
+}
+
+/// Compare this workspace's runs against an earlier export.
+///
+/// The loop that makes a trajectory store worth keeping: export a baseline,
+/// change something — the prompt, the model, a tool description — run the same
+/// tasks again, and ask whether it helped.
+///
+/// The comparison is paired by task, because tasks differ from each other far
+/// more than a change usually moves any one of them, and it says plainly when
+/// the answer is "not enough evidence" rather than printing a mean and letting
+/// the reader assume.
+fn compareAgainstBaseline(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+) !u8 {
+    if (options.positional.len == 0) {
+        try w.writeAll("Name the baseline to compare against. For example: zag eval baseline.jsonl\n");
+        try w.writeAll("Write one with \"zag trajectories --json > baseline.jsonl\".\n");
+        return 2;
+    }
+
+    const path = options.positional[0];
+    const source = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(64 << 20)) catch {
+        try w.print("zag could not read {s}.\n", .{path});
+        return 1;
+    };
+    const before = try zag.ai.eval.fromJsonLines(arena, source);
+    if (before.len == 0) {
+        try w.print("{s} holds no scored runs. Write one with \"zag trajectories --json\".\n", .{path});
+        return 1;
+    }
+
+    const opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.root,
+        .actor = workbenchActor(),
+        .now = wallClock(io),
+    }) catch {
+        try w.print("zag could not open the workspace in {s}.\n", .{options.root});
+        return 1;
+    };
+    const after = try zag.ai.eval.fromScores(
+        arena,
+        try zag.ai.outcome.scoreAll(arena, opened.service.log),
+    );
+
+    const result = try zag.ai.eval.compare(arena, before, after);
+    try result.writeReport(w);
+
+    // Exit status says whether a change was shown to help, so this can gate a
+    // build. "Not shown" is not the same as "worse", and both are non-zero:
+    // shipping a change the evidence does not support is the thing this is
+    // here to prevent.
+    if (result.pairs.len == 0) return 1;
+    return if (result.worthActingOn() and result.meanChange > 0) 0 else 1;
+}
+
+/// Write every recorded agent run as a trajectory.
+///
+/// A workspace used for a month holds hundreds of runs, each a task, a
+/// sequence of decisions, the result of every action and how it ended. That is
+/// what a trajectory is, and until now the most valuable thing this project
+/// accumulates could only be read one run at a time by a person.
+///
+/// JSON Lines to standard output, so it pipes into whatever reads datasets.
+fn writeTrajectories(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+) !u8 {
+    const opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.root,
+        .actor = workbenchActor(),
+        .now = wallClock(io),
+    }) catch {
+        try w.print("zag could not open the workspace in {s}.\n", .{options.root});
+        return 1;
+    };
+
+    const runs = try zag.ai.trajectory.extract(arena, io, opened.service.log, opened.service.content);
+    if (runs.len == 0) {
+        try w.writeAll("No agent runs are recorded in this workspace.\n");
+        return 1;
+    }
+
+    if (options.json) {
+        try zag.ai.trajectory.writeJsonLines(runs, w);
+        return 0;
+    }
+
+    // Without --json, what a person wants is the shape of the set rather than
+    // the set itself: which runs went well, and whether the whole is worth
+    // training or measuring against.
+    var scores: std.ArrayList(zag.ai.outcome.Score) = .empty;
+    for (runs) |trajectory| {
+        try scores.append(arena, trajectory.score);
+        try w.print("{d:.2}  ", .{trajectory.score.reward()});
+        try trajectory.score.writeSentence(w);
+        try w.print("  {s}\n", .{trajectory.task});
+    }
+    try w.writeAll("\n");
+    try zag.ai.outcome.summarise(scores.items).writeSentence(w);
+    try w.writeAll("\nRun with --json to write the trajectories themselves.\n");
+    return 0;
+}
+
+/// Show what a recorded command printed.
+///
+/// The output of every command is stored, verified and addressed by hash, and
+/// until now nothing could read it back. A workspace that records what happened
+/// and cannot show it to you has kept the evidence and lost the point: the
+/// question a person actually asks is "what did it say when it broke", and the
+/// answer was on disk with no way to reach it.
+///
+/// It takes the same query language as `zag history`, and shows the newest
+/// match, because "show me the last failure" is the question.
+fn showOutput(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    options: Options,
+) !u8 {
+    const query_text = try std.mem.join(arena, " ", options.positional);
+    const parsed = try zag.workspace.history.parse(arena, query_text);
+    for (parsed.problems) |problem| {
+        try problem.writeSentence(w);
+        try w.writeAll("\n");
+    }
+    if (!parsed.ok()) return 2;
+
+    const opened = zag.workspace.service.Service.open(arena, io, .{
+        .root = options.root,
+        .actor = workbenchActor(),
+        .now = wallClock(io),
+    }) catch {
+        try w.print("zag could not open the workspace in {s}.\n", .{options.root});
+        return 1;
+    };
+    const incomplete = !opened.report.logIsHealthy();
+    if (incomplete) {
+        try w.writeAll("The log is incomplete or damaged, so this covers only its verified prefix.\n\n");
+    }
+
+    const index = try opened.service.blocks();
+    const results = try zag.workspace.history.run(arena, index, parsed.query, .{
+        .now = wallClock(io),
+        .limit = 1,
+    });
+    if (results.hits.len == 0) {
+        try results.writeSummary(w);
+        return 1;
+    }
+
+    const block = results.hits[0].block;
+    try w.print("{s}\n", .{block.commandText orelse "(no command recorded)"});
+    if (block.exitStatus) |status| {
+        try w.print("{s}, status {d}", .{ block.status.text(), status });
+    } else {
+        try w.print("{s}", .{block.status.text()});
+    }
+    if (block.duration()) |took| {
+        try w.writeAll(", took ");
+        try zag.reports.notation.writeDuration(w, took);
+    }
+    try w.writeAll("\n\n");
+
+    if (block.content == .none) {
+        try w.writeAll("It printed nothing.\n");
+        return if (incomplete) 1 else 0;
+    }
+
+    // Reassembled in the order the pieces were produced. A block whose output
+    // arrived in three chunks is three objects, and showing only one of them
+    // would be the same class of mistake the chunked variant exists to prevent.
+    var single: [1]zag.workspace.block.Chunk = undefined;
+    const pieces = block.content.pieces(&single);
+    var shown: usize = 0;
+    for (pieces) |piece| {
+        const bytes = opened.service.content.read(io, piece.hash, 64 << 20) catch {
+            try w.print("\n[a piece of this output is missing from the store: {f}]\n", .{piece.hash});
+            continue;
+        };
+        try w.writeAll(bytes);
+        shown += bytes.len;
+    }
+    if (shown != block.content.totalBytes()) {
+        try w.print(
+            "\n[{d} bytes shown of {d} recorded]\n",
+            .{ shown, block.content.totalBytes() },
+        );
+    }
     return if (incomplete) 1 else 0;
 }
 
@@ -899,7 +1655,10 @@ fn askAModel(
     options: Options,
     environment: []const []const u8,
 ) !u8 {
-    if (options.positional.len == 0) {
+    // A resume needs no question: the run already has one, and carrying on is
+    // itself the instruction. A question with --resume is a person changing
+    // course, which is the other thing they might want.
+    if (options.positional.len == 0 and !options.resume_last) {
         try w.writeAll("Write the question after the command. For example: zag ask \"what does this build do?\"\n");
         return 2;
     }
@@ -931,6 +1690,7 @@ fn askAModel(
         .root = options.root,
         .actor = try personActor(arena, environment),
         .now = wallClock(io),
+        .environment = environment,
     }) catch {
         try w.print("zag could not open the workspace in {s}, so this run would not be recorded.\n", .{options.root});
         return 1;
@@ -955,6 +1715,7 @@ fn askAModel(
     defer client.deinit();
     var http: zag.ai.transport.Http = .{ .client = &client };
 
+    var sleeper: zag.ai.transport.SleepingWaiter = .{ .io = io };
     const transport: zag.ai.transport.Transport = .{
         .arena = arena,
         .engine = &engine,
@@ -968,6 +1729,9 @@ fn askAModel(
         // And nothing connects to a host whose name does not resolve to where
         // the connector said it lives.
         .guard = .{ .io = io },
+        // A 429 or a 503 is a shared service saying "not right now", not a
+        // reason to throw away everything the run has done.
+        .waiter = sleeper.waiter(),
     };
 
     // The loop, not a single question. A model that can read the workspace and
@@ -976,6 +1740,14 @@ fn askAModel(
     const executor: zag.ai.executor.Runner = .init(arena, .{
         .root = options.root,
         .io = io,
+        // What a model-issued command may see of this is decided per request by
+        // its environment policy, which by default hands over enough to run a
+        // build and nothing that carries a credential.
+        .environment = environment,
+        // Without a store, every write_file is refused with "this build cannot
+        // perform that kind of request" — which reads like the tool does not
+        // exist rather than like the tool has nowhere to put anything.
+        .content = &service.content,
     });
     // Printing straight to the writer as the answer arrives. The writer is
     // flushed on each piece, because a buffered stream shown at the end is a
@@ -988,7 +1760,7 @@ fn askAModel(
         }
     };
 
-    const runner: zag.ai.loop.Runner = .{
+    var runner: zag.ai.loop.Runner = .{
         .arena = arena,
         .transport = transport,
         .executor = executor,
@@ -1012,13 +1784,111 @@ fn askAModel(
             return 2;
         };
     }
+    if (options.compact_at.len > 0) {
+        budget.compaction.threshold = std.fmt.parseInt(usize, options.compact_at, 10) catch {
+            try w.print("\"{s}\" is not a number of bytes.\n", .{options.compact_at});
+            return 2;
+        };
+    }
 
-    const transcript = try runner.run(.{
+    // Continuing a run that stopped rather than starting again. The
+    // conversation is rebuilt from the log, which is the only complete account
+    // of what happened and the one that is hash-chained.
+    var earlier: ?[]const zag.ai.provider.Message = null;
+    if (options.resume_last) {
+        const rebuilt = zag.ai.@"resume".latest(arena, io, service.log, service.content) catch |err| switch (err) {
+            error.NoSuchRun => {
+                try w.writeAll("There is no earlier run in this workspace to carry on from.\n");
+                return 1;
+            },
+            else => return err,
+        };
+        var sentence: std.Io.Writer.Allocating = .init(arena);
+        try rebuilt.writeSentence(&sentence.writer);
+        try w.print("Carrying on: {s}\n", .{rebuilt.task});
+        // A resumed run with no new question would otherwise record an empty
+        // task, so the record — and every trajectory read out of it — would
+        // hold a run that appears to have been asked for nothing. It is
+        // continuing the earlier one, and says so.
+        if (question.items.len == 0) {
+            try question.appendSlice(arena, "Carrying on: ");
+            try question.appendSlice(arena, rebuilt.task);
+        }
+        try w.print("{s}\n\n", .{sentence.written()});
+        try w.flush();
+        earlier = rebuilt.messages;
+    }
+
+    const model = if (options.model.len > 0) options.model else defaultModel(connector);
+    if (model.len == 0) {
+        try w.print(
+            "zag knows how to reach {s} but not which model to ask it for.\nName one: zag ask --provider {s} --model <name> \"...\"\n",
+            .{ connector.id, connector.id },
+        );
+        return 2;
+    }
+
+    // Handing self-contained work to children, when it was asked for. The
+    // children run on this same runner and this same policy engine, so nothing
+    // a child decides is anything this run could not have decided; what they
+    // have of their own is a context, which is the entire point. See
+    // ai/swarm.zig for the bounds and why they are what they are.
+    var children: zag.ai.loop.Children = .{
+        .runner = &runner,
         .connector = connector,
-        .model = if (options.model.len > 0) options.model else defaultModel(connector),
+        .model = model,
+        .acting = context,
+        .budget = budget,
+        .together = options.together,
+    };
+    if (options.depth.len > 0) {
+        children.bounds.maxDepth = std.fmt.parseInt(usize, options.depth, 10) catch {
+            try w.print("\"{s}\" is not a number of levels.\n", .{options.depth});
+            return 2;
+        };
+    }
+
+    const asked: zag.ai.loop.Options = .{
+        .connector = connector,
+        .model = model,
         .system = agent_instructions,
         .budget = budget,
-    }, question.items, context);
+        .resuming = earlier,
+        .spawning = if (options.children)
+            .{ .spawner = children.spawner(), .bounds = children.bounds }
+        else
+            null,
+    };
+
+    var wanted: usize = 1;
+    if (options.best_of.len > 0) {
+        wanted = std.fmt.parseInt(usize, options.best_of, 10) catch {
+            try w.print("\"{s}\" is not a number of attempts.\n", .{options.best_of});
+            return 2;
+        };
+        if (wanted == 0) wanted = 1;
+    }
+
+    if (wanted > 1) {
+        return runSeveralTimes(
+            arena,
+            io,
+            w,
+            &service,
+            &recorder,
+            &runner,
+            asked,
+            question.items,
+            context,
+            connector,
+            model,
+            transport,
+            wanted,
+            options,
+        );
+    }
+
+    const transcript = try runner.run(asked, question.items, context);
 
     // The record is committed before anything is printed, so what a person
     // reads on screen is what the log already holds.
@@ -1370,6 +2240,7 @@ fn interactiveTerminal(
         .root = options.root,
         .actor = try personActor(arena, environment),
         .now = wallClock(io),
+        .environment = environment,
     }) catch {
         try w.print("zag could not open the workspace in {s}.\n", .{options.root});
         return 1;
@@ -1535,6 +2406,7 @@ fn runCommand(
         .root = options.root,
         .actor = try personActor(arena, environment),
         .now = wallClock(io),
+        .environment = environment,
     }) catch {
         try w.print("zag could not open the workspace in {s}.\n", .{options.root});
         return 1;
@@ -2207,4 +3079,62 @@ test "doctor points at a broken policy file before anything else" {
     var out: std.Io.Writer.Allocating = .init(arena);
     try writeNextStep(arena, &out.writer, loaded, false, &.{"ANTHROPIC_API_KEY=sk-ant-whatever"});
     try testing.expect(std.mem.indexOf(u8, out.written(), "cannot be used") != null);
+}
+
+test "what a command printed can be read back out of the record" {
+    if (!zag.terminal.pty.supported) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const root = ".zig-cache/tmp/show-output-test";
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, root);
+
+    // Record something with output worth reading back.
+    {
+        var out: std.Io.Writer.Allocating = .init(arena);
+        const status = try runCommand(arena, io, &out.writer, .{ .root = root }, &.{
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        });
+        _ = status;
+    }
+
+    var out: std.Io.Writer.Allocating = .init(arena);
+    const status = try showOutput(arena, io, &out.writer, .{ .root = root, .positional = &.{"nothing-was-recorded"} });
+    // Nothing matched, and that is said rather than shown as an empty screen.
+    try testing.expectEqual(@as(u8, 1), status);
+}
+
+test "showing output reassembles every piece, not just the last one" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The `chunked` variant exists because a fold once kept the last piece's
+    // hash beside the summed byte count. A reader that showed one piece and
+    // called it the output would be the same mistake from the other end, so
+    // the reassembly walks `pieces()` and the count is checked against the
+    // total the record claims.
+    const first = zag.core.hash.Hash.of("first half, ");
+    const second = zag.core.hash.Hash.of("second half");
+    const content: zag.workspace.block.ContentRef = .{ .chunked = .{
+        .chunks = &.{
+            .{ .hash = first, .byteCount = 12, .index = 0 },
+            .{ .hash = second, .byteCount = 11, .index = 1 },
+        },
+        .byteCount = 23,
+    } };
+
+    var single: [1]zag.workspace.block.Chunk = undefined;
+    const pieces = content.pieces(&single);
+    try testing.expectEqual(@as(usize, 2), pieces.len);
+    var summed: usize = 0;
+    for (pieces) |piece| summed += piece.byteCount;
+    try testing.expectEqual(content.totalBytes(), summed);
+    _ = arena;
 }
