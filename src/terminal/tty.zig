@@ -181,6 +181,7 @@ pub fn waitEither(tty_fd: posix.fd_t, pty_fd: posix.fd_t, timeout_ms: i32) Ready
 const testing = std.testing;
 
 test "a terminal that is not a terminal says so rather than failing" {
+    if (comptime !supported) return error.SkipZigTest; // raw mode is Linux-only
     // The test runner's standard input is not a terminal, which is exactly the
     // case that has to degrade politely.
     var tty = Tty.init();
