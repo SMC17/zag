@@ -163,6 +163,16 @@ pub const Attempt = struct {
     promptHash: hashing.Hash,
     /// Set once an answer arrived.
     status: ?u16 = null,
+    /// How many times the request was put on the wire.
+    ///
+    /// One normally. More means the provider was busy or unreachable and the
+    /// transport tried again, which is worth showing: a run that took four
+    /// seconds because it waited out a rate limit did not take four seconds to
+    /// think.
+    sends: usize = 0,
+    /// The status of each try that was not the last, in order. A zero means
+    /// nothing came back at all.
+    retried: []const u16 = &.{},
     completion: ?provider.Completion = null,
     /// Why the request could not be sent, when it could not be. Written in
     /// words rather than as an error name, because a person reading this is
@@ -321,6 +331,100 @@ pub const StreamingSender = struct {
     }
 };
 
+/// How a transport waits between tries.
+///
+/// Injected rather than called directly so a test can assert the schedule
+/// without spending eight seconds proving it. The real one sleeps; the one in
+/// the tests records what it was asked to wait for and returns.
+pub const Waiter = struct {
+    context: *anyopaque,
+    waitFn: *const fn (context: *anyopaque, nanoseconds: u64) void,
+
+    pub fn wait(self: Waiter, nanoseconds: u64) void {
+        self.waitFn(self.context, nanoseconds);
+    }
+};
+
+/// A waiter that really sleeps.
+///
+/// The only implementation that costs wall-clock time, and the only one used
+/// outside a test.
+pub const SleepingWaiter = struct {
+    io: std.Io,
+
+    pub fn waiter(self: *SleepingWaiter) Waiter {
+        return .{ .context = self, .waitFn = sleep };
+    }
+
+    fn sleep(context: *anyopaque, nanoseconds: u64) void {
+        const self: *SleepingWaiter = @ptrCast(@alignCast(context));
+        // A failure to sleep is not worth failing a request over: the worst it
+        // does is try again sooner than intended.
+        const duration: std.Io.Clock.Duration = .{
+            .raw = .{ .nanoseconds = @intCast(nanoseconds) },
+            .clock = .awake,
+        };
+        duration.sleep(self.io) catch {};
+    }
+};
+
+/// How many times to try, and how long to wait in between.
+///
+/// A provider saying 429 or 503 is not an error in the run — it is the normal
+/// way a shared service says "not right now". Ending an agent's work because
+/// one request arrived during someone else's burst throws away everything done
+/// so far for a condition that clears in a second.
+pub const Retry = struct {
+    /// Total sends, not retries: 1 disables it.
+    attempts: usize = 3,
+    firstDelay: u64 = 500 * std.time.ns_per_ms,
+    maxDelay: u64 = 8 * std.time.ns_per_s,
+
+    /// Whether a status is worth trying again.
+    ///
+    /// Only the ones that can come out differently. A 400 or a 422 is this
+    /// request being wrong and will be wrong the second time; a 401 or a 403
+    /// is the credential, and retrying it turns one refusal into three. The
+    /// difference matters more than the retry: a client that retries
+    /// everything is a client that takes three times as long to tell you your
+    /// key is invalid.
+    pub fn worthRetrying(status: u16) bool {
+        return switch (status) {
+            // Timed out, or asked to slow down.
+            408, 425, 429 => true,
+            // The far side is broken or busy, not the request.
+            500, 502, 503, 504, 529 => true,
+            else => false,
+        };
+    }
+
+    /// How long to wait before try number `attempt`, counting from 1.
+    ///
+    /// Doubling, capped, with jitter taken from the prompt's own hash. Jitter
+    /// matters because a fleet of agents that all back off by exactly 500 ms
+    /// re-collide at 500 ms; taking it from the hash keeps it spread across
+    /// requests while staying identical for the same request, so a replay of a
+    /// recorded run waits exactly as the original did.
+    pub fn delayFor(self: Retry, attempt: usize, seed: hashing.Hash) u64 {
+        if (attempt == 0) return 0;
+        // Doubled by multiplying rather than shifting, so a large attempt
+        // number saturates at the cap instead of shifting the delay to zero.
+        var base = self.firstDelay;
+        var doublings = @min(attempt - 1, 32);
+        while (doublings > 0) : (doublings -= 1) {
+            if (base >= self.maxDelay) break;
+            base *|= 2;
+        }
+        base = @min(base, self.maxDelay);
+        // Up to a quarter more, never less: waiting slightly longer is always
+        // safe, and waiting less than asked defeats the point.
+        const spread = base / 4;
+        if (spread == 0) return base;
+        const from_hash = std.mem.readInt(u64, seed.bytes[0..8], .little);
+        return base + (from_hash +% attempt) % spread;
+    }
+};
+
 pub const Transport = struct {
     arena: std.mem.Allocator,
     engine: *policy_mod.Engine,
@@ -349,6 +453,11 @@ pub const Transport = struct {
     /// address, and whether a local model is still local. Optional for the same
     /// reason the redactor is, and set on every path that reaches a provider.
     guard: ?netguard.Guard = null,
+    /// How many times a transient failure is tried again, and how long apart.
+    retry: Retry = .{},
+    /// What to wait with. Unset means no waiting, which also means no retry:
+    /// trying again immediately is not a retry, it is the same failure twice.
+    waiter: ?Waiter = null,
 
     /// Decide, then send, then wait for the whole answer.
     pub fn send(
@@ -358,12 +467,26 @@ pub const Transport = struct {
         context: policy_mod.Context,
         attempt: *Attempt,
     ) Error!provider.Completion {
+        // Decided once. A retry is the same request going out again, not a new
+        // thing to decide about, and re-deciding would put three identical
+        // decisions in the record for one action.
         const http = try self.gate(connector, request, context, attempt);
-        const response = self.sender.send(self.arena, http) catch |err| {
-            attempt.sendProblem = sendProblemText(err, connector.locality == .local);
-            return error.SendFailed;
+
+        var tries: usize = 0;
+        const response = while (true) {
+            tries += 1;
+            const outcome = self.sender.send(self.arena, http) catch |err| {
+                attempt.sends = tries;
+                if (self.shouldTryAgain(tries, null, attempt)) continue;
+                attempt.sendProblem = sendProblemText(err, connector.locality == .local);
+                return error.SendFailed;
+            };
+            attempt.sends = tries;
+            attempt.status = outcome.status;
+            if (outcome.ok()) break outcome;
+            if (self.shouldTryAgain(tries, outcome.status, attempt)) continue;
+            break outcome;
         };
-        attempt.status = response.status;
 
         if (!response.ok()) {
             attempt.providerError = messageIn(response.body);
@@ -375,6 +498,27 @@ pub const Transport = struct {
         };
         attempt.completion = completion;
         return completion;
+    }
+
+    /// Whether to send again, and wait if so.
+    ///
+    /// `status` is null when nothing came back at all — a connection refused or
+    /// reset, which is the same kind of transient as a 503 and is retried the
+    /// same way. Every try is recorded, because a run that took four seconds
+    /// because the provider was busy should not read as a run that took four
+    /// seconds to think.
+    fn shouldTryAgain(self: Transport, tries: usize, status: ?u16, attempt: *Attempt) bool {
+        const waiter = self.waiter orelse return false;
+        if (tries >= self.retry.attempts) return false;
+        if (status) |code| {
+            if (!Retry.worthRetrying(code)) return false;
+        }
+        attempt.retried = std.mem.concat(self.arena, u16, &.{
+            attempt.retried,
+            &.{status orelse 0},
+        }) catch return false;
+        waiter.wait(self.retry.delayFor(tries, attempt.promptHash));
+        return true;
     }
 
     /// Decide, then send, and hand back each piece of the answer as it lands.
@@ -860,6 +1004,22 @@ const answer =
     \\ "stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}
 ;
 
+/// A waiter that records what it was asked to wait for and returns at once,
+/// so a test can assert the schedule without spending eight seconds on it.
+const CountingWaiter = struct {
+    arena: std.mem.Allocator,
+    waits: std.ArrayList(u64) = .empty,
+
+    fn waiter(self: *CountingWaiter) Waiter {
+        return .{ .context = self, .waitFn = record };
+    }
+
+    fn record(context: *anyopaque, nanoseconds: u64) void {
+        const self: *CountingWaiter = @ptrCast(@alignCast(context));
+        self.waits.append(self.arena, nanoseconds) catch {};
+    }
+};
+
 const Fixture = struct {
     arena_state: std.heap.ArenaAllocator,
     engine: policy_mod.Engine,
@@ -899,6 +1059,15 @@ const Fixture = struct {
             .sender = self.recorded.sender(),
             .credentials = credentials,
         };
+    }
+
+    /// The same transport, but able to wait — and so to retry. The waiter
+    /// records what it was asked to wait for and returns at once, so a test
+    /// can assert the schedule without spending it.
+    fn retryingTransport(self: *Fixture, waiter: *CountingWaiter) Transport {
+        var out = self.transport(with_key);
+        out.waiter = waiter.waiter();
+        return out;
     }
 
     fn context(self: *Fixture) policy_mod.Context {
@@ -1488,3 +1657,151 @@ const anthropic_sse =
     "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}\n\n" ++
     "event: message_stop\n" ++
     "data: {\"type\":\"message_stop\"}\n\n";
+
+const busy_body =
+    \\{"error":{"type":"overloaded_error","message":"slow down"}}
+;
+
+test "a provider saying it is busy is asked again, not given up on" {
+    // 429 and 503 are the normal way a shared service says "not right now".
+    // Ending an agent's work because one request landed in someone else's
+    // burst throws away everything done so far for a condition that clears in
+    // a second.
+    const fixture = try Fixture.init(&allow_everything, &.{
+        .{ .status = 429, .body = busy_body },
+        .{ .status = 503, .body = busy_body },
+        .{ .status = 200, .body = answer },
+    });
+    defer fixture.deinit();
+    var waiter: CountingWaiter = .{ .arena = fixture.arena() };
+
+    var attempt: Attempt = undefined;
+    const completion = try fixture.retryingTransport(&waiter).send(
+        catalog.find("anthropic").?,
+        ask(),
+        fixture.context(),
+        &attempt,
+    );
+    try testing.expectEqualStrings("Four.", try completion.text(fixture.arena()));
+
+    // Three sends, two of them retries, and the record says which.
+    try testing.expectEqual(@as(usize, 3), attempt.sends);
+    try testing.expectEqual(@as(usize, 2), attempt.retried.len);
+    try testing.expectEqual(@as(u16, 429), attempt.retried[0]);
+    try testing.expectEqual(@as(u16, 503), attempt.retried[1]);
+    try testing.expectEqual(@as(u16, 200), attempt.status.?);
+
+    // It waited, and waited longer the second time.
+    try testing.expectEqual(@as(usize, 2), waiter.waits.items.len);
+    try testing.expect(waiter.waits.items[1] > waiter.waits.items[0]);
+}
+
+test "a refusal that will not change is not retried into three refusals" {
+    // An invalid key is invalid the third time too. A client that retries
+    // everything takes three times as long to say what is wrong, and spends
+    // two extra requests doing it.
+    for ([_]u16{ 400, 401, 403, 404, 422 }) |code| {
+        const fixture = try Fixture.init(&allow_everything, &.{.{ .status = code, .body = busy_body }});
+        defer fixture.deinit();
+        var waiter: CountingWaiter = .{ .arena = fixture.arena() };
+
+        var attempt: Attempt = undefined;
+        try testing.expectError(error.ProviderRejected, fixture.retryingTransport(&waiter).send(
+            catalog.find("anthropic").?,
+            ask(),
+            fixture.context(),
+            &attempt,
+        ));
+        try testing.expectEqual(@as(usize, 1), attempt.sends);
+        try testing.expectEqual(@as(usize, 0), waiter.waits.items.len);
+    }
+}
+
+test "a provider that stays busy gives up, and the record says how often it tried" {
+    const fixture = try Fixture.init(&allow_everything, &.{
+        .{ .status = 503, .body = busy_body },
+        .{ .status = 503, .body = busy_body },
+        .{ .status = 503, .body = busy_body },
+    });
+    defer fixture.deinit();
+    var waiter: CountingWaiter = .{ .arena = fixture.arena() };
+
+    var attempt: Attempt = undefined;
+    try testing.expectError(error.ProviderRejected, fixture.retryingTransport(&waiter).send(
+        catalog.find("anthropic").?,
+        ask(),
+        fixture.context(),
+        &attempt,
+    ));
+    // Bounded: a retry that never stops is a hang with extra steps.
+    try testing.expectEqual(@as(usize, 3), attempt.sends);
+    try testing.expectEqual(@as(usize, 2), waiter.waits.items.len);
+}
+
+test "a retry is one request going out again, not a new thing to decide" {
+    const fixture = try Fixture.init(&allow_everything, &.{
+        .{ .status = 429, .body = busy_body },
+        .{ .status = 200, .body = answer },
+    });
+    defer fixture.deinit();
+    var waiter: CountingWaiter = .{ .arena = fixture.arena() };
+
+    var attempt: Attempt = undefined;
+    _ = try fixture.retryingTransport(&waiter).send(
+        catalog.find("anthropic").?,
+        ask(),
+        fixture.context(),
+        &attempt,
+    );
+
+    // Two sends, one set of decisions. Deciding again per try would put two
+    // identical decisions in the record for one action, and a person reading
+    // it would see two requests where the policy allowed one.
+    try testing.expectEqual(@as(usize, 2), attempt.sends);
+    try testing.expectEqual(@as(usize, 3), attempt.decisions.len);
+}
+
+test "without a waiter there is no retry, because there is no waiting" {
+    // Trying again immediately is not a retry; it is the same failure twice,
+    // arriving at the busy provider in the same millisecond.
+    const fixture = try Fixture.init(&allow_everything, &.{
+        .{ .status = 503, .body = busy_body },
+        .{ .status = 200, .body = answer },
+    });
+    defer fixture.deinit();
+
+    var attempt: Attempt = undefined;
+    try testing.expectError(error.ProviderRejected, fixture.transport(with_key).send(
+        catalog.find("anthropic").?,
+        ask(),
+        fixture.context(),
+        &attempt,
+    ));
+    try testing.expectEqual(@as(usize, 1), attempt.sends);
+}
+
+test "the wait doubles, is capped, and is spread so clients do not re-collide" {
+    const retry: Retry = .{ .firstDelay = 100, .maxDelay = 1000 };
+    const seed = hashing.Hash.of("a prompt");
+
+    try testing.expect(retry.delayFor(1, seed) >= 100);
+    try testing.expect(retry.delayFor(2, seed) >= 200);
+    try testing.expect(retry.delayFor(3, seed) >= 400);
+
+    // Capped however many times it is asked. A large attempt number has to
+    // saturate rather than shift the delay away to nothing.
+    try testing.expect(retry.delayFor(40, seed) >= 1000);
+    try testing.expect(retry.delayFor(40, seed) <= 1000 + 1000 / 4);
+
+    // Spread: a fleet that all backed off by exactly 500 ms would re-collide
+    // at 500 ms. Taking the jitter from the prompt's hash spreads it across
+    // requests while keeping it identical for the same request, so a replay of
+    // a recorded run waits exactly as the original did.
+    const other = hashing.Hash.of("a different prompt");
+    try testing.expect(retry.delayFor(2, seed) != retry.delayFor(2, other));
+    try testing.expectEqual(retry.delayFor(2, seed), retry.delayFor(2, seed));
+
+    // Never less than asked: longer is safe, shorter defeats the point.
+    try testing.expect(retry.delayFor(1, other) >= 100);
+    try testing.expect(retry.delayFor(1, other) <= 125);
+}

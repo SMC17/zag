@@ -149,8 +149,7 @@
         }
       },
       "required": [
-        "argv",
-        "workingDirectory"
+        "argv"
       ],
       "additionalProperties": false
     },
@@ -200,6 +199,9 @@
         "path": {
           "type": "string"
         },
+        "contents": {
+          "type": "string"
+        },
         "contentHash": {
           "type": "string"
         },
@@ -212,9 +214,7 @@
         }
       },
       "required": [
-        "path",
-        "contentHash",
-        "byteCount"
+        "path"
       ],
       "additionalProperties": false
     },
@@ -251,8 +251,7 @@
         }
       },
       "required": [
-        "query",
-        "root"
+        "query"
       ],
       "additionalProperties": false
     },
@@ -270,8 +269,7 @@
         }
       },
       "required": [
-        "operation",
-        "repository"
+        "operation"
       ],
       "additionalProperties": false
     },
@@ -315,15 +313,10 @@
         },
         "request": {
           "type": "string"
-        },
-        "policy": {
-          "type": "string"
         }
       },
       "required": [
-        "label",
-        "request",
-        "policy"
+        "request"
       ],
       "additionalProperties": false
     },
