@@ -2,6 +2,10 @@
 
 **[Status](STATUS.md) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/SMC17/zag/issues) · [All SMC17 work](https://github.com/users/SMC17/projects/16)**
 
+[![CI](https://github.com/SMC17/zag/actions/workflows/ci.yml/badge.svg)](https://github.com/SMC17/zag/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Zig: 0.16](https://img.shields.io/badge/Zig-0.16-orange.svg)](https://ziglang.org/)
+
 A workbench where people and agents do engineering work in one recorded
 workspace.
 
@@ -52,7 +56,10 @@ graph, an audit trail and an agent's context are all views of the same events.
 
 ## Build it
 
-```
+```sh
+# Requires Zig 0.16.0
+git clone https://github.com/SMC17/zag.git
+cd zag
 zig build test     # run every test
 zig build          # build the tools
 zig build check    # run the tests, then audit this repository
