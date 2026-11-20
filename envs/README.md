@@ -44,7 +44,14 @@ harbor run -p zig-016-port -a oracle
 python3 -I scripts/passrate.py jobs/<job-dir>             # pass rate over trials where the agent actually ran
 python3 -I scripts/run_agents.py codex --model openai/<model> --env CODEX_FORCE_AUTH_JSON=1   # every task, 3 attempts
 scripts/schedule_passrates.sh                             # same, as a daily launchd job until a run has valid trials
+scripts/agy_token.sh && python3 -I scripts/run_agents.py agy_oauth:AgyOAuth --model gemini/claude-opus-4-6-thinking --env PYTHONPATH=$PWD/agents
 ```
+
+`agents/agy_oauth.py` runs the Antigravity CLI with your own agy sign-in instead of an API key.
+On Linux, agy reads its token from `~/.gemini/antigravity-cli/antigravity-oauth-token`.
+`scripts/agy_token.sh` exports the token from the macOS keychain to a 0600 file on the host.
+Individual-plan quotas are small: on 2026-11-20, three parallel Opus 4.6 trials used up the
+weekly quota in about two minutes, so treat this as a smoke-test path, not a benchmark budget.
 
 `passrate.py` excludes trials where the agent never acted, such as a usage limit, a missing
 model name or a failed install. Harbor scores those as 0, which would make a task look harder
