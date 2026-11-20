@@ -1,0 +1,8 @@
+== session 1
+OK
+BYE
+== session 2
+NOTFOUND
+VALUE 1
+BYE
+SERVER_EXIT 0

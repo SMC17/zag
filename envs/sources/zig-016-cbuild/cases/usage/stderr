@@ -1,0 +1,1 @@
+usage: cbase enc|dec|crc FILE   (FILE may be - for stdin)

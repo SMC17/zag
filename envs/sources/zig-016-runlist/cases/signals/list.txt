@@ -1,0 +1,3 @@
+sh -c kill${IFS}-TERM${IFS}$$
+sh -c kill${IFS}-KILL${IFS}$$
+echo survived

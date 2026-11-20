@@ -1,0 +1,4 @@
+1 signal=15 sh -c kill${IFS}-TERM${IFS}$$
+2 signal=9 sh -c kill${IFS}-KILL${IFS}$$
+3 exit=0 out=9 err=0 lines=1 echo survived
+RAN 3 FAILED 2

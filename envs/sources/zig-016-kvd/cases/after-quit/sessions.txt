@@ -1,0 +1,7 @@
+SET a 1
+QUIT
+SET b 2
+---
+GET b
+GET a
+SHUTDOWN

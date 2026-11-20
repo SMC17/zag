@@ -1,0 +1,14 @@
+== session 1
+OK
+ERR bad key
+OK
+ERR bad value
+VALUE xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+ERR unknown command
+ERR unknown command
+ERR usage: GET <key>
+BYE
+== session 2
+COUNT 2
+BYE
+SERVER_EXIT 0

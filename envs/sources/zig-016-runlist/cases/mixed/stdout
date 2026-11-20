@@ -1,0 +1,8 @@
+1 exit=0 out=12 err=0 lines=1 echo hello world
+2 exit=0 out=6 err=0 lines=3 printf a\nb\nc\n
+3 exit=0 out=10 err=0 lines=0 printf no-newline
+4 exit=3 out=0 err=4 lines=0 sh -c printf${IFS}oops>&2;exit${IFS}3
+5 exit=0 out=0 err=0 lines=0 true
+6 exit=1 out=0 err=0 lines=0 false
+7 exit=0 out=12 err=0 lines=1 echo many spaces
+RAN 7 FAILED 2
