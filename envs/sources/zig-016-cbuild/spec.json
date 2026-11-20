@@ -1,0 +1,6 @@
+{"name": "zig-016-cbuild", "lib": "cbase",
+ "description": "Port a Zig 0.15.2 project that builds and links a C static library to Zig 0.16.0",
+ "app": "app", "solution": "solution", "hidden_test": "hidden_test.zig", "cases": "cases",
+ "instruction": "instruction.md", "hacks": "hacks", "readme": "readme.md", "gen_cases": "gen_cases.py",
+ "post_build": "post_build.sh",
+ "lib_pre": "-I \"$W/agent/c\" \"$W/agent\"/c/*.c"}

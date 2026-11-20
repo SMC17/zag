@@ -1,0 +1,30 @@
+schema_version = "1.4"
+
+[[artifacts]]
+source = "/app"
+exclude = [".zig-cache", "zig-out"]
+
+[task]
+name = "sunlitmoon/zig-016-cbuild"
+version = "0.1.0"
+description = "Port a Zig 0.15.2 project that builds and links a C static library to Zig 0.16.0"
+keywords = ["zig", "migration", "systems", "software-engineering"]
+[[task.authors]]
+name = "SMC17"
+
+[metadata]
+difficulty = "medium"
+category = "software-engineering"
+
+[verifier]
+timeout_sec = 900.0
+environment_mode = "separate"
+network_mode = "no-network"
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 900.0
+os = "linux"

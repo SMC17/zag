@@ -1,0 +1,21 @@
+SET greeting hello world
+GET greeting
+GET missing
+COUNT
+BOGUS
+SET onlykey
+GET
+QUIT
+---
+GET greeting
+SET greeting   spaced  value 
+GET greeting
+DEL greeting
+DEL greeting
+COUNT
+QUIT
+---
+
+  
+COUNT
+SHUTDOWN

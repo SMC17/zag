@@ -58,6 +58,17 @@ def run(task: pathlib.Path, agent: str, name: str, jobs_root: pathlib.Path, hack
             "seconds": round(time.time() - t0, 1), "verifier_details": details.strip().splitlines()[-3:]}
 
 
+def prebuild(task: pathlib.Path):
+    """Build the agent and verifier images with plain `docker build` first. On this machine
+    (Docker 29 / OrbStack) a cold `docker compose build`, which Harbor runs, can hang
+    indefinitely; a warm BuildKit cache avoids it, and failures here are reported clearly."""
+    for ctx in (task / "environment", task / "tests"):
+        if (ctx / "Dockerfile").exists():
+            p = subprocess.run(["docker", "build", "-q", str(ctx)], capture_output=True, text=True, timeout=1800)
+            if p.returncode != 0:
+                sys.exit(f"docker build {ctx} failed:\n{p.stderr[-2000:]}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("task"); ap.add_argument("--jobs", type=int, default=3)
@@ -66,6 +77,7 @@ def main():
     task = pathlib.Path(a.task).resolve()
     jobs_root = task.parent / "jobs" / f"soundness-{task.name}-{time.strftime('%Y%m%dT%H%M%S')}"
     jobs_root.mkdir(parents=True)
+    prebuild(task)
 
     plan = [("oracle", "oracle", None, 1.0), ("nop", "nop", None, 0.0)]
     for h in sorted((task / "audit" / "hacks").glob("*.sh")):

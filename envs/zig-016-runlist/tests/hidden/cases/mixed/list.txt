@@ -1,0 +1,9 @@
+# a comment
+
+echo hello world
+printf a\nb\nc\n
+  printf	no-newline  
+sh -c printf${IFS}oops>&2;exit${IFS}3
+true
+false
+echo   many    spaces

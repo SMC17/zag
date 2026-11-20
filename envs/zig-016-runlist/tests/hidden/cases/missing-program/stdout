@@ -1,0 +1,4 @@
+1 exit=0 out=7 err=0 lines=1 echo before
+2 spawn_error=FileNotFound no-such-program --flag
+3 exit=0 out=6 err=0 lines=1 echo after
+RAN 3 FAILED 1

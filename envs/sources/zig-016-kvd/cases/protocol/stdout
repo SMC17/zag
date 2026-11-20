@@ -1,0 +1,21 @@
+== session 1
+OK
+VALUE hello world
+NOTFOUND
+COUNT 1
+ERR unknown command
+ERR usage: SET <key> <value>
+ERR usage: GET <key>
+BYE
+== session 2
+VALUE hello world
+OK
+VALUE spaced  value
+DELETED
+NOTFOUND
+COUNT 0
+BYE
+== session 3
+COUNT 0
+BYE
+SERVER_EXIT 0

@@ -1,0 +1,3 @@
+echo before
+no-such-program --flag
+echo after
