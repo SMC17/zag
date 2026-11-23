@@ -18,6 +18,10 @@ case "${1:-}" in
   rm -f "$PLIST"; echo "removed $LABEL"; exit 0 ;;
 --run)
   cd "$ENVS"
+  # launchd runs this through `bash -l`, which rebuilds PATH from the login profile and can drop ~/.local/bin, where
+  # `uv tool install` puts harbor (every run from 2026-11-20 to 11-23 failed with "No such file: 'harbor'").
+  export PATH="$HOME/.local/bin:$PATH"
+  command -v harbor >/dev/null || { echo "schedule_passrates: harbor not on PATH ($PATH)" >&2; exit 2; }
   MODEL="$(sed -n 's/^model *= *"\(.*\)"/\1/p' "$HOME/.codex/config.toml" | head -1)"
   set +e
   CODEX_FORCE_AUTH_JSON=1 python3 -I scripts/run_agents.py codex --model "openai/${MODEL:-gpt-6.1-sol}" \
